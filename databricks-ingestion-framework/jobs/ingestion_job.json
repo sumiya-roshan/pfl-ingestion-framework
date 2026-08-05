@@ -8,17 +8,23 @@
     "  REPLACE_WITH_REPO_PATH : e.g. /Repos/data-eng/databricks-ingestion-framework",
     "  REPLACE_WITH_NODE_TYPE : e.g. i3.xlarge (AWS) or Standard_DS3_v2 (Azure)",
     "",
-    "Pipeline name filter:",
-    "  The Databricks Job 'name' (generic_source_to_bronze_ingestion) is auto-detected",
-    "  in list_active_sources.py and matched against ingestion_config.pipeline_name.",
-    "  Only rows with matching pipeline_name are ingested in this job run.",
+    "How it works:",
+    "  main/main.py is a SINGLE task. It accepts a source system filter",
+    "  (source_system_id OR source_name OR source_type) and internally discovers",
+    "  all ingestion_object_ids under that source, then runs them in parallel.",
+    "  pipeline_name is auto-detected from this Job's name and used to further",
+    "  filter ingestion_config.pipeline_name.",
+    "",
+    "  One Databricks Job = one source system.",
+    "  To run multiple source systems, create one Job per source (each with a",
+    "  different source_system_id or source_name) and schedule them independently.",
     "",
     "Table name overrides (leave blank to use framework defaults from config_manager.py):",
     "  source_system_table    : migration_x_catalog.pfl_x_schema.config_source_system",
     "  ingestion_config_table : migration_x_catalog.pfl_x_schema.ingestion_config",
     "  audit_table            : main.monitoring.data_pipeline_execution_master",
     "",
-    "delta_layer is now read from ingestion_config.delta_layer — not a job parameter.",
+    "delta_layer is read from ingestion_config.delta_layer per object — not a job parameter.",
     "landing_volume_path is a job parameter — set it to your S3/Volume base path."
   ],
 
@@ -26,29 +32,34 @@
 
   "parameters": [
     {
-      "name": "source_type_filter",
-      "default": "",
-      "description": "Source type filter (e.g. POSTGRES). Leave blank for all."
-    },
-    {
       "name": "source_system_id",
       "default": "",
-      "description": "Filter by source_system_id (integer). Leave blank for all."
+      "description": "Source system PK (integer). Set this OR source_name — not both."
     },
     {
       "name": "source_name",
       "default": "",
-      "description": "Filter by source system name (e.g. PG_TEST_RDS). Leave blank for all."
+      "description": "Source system name (e.g. PG_TEST_RDS). Set this OR source_system_id — not both."
+    },
+    {
+      "name": "source_type",
+      "default": "",
+      "description": "Additional filter by source type (e.g. POSTGRES). Leave blank for all types."
     },
     {
       "name": "landing_volume_path",
       "default": "",
-      "description": "Base S3/Volume path for raw landing (e.g. s3://pfl-raw/landing). Leave blank to skip landing write."
+      "description": "Base S3/Volume path for raw landing (e.g. s3://pfl-raw/landing). Leave blank to skip."
     },
     {
       "name": "environment",
       "default": "prod",
       "description": "Logging environment: dev | uat | prod"
+    },
+    {
+      "name": "max_parallel",
+      "default": "4",
+      "description": "Number of tables to ingest concurrently within this job run."
     }
   ],
 
@@ -71,47 +82,30 @@
 
   "tasks": [
     {
-      "_comment": "Task 1: query ingestion_config filtered by pipeline_name (auto-detected as this Job's name) and publish ingestion_object_ids as a task value",
-      "task_key": "list_active_objects",
+      "_comment": [
+        "Single task: discovers all ingestion objects for the given source system",
+        "and runs them in parallel using a ThreadPoolExecutor.",
+        "pipeline_name is auto-detected from this Job's name."
+      ],
+      "task_key": "run_source_ingestion",
       "job_cluster_key": "ingestion_cluster",
       "notebook_task": {
-        "notebook_path": "REPLACE_WITH_REPO_PATH/main/list_active_sources",
+        "notebook_path": "REPLACE_WITH_REPO_PATH/main/main",
         "base_parameters": {
-          "source_type_filter":     "{{job.parameters.source_type_filter}}",
           "source_system_id":       "{{job.parameters.source_system_id}}",
           "source_name":            "{{job.parameters.source_name}}",
+          "source_type":            "{{job.parameters.source_type}}",
+          "landing_volume_path":    "{{job.parameters.landing_volume_path}}",
+          "environment":            "{{job.parameters.environment}}",
+          "max_parallel":           "{{job.parameters.max_parallel}}",
+          "trigger_type":           "SCHEDULED",
           "source_system_table":    "",
-          "ingestion_config_table": ""
+          "ingestion_config_table": "",
+          "audit_table":            ""
         }
-      }
-    },
-    {
-      "_comment": "Task 2: fan-out — one notebook run per ingestion_object_id from Task 1. delta_layer comes from ingestion_config.delta_layer (not a parameter here).",
-      "task_key": "ingest_each_object",
-      "depends_on": [{ "task_key": "list_active_objects" }],
-      "for_each_task": {
-        "inputs": "{{tasks.list_active_objects.values.ingestion_object_ids}}",
-        "concurrency": 5,
-        "task": {
-          "task_key": "ingest_object",
-          "job_cluster_key": "ingestion_cluster",
-          "notebook_task": {
-            "notebook_path": "REPLACE_WITH_REPO_PATH/main/main",
-            "base_parameters": {
-              "ingestion_object_id":    "{{input}}",
-              "landing_volume_path":    "{{job.parameters.landing_volume_path}}",
-              "environment":            "{{job.parameters.environment}}",
-              "trigger_type":           "SCHEDULED",
-              "source_system_table":    "",
-              "ingestion_config_table": "",
-              "audit_table":            ""
-            }
-          },
-          "timeout_seconds": 3600,
-          "max_retries": 1,
-          "retry_on_timeout": false
-        }
-      }
+      },
+      "timeout_seconds": 14400,
+      "max_retries": 0
     }
   ],
 
