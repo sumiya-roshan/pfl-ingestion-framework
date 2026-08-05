@@ -91,7 +91,7 @@ class SftpConnector(BaseConnector):
         glob_chars = {"*", "?", "[", "]"}
         if any(c in obj_name for c in glob_chars):
             return obj_name
-        return ss.sftp_file_pattern or "*"
+        return "*"
 
     def _resolve_staging_dir(self) -> str:
         """Return the local staging directory for downloaded files."""
@@ -118,7 +118,7 @@ class SftpConnector(BaseConnector):
 
     def _load_files(self, local_paths: List[str]) -> DataFrame:
         """Load downloaded files into a Spark DataFrame based on file_format."""
-        fmt = (self.ingest_obj.file_format or "csv").lower()
+        fmt = (self.ingest_obj.file_format or self.source_system.sftp_file_format or "csv").lower()
         reader = self.spark.read
 
         if fmt == "csv":

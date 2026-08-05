@@ -55,8 +55,8 @@ class MongoConnector(BaseConnector):
         enc_user = quote_plus(username)
         enc_pass = quote_plus(password)
 
-        if ss.connection_uri:
-            uri = ss.connection_uri
+        if ss.nosql_connection_uri:
+            uri = ss.nosql_connection_uri
             if "{username}" in uri or "{password}" in uri:
                 return uri.format(username=enc_user, password=enc_pass)
             # Assume the URI already contains credentials (e.g. injected at provisioning)
@@ -66,8 +66,6 @@ class MongoConnector(BaseConnector):
         host = ss.host or "localhost"
         port = ss.port or 27017
         options = "retryWrites=true&w=majority"
-        if ss.nosql_replica_set:
-            options += f"&replicaSet={ss.nosql_replica_set}"
         return f"mongodb://{enc_user}:{enc_pass}@{host}:{port}/?{options}"
 
     def _resolve_database(self) -> str:
@@ -75,7 +73,7 @@ class MongoConnector(BaseConnector):
         MongoDB database name.
         source_schema from ingestion_config overrides database_name from source_system.
         """
-        return self.ingest_obj.source_schema or self.source_system.database_name or ""
+        return self.ingest_obj.source_schema or self.source_system.nosql_database or ""
 
     def _resolve_collection(self) -> str:
         """
@@ -88,7 +86,7 @@ class MongoConnector(BaseConnector):
         # Use source_object_name unless it is the generic placeholder token
         if io.source_object_name and io.source_object_name != "__default__":
             return io.source_object_name
-        return ss.nosql_collection_name or ""
+        return ss.nosql_collection or ""
 
     def _build_aggregation_pipeline(self, watermark_start: Optional[str]) -> Optional[str]:
         """

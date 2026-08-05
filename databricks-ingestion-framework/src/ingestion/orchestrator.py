@@ -146,23 +146,26 @@ class IngestionOrchestrator:
         """
         ingest_obj  = self.config_mgr.get_ingestion_object(ingestion_object_id)
         source_sys  = self.config_mgr.get_source_system(ingest_obj.source_system_id)
+        pipeline_name = ingest_obj.pipeline_name or self.pipeline_name
+        delta_layer = ingest_obj.target_medallion_layer or self.delta_layer
 
         watermark_start = self._resolve_watermark(ingest_obj)
 
         run_id = self.audit.start_run(
             ingestion_object_id = ingestion_object_id,
             source_name         = source_sys.source_name,
-            pipeline_name       = self.pipeline_name,
+            pipeline_name       = pipeline_name,
             load_type           = ingest_obj.load_type,
             source_schema       = ingest_obj.source_schema,
             source_table        = ingest_obj.source_object_name,
             target_schema       = ingest_obj.target_schema,
             target_table        = ingest_obj.target_table,
-            delta_layer         = self.delta_layer,
+            delta_layer         = delta_layer,
             trigger_id          = job_run_id,
             trigger_name        = job_run_id,
             business_date       = business_date,
         )
+        
 
         logger.info(
             f"[{run_id}] START ingestion_object_id={ingestion_object_id} "

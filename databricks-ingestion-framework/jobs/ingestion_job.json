@@ -16,6 +16,13 @@
   ],
 
   "name": "generic_source_to_bronze_ingestion",
+  "parameters": [
+    {
+      "name": "source_type_filter",
+      "default": "",
+      "description": "Source type to run, e.g. POSTGRES, MYSQL, ORACLE. Leave blank for all active sources."
+    }
+  ],
   "tags": {
     "team": "data-engineering",
     "framework": "config-driven-ingestion"
@@ -41,7 +48,7 @@
       "notebook_task": {
         "notebook_path": "REPLACE_WITH_REPO_PATH/notebooks/list_active_sources",
         "base_parameters": {
-          "source_type_filter":     "",
+          "source_type_filter":     "{{job.parameters.source_type_filter}}",
           "source_system_table":    "",
           "ingestion_config_table": ""
         }
