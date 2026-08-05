@@ -175,7 +175,7 @@ class IngestionOrchestrator:
         try:
             connector = get_connector(self.spark, source_sys, ingest_obj, self.secrets)
             df, watermark_end = connector.extract(watermark_start)
-            df.cache()
+            # df.cache()
             rows_read = df.count()
 
             rows_copied  = 0
@@ -220,7 +220,7 @@ class IngestionOrchestrator:
                 rows_deleted = rows_deleted,
             )
             logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
-            df.unpersist()
+            # df.unpersist()
             return {"run_id": run_id, "status": "SUCCESS", "rows_read": rows_read}
 
         except Exception as exc:

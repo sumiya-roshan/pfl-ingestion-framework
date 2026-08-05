@@ -65,7 +65,7 @@ orchestrator = IngestionOrchestrator(
     source_system_table    = source_system_table,
     ingestion_config_table = ingestion_config_table,
     # audit_table            = audit_table,
-    json_file_path         = config_file_path,
+    # json_file_path         = config_file_path,
 )
 
 result = orchestrator.run(
@@ -73,10 +73,6 @@ result = orchestrator.run(
     job_run_id          = job_run_id,
 )
 print(result)
-
-# COMMAND ----------
-
-# display(dbutils.secrets.listScopes())
 
 # COMMAND ----------
 
