@@ -10,7 +10,7 @@ Default table locations
 -----------------------
   SOURCE_SYSTEM_TABLE    = migration_x_catalog.pfl_x_schema.config_source_system
   INGESTION_CONFIG_TABLE = migration_x_catalog.pfl_x_schema.ingestion_config
-  AUDIT_TABLE            = main.monitoring.data_pipeline_execution_master
+  AUDIT_TABLE            = migration_x_catalog.pfl_x_schema.data_pipeline_execution_master
 """
 import json
 from dataclasses import dataclass
