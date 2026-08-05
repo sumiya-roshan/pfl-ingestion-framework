@@ -19,8 +19,7 @@ from typing import Optional, List, Dict
 # ── Fully-qualified table name defaults (override in ConfigManager.__init__) ──
 SOURCE_SYSTEM_TABLE    = "migration_x_catalog.pfl_x_schema.config_source_system"
 INGESTION_CONFIG_TABLE = "migration_x_catalog.pfl_x_schema.ingestion_config"
-AUDIT_TABLE            = "main.monitoring.data_pipeline_execution_master"
-
+AUDIT_TABLE            = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data classes — mirror the Delta table schemas exactly

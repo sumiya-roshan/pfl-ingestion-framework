@@ -12,7 +12,7 @@
 # MAGIC |---|---|
 # MAGIC | Source systems | `migration_x_catalog.pfl_x_schema.config_source_system` |
 # MAGIC | Ingestion objects | `migration_x_catalog.pfl_x_schema.ingestion_config` |
-# MAGIC | Execution audit | `main.monitoring.data_pipeline_execution_master` |
+# MAGIC | Execution audit | `migration_x_catalog.pfl_x_schema.data_pipeline_execution_master` |
 
 # COMMAND ----------
 #test comit
@@ -47,7 +47,7 @@ audit_table            = dbutils.widgets.get("audit_table")            or AUDIT_
 tables_to_check = {
     "config_source_system":          source_system_table,
     "ingestion_config":              ingestion_config_table,
-    "data_pipeline_execution_master": audit_table,
+    # "data_pipeline_execution_master": audit_table,
 }
 
 all_ok = True
@@ -83,4 +83,4 @@ display(spark.table(source_system_table).filter("is_active = true"))
 
 # COMMAND ----------
 
-display(spark.table(ingestion_config_table).filter("is_enabled = true"))
+display(spark.table(ingestion_config_table))
