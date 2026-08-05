@@ -1,0 +1,88 @@
+{
+  "_comment": [
+    "Databricks Jobs API definition for the config-driven ingestion pipeline.",
+    "Import via: databricks jobs create --json @jobs/ingestion_job.json",
+    "Or via the Databricks UI: Workflows → Create Job → Import JSON.",
+    "",
+    "BEFORE IMPORTING — update the following placeholders:",
+    "  REPLACE_WITH_REPO_PATH   : your Databricks Repos path, e.g. /Repos/data-eng/databricks-ingestion-framework",
+    "  REPLACE_WITH_NODE_TYPE   : cluster node type, e.g. i3.xlarge (AWS) or Standard_DS3_v2 (Azure)",
+    "  REPLACE_WITH_POLICY_ID   : (optional) cluster policy ID for cost governance",
+    "",
+    "Table name overrides (leave blank to use framework defaults from config_manager.py):",
+    "  source_system_table    : migration_x_catalog.pfl_x_schema.config_source_system",
+    "  ingestion_config_table : migration_x_catalog.pfl_x_schema.ingestion_config",
+    "  audit_table            : main.monitoring.data_pipeline_execution_master"
+  ],
+
+  "name": "generic_source_to_bronze_ingestion",
+  "tags": {
+    "team": "data-engineering",
+    "framework": "config-driven-ingestion"
+  },
+
+  "job_clusters": [
+    {
+      "job_cluster_key": "ingestion_cluster",
+      "new_cluster": {
+        "spark_version": "15.4.x-scala2.12",
+        "node_type_id": "REPLACE_WITH_NODE_TYPE",
+        "num_workers": 2,
+        "data_security_mode": "SINGLE_USER"
+      }
+    }
+  ],
+
+  "tasks": [
+    {
+      "_comment": "Task 1: query ingestion_config and publish all enabled ingestion_object_ids as a task value",
+      "task_key": "list_active_objects",
+      "job_cluster_key": "ingestion_cluster",
+      "notebook_task": {
+        "notebook_path": "REPLACE_WITH_REPO_PATH/notebooks/list_active_sources",
+        "base_parameters": {
+          "source_type_filter":     "",
+          "source_system_table":    "",
+          "ingestion_config_table": ""
+        }
+      }
+    },
+    {
+      "_comment": "Task 2: fan-out — one notebook run per ingestion_object_id from Task 1",
+      "task_key": "ingest_each_object",
+      "depends_on": [{ "task_key": "list_active_objects" }],
+      "for_each_task": {
+        "inputs": "{{tasks.list_active_objects.values.ingestion_object_ids}}",
+        "concurrency": 5,
+        "task": {
+          "task_key": "ingest_object",
+          "job_cluster_key": "ingestion_cluster",
+          "notebook_task": {
+            "notebook_path": "REPLACE_WITH_REPO_PATH/notebooks/01_run_ingestion",
+            "base_parameters": {
+              "ingestion_object_id":    "{{input}}",
+              "pipeline_name":          "generic_source_to_bronze_ingestion",
+              "delta_layer":            "BRONZE",
+              "trigger_type":           "SCHEDULED",
+              "source_system_table":    "",
+              "ingestion_config_table": "",
+              "audit_table":            ""
+            }
+          },
+          "timeout_seconds": 3600,
+          "max_retries": 1,
+          "retry_on_timeout": false
+        }
+      }
+    }
+  ],
+
+  "schedule": {
+    "quartz_cron_expression": "0 0 2 * * ?",
+    "timezone_id": "UTC",
+    "pause_status": "PAUSED"
+  },
+
+  "max_concurrent_runs": 1,
+  "format": "MULTI_TASK"
+}

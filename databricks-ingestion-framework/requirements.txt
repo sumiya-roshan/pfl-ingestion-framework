@@ -1,0 +1,13 @@
+# For local dev / unit testing only — on Databricks clusters, prefer
+# cluster libraries or a cluster-scoped init script instead of %pip installs
+# where possible, for faster cluster startup.
+pyspark>=3.5.0
+delta-spark>=3.0.0
+paramiko>=3.4.0
+pymongo>=4.6.0
+# MongoDB Spark connector is a Maven library attached at the cluster level:
+#   org.mongodb.spark:mongo-spark-connector_2.12:10.3.0
+# JDBC drivers are also cluster-attached Maven/JAR libraries:
+#   org.postgresql:postgresql:42.7.3
+#   com.mysql:mysql-connector-j:8.4.0
+#   com.oracle.database.jdbc:ojdbc11:23.4.0.24.05
