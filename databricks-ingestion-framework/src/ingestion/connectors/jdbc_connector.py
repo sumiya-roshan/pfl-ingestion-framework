@@ -64,8 +64,6 @@ class JdbcConnector(BaseConnector):
 
     def _resolve_jdbc_url(self) -> str:
         ss = self.source_system
-        if ss.connection_uri:
-            return ss.connection_uri                        # verbatim override
         return _build_url(
             source_type=ss.source_type,
             host=ss.host,

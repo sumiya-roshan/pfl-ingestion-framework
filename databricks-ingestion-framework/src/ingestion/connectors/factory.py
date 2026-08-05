@@ -15,11 +15,15 @@ from .mongo_connector import MongoConnector
 # Value : BaseConnector subclass to instantiate
 _CONNECTOR_MAP: dict = {
     "POSTGRES": JdbcConnector,
+    "POSTGRESQL": JdbcConnector,
+    "PG":       JdbcConnector,
     "MYSQL":    JdbcConnector,
     "ORACLE":   JdbcConnector,
     "MSSQL":    JdbcConnector,    # SQL Server via JDBC
+    "SQLSERVER": JdbcConnector,
     "SFTP":     SftpConnector,
     "MONGODB":  MongoConnector,
+    "MONGO":    MongoConnector,
 }
 
 
@@ -44,6 +48,7 @@ def get_connector(
     ValueError if source_type has no registered connector.
     """
     source_type = source_system.source_type.upper()
+    print("source_type",source_type)
     connector_cls = _CONNECTOR_MAP.get(source_type)
     if connector_cls is None:
         raise ValueError(

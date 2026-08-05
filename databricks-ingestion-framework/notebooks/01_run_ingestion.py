@@ -1,12 +1,15 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Run Ingestion — Single Object
+# MAGIC # Run Ingestion - Source Type
 # MAGIC
-# MAGIC Entry-point notebook. Accepts `ingestion_object_id` (the PK of a row in
-# MAGIC `ingestion_config`) as a widget / job parameter.
+# MAGIC Executes all ingestion objects configured for the given source type.
 # MAGIC
-# MAGIC The same notebook is reused across every source via Databricks Jobs
-# MAGIC (one task per ingestion_object_id, or a for-each task — see jobs/).
+# MAGIC Example:
+# MAGIC - POSTGRES
+# MAGIC - MYSQL
+# MAGIC - ORACLE
+# MAGIC - MONGODB
+# MAGIC - SFTP
 
 # COMMAND ----------
 
@@ -16,10 +19,15 @@
 # COMMAND ----------
 
 import sys
-sys.path.append("../src")   # adjust if deployed via Databricks Asset Bundles / Repos
+
+sys.path.append("../src")
 
 from ingestion.orchestrator import IngestionOrchestrator
-from ingestion.config_manager import SOURCE_SYSTEM_TABLE, INGESTION_CONFIG_TABLE, AUDIT_TABLE
+from ingestion.config_manager import (
+    SOURCE_SYSTEM_TABLE,
+    INGESTION_CONFIG_TABLE,
+    AUDIT_TABLE,
+)
 
 # COMMAND ----------
 
@@ -28,52 +36,76 @@ from ingestion.config_manager import SOURCE_SYSTEM_TABLE, INGESTION_CONFIG_TABLE
 
 # COMMAND ----------
 
-dbutils.widgets.text("ingestion_object_id",    "1",                     "Ingestion Object ID (int)")
-dbutils.widgets.text("source_system_table",    SOURCE_SYSTEM_TABLE,    "Source System Table (override)")
-dbutils.widgets.text("ingestion_config_table", INGESTION_CONFIG_TABLE, "Ingestion Config Table (override)")
-dbutils.widgets.text("audit_table",            AUDIT_TABLE,            "Audit Table (override)")
+dbutils.widgets.text("source_type", "POSTGRES", "Source Type")
+
 
 # COMMAND ----------
 
-ingestion_object_id    = dbutils.widgets.get("ingestion_object_id")
-source_system_table    = dbutils.widgets.get("source_system_table")    or SOURCE_SYSTEM_TABLE
-ingestion_config_table = dbutils.widgets.get("ingestion_config_table") or INGESTION_CONFIG_TABLE
-audit_table            = dbutils.widgets.get("audit_table")            or AUDIT_TABLE
-config_file_path       = dbutils.widgets.get("config_file_path")       or None
+source_type = dbutils.widgets.get("source_type").strip().upper()
 
-# assert ingestion_object_id, "ingestion_object_id widget must be set"
+pipeline_name = "ingestion_framework"
+delta_layer =  "BRONZE"
+source_system_table = SOURCE_SYSTEM_TABLE
+ingestion_config_table = INGESTION_CONFIG_TABLE
+audit_table =  AUDIT_TABLE
 
-try:
-    ingestion_object_id = int(ingestion_object_id)
-except ValueError:
-    raise ValueError(f"ingestion_object_id must be an integer, got: '{ingestion_object_id}'")
-
-# Capture Databricks job run ID for audit traceability
+# COMMAND ----------
 job_run_id = None
+
 try:
     job_run_id = str(
-        dbutils.notebook.entry_point.getDbutils().notebook().getContext().currentRunId().get()
+        dbutils.notebook.entry_point
+        .getDbutils()
+        .notebook()
+        .getContext()
+        .currentRunId()
+        .get()
     )
 except Exception:
-    pass   # not running inside a Databricks Job — that's fine
+    pass
 
 # COMMAND ----------
 
 orchestrator = IngestionOrchestrator(
-    spark,
-    dbutils,
-    source_system_table    = source_system_table,
-    ingestion_config_table = ingestion_config_table,
-    # audit_table            = audit_table,
-    # json_file_path         = config_file_path,
+    spark=spark,
+    dbutils=dbutils,
+    source_system_table=source_system_table,
+    ingestion_config_table=ingestion_config_table,
+    audit_table=audit_table,
+    pipeline_name=pipeline_name,
+    delta_layer=delta_layer,
 )
-
-result = orchestrator.run(
-    ingestion_object_id = ingestion_object_id,
-    job_run_id          = job_run_id,
-)
-print(result)
 
 # COMMAND ----------
 
-dbutils.notebook.exit(str(result))
+results = orchestrator.run_by_source_type(
+    source_type=source_type,
+    job_run_id=job_run_id,
+)
+
+print("=" * 80)
+print(f"Source Type : {source_type}")
+print("=" * 80)
+
+success = 0
+failed = 0
+
+for result in results:
+
+    print(result)
+
+    if result["status"] == "SUCCESS":
+        success += 1
+    else:
+        failed += 1
+
+print("=" * 80)
+print(f"Total Objects : {len(results)}")
+print(f"Success       : {success}")
+print(f"Failed        : {failed}")
+print("=" * 80)
+
+if failed > 0:
+    raise Exception(f"{failed} ingestion object(s) failed.")
+
+dbutils.notebook.exit(str(results))
