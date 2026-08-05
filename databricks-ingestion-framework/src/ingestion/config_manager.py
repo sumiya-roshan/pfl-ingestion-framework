@@ -179,13 +179,15 @@ class ConfigManager:
         sources = self.spark.table(self.source_system_table).where("is_active = true")
         if source_type:
             sources = sources.where(f"upper(source_type) = '{source_type.upper()}'")
+        ingestion_objects = self.spark.table(self.ingestion_config_table)
+        active_sources = sources.select("source_id")
         return [
             int(row["ingestion_object_id"])
             for row in (
-                self.spark.table(self.ingestion_config_table)
+                ingestion_objects
                 .join(
-                    sources.select("source_id"),
-                    "source_system_id = source_id",
+                    active_sources,
+                    ingestion_objects["source_system_id"] == active_sources["source_id"],
                     "inner",
                 )
                 .select("ingestion_object_id")
