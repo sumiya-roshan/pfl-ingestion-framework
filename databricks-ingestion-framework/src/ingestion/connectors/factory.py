@@ -4,7 +4,7 @@ Maps source_type → connector implementation.
 This is the single file to touch when a new source type is added.
 Routing is based on source_system.source_type (case-insensitive).
 """
-from ..config_manager import SourceSystemConfig, IngestionObjectConfig
+from ..utils.config_manager import SourceSystemConfig, IngestionObjectConfig
 from .base_connector import BaseConnector
 from .jdbc_connector import JdbcConnector
 from .sftp_connector import SftpConnector

@@ -5,24 +5,53 @@
     "Or via the Databricks UI: Workflows → Create Job → Import JSON.",
     "",
     "BEFORE IMPORTING — update the following placeholders:",
-    "  REPLACE_WITH_REPO_PATH   : your Databricks Repos path, e.g. /Repos/data-eng/databricks-ingestion-framework",
-    "  REPLACE_WITH_NODE_TYPE   : cluster node type, e.g. i3.xlarge (AWS) or Standard_DS3_v2 (Azure)",
-    "  REPLACE_WITH_POLICY_ID   : (optional) cluster policy ID for cost governance",
+    "  REPLACE_WITH_REPO_PATH : e.g. /Repos/data-eng/databricks-ingestion-framework",
+    "  REPLACE_WITH_NODE_TYPE : e.g. i3.xlarge (AWS) or Standard_DS3_v2 (Azure)",
+    "",
+    "Pipeline name filter:",
+    "  The Databricks Job 'name' (generic_source_to_bronze_ingestion) is auto-detected",
+    "  in list_active_sources.py and matched against ingestion_config.pipeline_name.",
+    "  Only rows with matching pipeline_name are ingested in this job run.",
     "",
     "Table name overrides (leave blank to use framework defaults from config_manager.py):",
     "  source_system_table    : migration_x_catalog.pfl_x_schema.config_source_system",
     "  ingestion_config_table : migration_x_catalog.pfl_x_schema.ingestion_config",
-    "  audit_table            : main.monitoring.data_pipeline_execution_master"
+    "  audit_table            : main.monitoring.data_pipeline_execution_master",
+    "",
+    "delta_layer is now read from ingestion_config.delta_layer — not a job parameter.",
+    "landing_volume_path is a job parameter — set it to your S3/Volume base path."
   ],
 
   "name": "generic_source_to_bronze_ingestion",
+
   "parameters": [
     {
       "name": "source_type_filter",
       "default": "",
-      "description": "Source type to run, e.g. POSTGRES, MYSQL, ORACLE. Leave blank for all active sources."
+      "description": "Source type filter (e.g. POSTGRES). Leave blank for all."
+    },
+    {
+      "name": "source_system_id",
+      "default": "",
+      "description": "Filter by source_system_id (integer). Leave blank for all."
+    },
+    {
+      "name": "source_name",
+      "default": "",
+      "description": "Filter by source system name (e.g. PG_TEST_RDS). Leave blank for all."
+    },
+    {
+      "name": "landing_volume_path",
+      "default": "",
+      "description": "Base S3/Volume path for raw landing (e.g. s3://pfl-raw/landing). Leave blank to skip landing write."
+    },
+    {
+      "name": "environment",
+      "default": "prod",
+      "description": "Logging environment: dev | uat | prod"
     }
   ],
+
   "tags": {
     "team": "data-engineering",
     "framework": "config-driven-ingestion"
@@ -42,20 +71,22 @@
 
   "tasks": [
     {
-      "_comment": "Task 1: query ingestion_config and publish all enabled ingestion_object_ids as a task value",
+      "_comment": "Task 1: query ingestion_config filtered by pipeline_name (auto-detected as this Job's name) and publish ingestion_object_ids as a task value",
       "task_key": "list_active_objects",
       "job_cluster_key": "ingestion_cluster",
       "notebook_task": {
-        "notebook_path": "REPLACE_WITH_REPO_PATH/notebooks/list_active_sources",
+        "notebook_path": "REPLACE_WITH_REPO_PATH/main/list_active_sources",
         "base_parameters": {
           "source_type_filter":     "{{job.parameters.source_type_filter}}",
+          "source_system_id":       "{{job.parameters.source_system_id}}",
+          "source_name":            "{{job.parameters.source_name}}",
           "source_system_table":    "",
           "ingestion_config_table": ""
         }
       }
     },
     {
-      "_comment": "Task 2: fan-out — one notebook run per ingestion_object_id from Task 1",
+      "_comment": "Task 2: fan-out — one notebook run per ingestion_object_id from Task 1. delta_layer comes from ingestion_config.delta_layer (not a parameter here).",
       "task_key": "ingest_each_object",
       "depends_on": [{ "task_key": "list_active_objects" }],
       "for_each_task": {
@@ -65,11 +96,11 @@
           "task_key": "ingest_object",
           "job_cluster_key": "ingestion_cluster",
           "notebook_task": {
-            "notebook_path": "REPLACE_WITH_REPO_PATH/notebooks/01_run_ingestion",
+            "notebook_path": "REPLACE_WITH_REPO_PATH/main/main",
             "base_parameters": {
               "ingestion_object_id":    "{{input}}",
-              "pipeline_name":          "generic_source_to_bronze_ingestion",
-              "delta_layer":            "BRONZE",
+              "landing_volume_path":    "{{job.parameters.landing_volume_path}}",
+              "environment":            "{{job.parameters.environment}}",
               "trigger_type":           "SCHEDULED",
               "source_system_table":    "",
               "ingestion_config_table": "",

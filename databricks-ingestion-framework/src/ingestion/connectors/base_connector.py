@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 
 from pyspark.sql import DataFrame
 
-from ..config_manager import SourceSystemConfig, IngestionObjectConfig
+from ..utils.config_manager import SourceSystemConfig, IngestionObjectConfig
 
 
 class BaseConnector(ABC):
