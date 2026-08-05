@@ -21,7 +21,17 @@ departments via a separate dimension.
 import uuid
 from datetime import datetime, date
 from typing import Optional
-
+from pyspark.sql.types import (
+    StructType,
+    StructField,
+    IntegerType,
+    StringType,
+    DateType,
+    TimestampType,
+    DecimalType,
+    LongType,
+    DoubleType,
+)
 from .config_manager import AUDIT_TABLE
 
 # department_id is NOT NULL in the pre-existing audit table.
@@ -68,6 +78,33 @@ class AuditLogger:
         now = datetime.utcnow()
         biz_date = business_date if business_date is not None else now.date()
         obj_id_int = int(ingestion_object_id)
+        schema = StructType([
+        StructField("config_master_id", IntegerType(), False),
+        StructField("table_id", IntegerType(), False),
+        StructField("delta_layer", StringType(), True),
+        StructField("source_name", StringType(), True),
+        StructField("pipeline_name", StringType(), True),
+        StructField("load_type", StringType(), True),
+        StructField("frequency", StringType(), True),
+        StructField("business_date", DateType(), False),
+        StructField("run_id", StringType(), False),
+        StructField("trigger_type", StringType(), True),
+        StructField("trigger_id", StringType(), True),
+        StructField("trigger_name", StringType(), True),
+        StructField("trigger_time", TimestampType(), False),
+        StructField("end_time", TimestampType(), True),
+        StructField("execution_duration_sec", DecimalType(10, 2), True),
+        StructField("source_schema", StringType(), True),
+        StructField("source_table", StringType(), True),
+        StructField("target_schema", StringType(), True),
+        StructField("target_table", StringType(), True),
+        StructField("rows_read", LongType(), False),
+        StructField("rows_copied", LongType(), False),
+        StructField("rows_deleted", LongType(), False),
+        StructField("total_cost", DoubleType(), True),
+        StructField("department_id", IntegerType(), False),
+        StructField("status", StringType(), False),
+    ])
 
         row = [(
             obj_id_int,             # config_master_id  (reuses ingestion_object_id)
@@ -106,8 +143,9 @@ class AuditLogger:
             "rows_read", "rows_copied", "rows_deleted", "total_cost",
             "department_id", "status",
         ]
+        df = self.spark.createDataFrame(row, schema=schema)
 
-        df = self.spark.createDataFrame(row, cols)
+        # df = self.spark.createDataFrame(row, cols)
         df.write.format("delta").mode("append").saveAsTable(self.table)
         return run_id
 

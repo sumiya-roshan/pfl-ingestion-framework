@@ -40,7 +40,7 @@ dbutils.widgets.text("audit_table",            AUDIT_TABLE,            "Audit Ta
 
 # COMMAND ----------
 
-source_type_filter     = dbutils.widgets.get("source_type_filter")     or None
+# source_type_filter     = dbutils.widgets.get("source_type_filter")     or None
 max_parallel           = int(dbutils.widgets.get("max_parallel"))
 pipeline_name          = dbutils.widgets.get("pipeline_name")          or "ingestion_framework"
 delta_layer            = dbutils.widgets.get("delta_layer")            or "BRONZE"
@@ -56,7 +56,7 @@ config_mgr = ConfigManager(
     source_system_table    = source_system_table,
     ingestion_config_table = ingestion_config_table,
 )
-object_ids = config_mgr.get_active_ingestion_objects(source_type=source_type_filter)
+object_ids = config_mgr.get_active_ingestion_objects()
 print(f"Found {len(object_ids)} enabled ingestion object(s): {object_ids}")
 
 # COMMAND ----------

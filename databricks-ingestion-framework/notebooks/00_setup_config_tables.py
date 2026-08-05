@@ -15,6 +15,7 @@
 # MAGIC | Execution audit | `migration_x_catalog.pfl_x_schema.data_pipeline_execution_master` |
 
 # COMMAND ----------
+
 #test comit
 
 import sys
@@ -28,14 +29,14 @@ from ingestion.config_manager import (
 
 # COMMAND ----------
 
-# Widget overrides — leave blank to use defaults from config_manager.py
-dbutils.widgets.text("source_system_table",    SOURCE_SYSTEM_TABLE,    "Source System Table")
-dbutils.widgets.text("ingestion_config_table", INGESTION_CONFIG_TABLE, "Ingestion Config Table")
-dbutils.widgets.text("audit_table",            AUDIT_TABLE,            "Audit Table")
+# # Widget overrides — leave blank to use defaults from config_manager.py
+# dbutils.widgets.text("source_system_table",    SOURCE_SYSTEM_TABLE,    "Source System Table")
+# dbutils.widgets.text("ingestion_config_table", INGESTION_CONFIG_TABLE, "Ingestion Config Table")
+# dbutils.widgets.text("audit_table",            AUDIT_TABLE,            "Audit Table")
 
-source_system_table    = dbutils.widgets.get("source_system_table")    or SOURCE_SYSTEM_TABLE
-ingestion_config_table = dbutils.widgets.get("ingestion_config_table") or INGESTION_CONFIG_TABLE
-audit_table            = dbutils.widgets.get("audit_table")            or AUDIT_TABLE
+source_system_table    =SOURCE_SYSTEM_TABLE
+ingestion_config_table =INGESTION_CONFIG_TABLE
+audit_table            =AUDIT_TABLE
 
 # COMMAND ----------
 

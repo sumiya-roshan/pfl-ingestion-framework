@@ -41,7 +41,6 @@ class IngestionOrchestrator:
     source_system_table    : FQN of config_source_system (default from config_manager)
     ingestion_config_table : FQN of ingestion_config (default from config_manager)
     audit_table            : FQN of data_pipeline_execution_master
-    json_file_path         : path to a local JSON config file (dev/test only)
     pipeline_name          : name logged to the audit table (defaults to 'ingestion_framework')
     delta_layer            : layer label logged to the audit table (default: 'BRONZE')
     department_id          : written to audit table department_id NOT NULL column (default: 0)
@@ -54,7 +53,6 @@ class IngestionOrchestrator:
         source_system_table: str = SOURCE_SYSTEM_TABLE,
         ingestion_config_table: str = INGESTION_CONFIG_TABLE,
         audit_table: str = AUDIT_TABLE,
-        json_file_path: Optional[str] = None,
         pipeline_name: str = "ingestion_framework",
         delta_layer: str = "BRONZE",
         department_id: int = 0,
@@ -67,20 +65,69 @@ class IngestionOrchestrator:
             spark,
             source_system_table=source_system_table,
             ingestion_config_table=ingestion_config_table,
-            json_file_path=json_file_path,
         )
         self.audit         = AuditLogger(spark, audit_table=audit_table, department_id=department_id)
         self.secrets       = SecretResolver(dbutils)
         self.s3_writer     = S3RawWriter()
         self.bronze_writer = BronzeWriter(spark)
 
+
     # ── Public API ────────────────────────────────────────────────────────────
+
+    def run_by_source_type(
+        self,
+        source_type: str,
+        job_run_id: Optional[str] = None,
+        business_date: Optional[date] = None,
+    ):
+
+        # Fetch all ingestion objects for the source type
+        ingestion_objects = self.config_mgr.get_ingestion_objects(source_type)
+
+        if not ingestion_objects:
+            raise Exception(f"No ingestion objects found for source type: {source_type}")
+
+        results = []
+
+        for obj in ingestion_objects:
+
+            ingestion_object_id = obj.ingestion_object_id
+
+            logger.info(
+                f"Starting ingestion for object {ingestion_object_id}"
+            )
+
+            try:
+
+                result = self.run(
+                    ingestion_object_id=ingestion_object_id,
+                    job_run_id=job_run_id,
+                    business_date=business_date,
+                )
+
+                results.append(result)
+
+            except Exception as e:
+
+                logger.exception(
+                    f"Failed ingestion_object_id={ingestion_object_id}"
+                )
+
+                results.append(
+                    {
+                        "ingestion_object_id": ingestion_object_id,
+                        "status": "FAILED",
+                        "error": str(e),
+                    }
+                )
+
+        return results
+
 
     def run(
         self,
         ingestion_object_id: int,
         job_run_id: Optional[str] = None,
-        trigger_type: str = "MANUAL",
         business_date: Optional[date] = None,
     ) -> dict:
         """
@@ -90,7 +137,6 @@ class IngestionOrchestrator:
         ----------
         ingestion_object_id : PK of the row in ingestion_config to execute
         job_run_id          : Databricks job run ID (for traceability in logs)
-        trigger_type        : 'SCHEDULED' | 'MANUAL' | 'EVENT'
         business_date       : override for the business_date audit column
                               (defaults to today UTC)
 
@@ -113,7 +159,6 @@ class IngestionOrchestrator:
             target_schema       = ingest_obj.target_schema,
             target_table        = ingest_obj.target_table,
             delta_layer         = self.delta_layer,
-            trigger_type        = trigger_type,
             trigger_id          = job_run_id,
             trigger_name        = job_run_id,
             business_date       = business_date,

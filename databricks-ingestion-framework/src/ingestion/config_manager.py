@@ -111,7 +111,6 @@ class IngestionObjectConfig:
     # Lakeflow / pipeline integration
     pipeline_id: Optional[str]
 
-    is_enabled: Optional[bool] = True
 
     # ── Derived helpers ────────────────────────────────────────────────────
 
@@ -227,7 +226,6 @@ class ConfigManager:
             target_table=r["target_table"],
             schema_evolution_mode=r.get("schema_evolution_mode"),
             pipeline_id=r.get("pipeline_id"),
-            is_enabled=r.get("is_enabled", True),
         )
 
     # ── Delta table readers ───────────────────────────────────────────────────
@@ -265,7 +263,7 @@ class ConfigManager:
 
         rows = (
             self.spark.table(self.ingestion_config_table)
-            .filter(f"ingestion_object_id = {ingestion_object_id} AND is_enabled = true")
+            .filter(f"ingestion_object_id = {ingestion_object_id}")
             .collect()
         )
         if not rows:
@@ -274,7 +272,7 @@ class ConfigManager:
                 f"for ingestion_object_id={ingestion_object_id}"
             )
         return self._build_ingestion_object(rows[0].asDict())
-
+    
     def get_active_ingestion_objects(
         self,
         source_type: Optional[str] = None,
@@ -294,15 +292,15 @@ class ConfigManager:
                 return [
                     iid
                     for iid, io in self._ingestion_objects.items()
-                    if io.source_system_id in matching_ss_ids and io.is_enabled
+                    if io.source_system_id in matching_ss_ids
                 ]
             return [
                 iid
                 for iid, io in self._ingestion_objects.items()
-                if io.is_enabled
+    
             ]
 
-        ic = self.spark.table(self.ingestion_config_table).filter("is_enabled = true")
+        ic = self.spark.table(self.ingestion_config_table)
 
         if source_type:
             ss = (
@@ -316,3 +314,89 @@ class ConfigManager:
             int(r["ingestion_object_id"])
             for r in ic.select("ingestion_object_id").collect()
         ]
+
+
+# """
+# config_manager.py
+
+# Reads ingestion metadata from Delta configuration tables.
+# """
+
+# from pyspark.sql import SparkSession
+
+# SOURCE_SYSTEM_TABLE = "main.ingestion_config.config_source_system"
+# INGESTION_CONFIG_TABLE = "main.ingestion_config.ingestion_config"
+
+
+# class ConfigManager:
+
+#     def __init__(
+#         self,
+#         spark: SparkSession,
+#         source_system_table: str = SOURCE_SYSTEM_TABLE,
+#         ingestion_config_table: str = INGESTION_CONFIG_TABLE,
+#     ):
+#         self.spark = spark
+#         self.source_system_table = source_system_table
+#         self.ingestion_config_table = ingestion_config_table
+
+#     # ------------------------------------------------------------------
+#     # Get Source System Configuration
+#     # ------------------------------------------------------------------
+
+#     def get_source_system(self, source_system_id):
+
+#         row = (
+#             self.spark.table(self.source_system_table)
+#             .filter(f"source_system_id = {source_system_id}")
+#             .first()
+#         )
+
+#         if row is None:
+#             raise Exception(
+#                 f"Source System {source_system_id} not found."
+#             )
+
+#         return row
+
+#     # ------------------------------------------------------------------
+#     # Get Ingestion Object Configuration
+#     # ------------------------------------------------------------------
+
+#     def get_ingestion_object(self, ingestion_object_id):
+
+#         row = (
+#             self.spark.table(self.ingestion_config_table)
+#             .filter(f"ingestion_object_id = {ingestion_object_id}")
+#             .first()
+#         )
+
+#         if row is None:
+#             raise Exception(
+#                 f"Ingestion Object {ingestion_object_id} not found."
+#             )
+
+#         return row
+
+#     # ------------------------------------------------------------------
+#     # Get all ingestion objects
+#     # ------------------------------------------------------------------
+
+#     def get_all_ingestion_objects(self):
+
+#         return (
+#             self.spark.table(self.ingestion_config_table)
+#             .collect()
+#         )
+
+#     # ------------------------------------------------------------------
+#     # Get ingestion objects by source system
+#     # ------------------------------------------------------------------
+
+#     def get_ingestion_objects_by_source(self, source_system_id):
+
+#         return (
+#             self.spark.table(self.ingestion_config_table)
+#             .filter(f"source_system_id = {source_system_id}")
+#             .collect()
+#         )
