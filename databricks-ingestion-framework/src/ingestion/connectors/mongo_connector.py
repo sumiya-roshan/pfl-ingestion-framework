@@ -21,11 +21,26 @@ Field mapping from new config tables
     .load_type                → FULL | INCREMENTAL
     .incremental_column       → field used for incremental $match (e.g. _id, updatedAt)
     .incremental_end_value    → initial value for first run
+    .partition_column         → field the pagination partitioner ranges over
+                                 (indexed field; pagination is skipped when unset)
+    .data_read_size           → target page size in MB per read partition
+                                 (same field JDBC uses for fetchsize)
 
 URI construction priority
 --------------------------
 1. connection_uri from config_source_system  (verbatim, recommended for Atlas)
 2. Built: mongodb://<username>:<password>@<host>:<port>/?<options>
+
+Pagination / parallel reads
+----------------------------
+Reads use the MongoDB Spark Connector's PaginateBySizePartitioner, which
+splits the collection into page-sized ranges over partition_column so
+multiple executors read concurrently instead of one task scanning the whole
+collection. data_read_size (MB per page) drives the same knob JDBC uses for
+fetchsize — one config field, per-connector meaning. The resulting
+multi-partition DataFrame flows straight into the downstream bronze/landing
+writers, which write one partition per task, so this is also what gives the
+write side its parallelism — no separate write-side setting needed.
 """
 from typing import Optional, Tuple
 from urllib.parse import quote_plus
@@ -33,6 +48,10 @@ from urllib.parse import quote_plus
 from pyspark.sql import DataFrame
 
 from .base_connector import BaseConnector
+
+# MongoDB Spark Connector (v10+) pagination partitioner — parallel, range-based
+# reads instead of a single-task full-collection scan.
+_PAGINATE_PARTITIONER = "com.mongodb.spark.sql.connector.read.partitioner.PaginateBySizePartitioner"
 
 
 class MongoConnector(BaseConnector):
@@ -55,8 +74,8 @@ class MongoConnector(BaseConnector):
         enc_user = quote_plus(username)
         enc_pass = quote_plus(password)
 
-        if ss.nosql_connection_uri:
-            uri = ss.nosql_connection_uri
+        if ss.connection_uri:
+            uri = ss.connection_uri
             if "{username}" in uri or "{password}" in uri:
                 return uri.format(username=enc_user, password=enc_pass)
             # Assume the URI already contains credentials (e.g. injected at provisioning)
@@ -65,15 +84,14 @@ class MongoConnector(BaseConnector):
         # Build a standard URI from host/port
         host = ss.host or "localhost"
         port = ss.port or 27017
-        options = "retryWrites=true&w=majority"
-        return f"mongodb://{enc_user}:{enc_pass}@{host}:{port}/?{options}"
+        return f"mongodb://{enc_user}:{enc_pass}@{host}:{port}/"
 
     def _resolve_database(self) -> str:
         """
         MongoDB database name.
         source_schema from ingestion_config overrides database_name from source_system.
         """
-        return self.ingest_obj.source_schema or self.source_system.nosql_database or ""
+        return self.ingest_obj.source_schema or self.source_system.database_name or ""
 
     def _resolve_collection(self) -> str:
         """
@@ -86,7 +104,7 @@ class MongoConnector(BaseConnector):
         # Use source_object_name unless it is the generic placeholder token
         if io.source_object_name and io.source_object_name != "__default__":
             return io.source_object_name
-        return ss.nosql_collection or ""
+        return ss.nosql_collection_name or ""
 
     def _build_aggregation_pipeline(self, watermark_start: Optional[str]) -> Optional[str]:
         """
@@ -105,11 +123,15 @@ class MongoConnector(BaseConnector):
         stages = []
 
         # Incremental $match stage
+        # wm is wrapped as Extended JSON {"$date": ...} so Mongo compares it as
+        # a BSON Date against incremental_column, not as a string (BSON orders
+        # String below Date, so a plain string $gt would silently match every
+        # document instead of filtering by watermark).
         if io.load_type == "INCREMENTAL" and io.incremental_column:
             wm = watermark_start if watermark_start is not None else io.incremental_end_value
             if wm is not None:
                 stages.append(
-                    f'{{\"$match\": {{\"{io.incremental_column}\": {{\"$gt\": \"{wm}\"}}}}}}'
+                    f'{{\"$match\": {{\"{io.incremental_column}\": {{\"$gt\": {{\"$date\": \"{wm}\"}}}}}}}}'
                 )
 
         # Additional filter from source_filter (expected as a valid $match expression JSON)
@@ -119,6 +141,29 @@ class MongoConnector(BaseConnector):
         if stages:
             return "[" + ", ".join(stages) + "]"
         return None
+
+    def _read_partition_options(self) -> dict:
+        """
+        Parallel-read (pagination) tuning, mirroring how JDBC uses
+        data_read_size for fetchsize:
+          .partition_column → partitioner.options.partition.field
+                               (range field the pages are split on)
+          .data_read_size   → partitioner.options.partition.size
+                               (target MB per page/partition)
+        Only switches on the pagination partitioner when partition_column is
+        configured; otherwise the connector's own default partitioner applies.
+        """
+        io = self.ingest_obj
+        if not io.partition_column:
+            return {}
+
+        options = {
+            "partitioner": _PAGINATE_PARTITIONER,
+            "partitioner.options.partition.field": io.partition_column,
+        }
+        if io.data_read_size:
+            options["partitioner.options.partition.size"] = str(io.data_read_size)
+        return options
 
     # ── Public extract ────────────────────────────────────────────────────────
 
@@ -133,6 +178,7 @@ class MongoConnector(BaseConnector):
             .option("connection.uri", uri)
             .option("database",   database)
             .option("collection", collection)
+            .options(**self._read_partition_options())
         )
 
         if pipeline:
