@@ -238,26 +238,7 @@ class ConfigManager:
         source_system_id : filter by config_source_system.source_id
         source_name      : filter by config_source_system.source_name (case-insensitive)
         pipeline_name    : filter by ingestion_config.pipeline_name
-                           (auto-detected from Databricks Job name in main notebooks)
         """
-        if self.json_file_path:
-            valid_ss = set()
-            for sid, ss in self._source_systems.items():
-                if not ss.is_active:
-                    continue
-                if source_system_id and sid != source_system_id:
-                    continue
-                if source_type and ss.source_type != source_type.upper():
-                    continue
-                if source_name and ss.source_name.lower() != source_name.lower():
-                    continue
-                valid_ss.add(sid)
-
-            return [
-                iid for iid, io in self._ingestion_objects.items()
-                if io.source_system_id in valid_ss
-                and (not pipeline_name or io.pipeline_name == pipeline_name)
-            ]
 
         ic = self.spark.table(self.ingestion_config_table)
 
