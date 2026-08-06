@@ -24,7 +24,7 @@ from typing import Optional, List, Dict
 # ── Fully-qualified table name defaults ───────────────────────────────────────
 SOURCE_SYSTEM_TABLE    = "migration_x_catalog.pfl_x_schema.config_source_system"
 INGESTION_CONFIG_TABLE = "migration_x_catalog.pfl_x_schema.ingestion_config"
-AUDIT_TABLE            = "main.monitoring.data_pipeline_execution_master"
+AUDIT_TABLE            = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,7 +93,7 @@ class IngestionObjectConfig:
     schema_evolution_mode: Optional[str]
 
     # Pipeline grouping — matches Databricks Job name
-    pipeline_name: Optional[str]
+    pipeline_name: str
 
     # Delta layer (BRONZE / SILVER / GOLD) — from config table, not widget
     delta_layer: Optional[str]
@@ -131,30 +131,15 @@ class ConfigManager:
         spark,
         source_system_table: str = SOURCE_SYSTEM_TABLE,
         ingestion_config_table: str = INGESTION_CONFIG_TABLE,
-        json_file_path: Optional[str] = None,
     ):
         self.spark                 = spark
         self.source_system_table   = source_system_table
         self.ingestion_config_table = ingestion_config_table
-        self.json_file_path        = json_file_path
 
         self._source_systems:   Dict[int, SourceSystemConfig]   = {}
         self._ingestion_objects: Dict[int, IngestionObjectConfig] = {}
 
-        if json_file_path:
-            self._load_from_json(json_file_path)
 
-    # ── JSON fallback ─────────────────────────────────────────────────────────
-
-    def _load_from_json(self, path: str) -> None:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        for ss in data.get("source_systems", []):
-            obj = self._build_source_system(ss)
-            self._source_systems[obj.source_id] = obj
-        for io in data.get("ingestion_objects", []):
-            obj = self._build_ingestion_object(io)
-            self._ingestion_objects[obj.ingestion_object_id] = obj
 
     # ── Row builders ─────────────────────────────────────────────────────────
 
@@ -210,11 +195,6 @@ class ConfigManager:
     # ── Delta table readers ───────────────────────────────────────────────────
 
     def get_source_system(self, source_system_id: int) -> SourceSystemConfig:
-        if self.json_file_path:
-            obj = self._source_systems.get(source_system_id)
-            if obj is None:
-                raise ValueError(f"No source_system in JSON for source_system_id={source_system_id}")
-            return obj
 
         rows = (
             self.spark.table(self.source_system_table)
@@ -228,11 +208,6 @@ class ConfigManager:
         return self._build_source_system(rows[0].asDict())
 
     def get_ingestion_object(self, ingestion_object_id: int) -> IngestionObjectConfig:
-        if self.json_file_path:
-            obj = self._ingestion_objects.get(ingestion_object_id)
-            if obj is None:
-                raise ValueError(f"No ingestion_object in JSON for id={ingestion_object_id}")
-            return obj
 
         rows = (
             self.spark.table(self.ingestion_config_table)
@@ -246,60 +221,4 @@ class ConfigManager:
             )
         return self._build_ingestion_object(rows[0].asDict())
 
-    def get_active_ingestion_objects(
-        self,
-        source_type: Optional[str]      = None,
-        source_system_id: Optional[int] = None,
-        source_name: Optional[str]      = None,
-        pipeline_name: Optional[str]    = None,
-    ) -> List[int]:
-        """
-        Return ingestion_object_id values matching the given filters.
-        All filters are optional and ANDed together.
-
-        Parameters
-        ----------
-        source_type      : filter by config_source_system.source_type (e.g. 'POSTGRES')
-        source_system_id : filter by config_source_system.source_id
-        source_name      : filter by config_source_system.source_name (case-insensitive)
-        pipeline_name    : filter by ingestion_config.pipeline_name
-                           (auto-detected from Databricks Job name in main notebooks)
-        """
-        if self.json_file_path:
-            valid_ss = set()
-            for sid, ss in self._source_systems.items():
-                if not ss.is_active:
-                    continue
-                if source_system_id and sid != source_system_id:
-                    continue
-                if source_type and ss.source_type != source_type.upper():
-                    continue
-                if source_name and ss.source_name.lower() != source_name.lower():
-                    continue
-                valid_ss.add(sid)
-
-            return [
-                iid for iid, io in self._ingestion_objects.items()
-                if io.source_system_id in valid_ss
-                and (not pipeline_name or io.pipeline_name == pipeline_name)
-            ]
-
-        ic = self.spark.table(self.ingestion_config_table)
-
-        if pipeline_name:
-            ic = ic.filter(f"pipeline_name = '{pipeline_name}'")
-
-        if source_system_id or source_type or source_name:
-            ss = self.spark.table(self.source_system_table).filter("is_active = true")
-            if source_system_id:
-                ss = ss.filter(f"source_id = {source_system_id}")
-            if source_type:
-                ss = ss.filter(f"upper(source_type) = '{source_type.upper()}'")
-            if source_name:
-                ss = ss.filter(f"lower(source_name) = '{source_name.lower()}'")
-            ic = ic.join(ss.select("source_id"), ic["source_system_id"] == ss["source_id"], "inner")
-
-        return [
-            int(r["ingestion_object_id"])
-            for r in ic.select("ingestion_object_id").collect()
-        ]
+   

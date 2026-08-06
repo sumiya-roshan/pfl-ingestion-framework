@@ -89,20 +89,6 @@ print(f"pipeline_name detected: '{pipeline_name}'")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Validate config tables are accessible
-
-# COMMAND ----------
-
-for tbl in [source_system_table, ingestion_config_table, audit_table]:
-    try:
-        spark.table(tbl).limit(1).collect()
-        print(f"  ✅ {tbl}")
-    except Exception as e:
-        raise RuntimeError(f"Cannot access config table '{tbl}': {e}")
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ### Discover ingestion objects for this source
 
 # COMMAND ----------
