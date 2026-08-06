@@ -82,9 +82,10 @@ class MongoConnector(BaseConnector):
             return uri
 
         # Build a standard URI from host/port
-        host = ss.host or "localhost"
-        port = ss.port or 27017
-        return f"mongodb://{enc_user}:{enc_pass}@{host}:{port}/"
+        # host = ss.host or "localhost"
+        # port = ss.port or 27017
+        return f"mongodb+srv://{enc_user}:{enc_pass}@cluster0.3enwjat.mongodb.net/"
+    
 
     def _resolve_database(self) -> str:
         """
