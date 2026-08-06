@@ -1,4 +1,8 @@
 # Databricks notebook source
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC # Ingestion — Source System Entry Point
 # MAGIC
@@ -24,7 +28,7 @@
 # COMMAND ----------
 
 import sys
-sys.path.append("../src")
+sys.path.append("..")   
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ingestion.utils.config_manager import (
@@ -45,6 +49,7 @@ from ingestion.utils.orchestrator import IngestionOrchestrator
 dbutils.widgets.text("source_system_id",       "",                     "Source System ID (int, blank = all)")
 dbutils.widgets.text("source_name",            "",                     "Source Name (e.g. PG_TEST_RDS, blank = all)")
 dbutils.widgets.text("source_type",            "",                     "Source Type (e.g. POSTGRES, blank = all)")
+dbutils.widgets.text("pipeline_name",          "",                     "Pipeline Name — filters ingestion_config.pipeline_name (blank = auto-detect from job)")
 dbutils.widgets.text("landing_volume_path",    "",                     "Landing Volume Base Path (blank = skip landing write)")
 dbutils.widgets.text("environment",            "dev",                  "Environment: dev | uat | prod")
 dbutils.widgets.text("max_parallel",           "4",                    "Max parallel ingestion runs")
@@ -58,6 +63,7 @@ dbutils.widgets.text("audit_table",            AUDIT_TABLE,            "Audit Ta
 source_system_id_raw   = dbutils.widgets.get("source_system_id")       or None
 source_name            = dbutils.widgets.get("source_name")            or None
 source_type            = dbutils.widgets.get("source_type")            or None
+pipeline_name_widget   = dbutils.widgets.get("pipeline_name")          or None
 landing_volume_path    = dbutils.widgets.get("landing_volume_path")    or None
 environment            = dbutils.widgets.get("environment")            or "dev"
 max_parallel           = int(dbutils.widgets.get("max_parallel")       or 4)
@@ -71,34 +77,32 @@ source_system_id = int(source_system_id_raw) if source_system_id_raw else None
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Auto-detect pipeline name from Databricks Job context
+# MAGIC ### Resolve pipeline name
+# MAGIC Priority: **widget value** → auto-detected Databricks Job name → `'manual_run'`
 
 # COMMAND ----------
 
-try:
-    pipeline_name = (
-        dbutils.notebook.entry_point
-        .getDbutils().notebook().getContext()
-        .jobName().get()
-    )
-except Exception:
-    pipeline_name = "manual_run"
-
-print(f"pipeline_name detected: '{pipeline_name}'")
+if pipeline_name_widget:
+    # Explicit widget value — use as-is (matches ingestion_config.pipeline_name)
+    pipeline_name = pipeline_name_widget
+    print(f"pipeline_name from widget: '{pipeline_name}'")
+else:
+    # Auto-detect from Databricks Job context
+    try:
+        pipeline_name = (
+            dbutils.notebook.entry_point
+            .getDbutils().notebook().getContext()
+            .jobName().get()
+        )
+        print(f"pipeline_name from job context: '{pipeline_name}'")
+    except Exception:
+        pipeline_name = "manual_run"
+        print(f"pipeline_name fallback: '{pipeline_name}'")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ### Validate config tables are accessible
-
-# COMMAND ----------
-
-for tbl in [source_system_table, ingestion_config_table, audit_table]:
-    try:
-        spark.table(tbl).limit(1).collect()
-        print(f"  ✅ {tbl}")
-    except Exception as e:
-        raise RuntimeError(f"Cannot access config table '{tbl}': {e}")
 
 # COMMAND ----------
 
@@ -137,9 +141,17 @@ if not object_ids:
 
 # COMMAND ----------
 
-job_run_id = None
+from ingestion.utils.config_manager import AUDIT_TABLE
+
+actual = spark.table(AUDIT_TABLE).schema
+for f in actual:
+    print(f.name, f.dataType, "nullable=", f.nullable)
+
+# COMMAND ----------
+
+trigger_id = None
 try:
-    job_run_id = str(
+    trigger_id = str(
         dbutils.notebook.entry_point.getDbutils().notebook().getContext()
         .currentRunId().get()
     )
@@ -161,7 +173,7 @@ def run_one(obj_id: int) -> dict:
     return orchestrator.run(
         ingestion_object_id = obj_id,
         landing_volume_path = landing_volume_path,
-        job_run_id          = job_run_id,
+        trigger_id          = trigger_id,
         trigger_type        = trigger_type,
     )
 

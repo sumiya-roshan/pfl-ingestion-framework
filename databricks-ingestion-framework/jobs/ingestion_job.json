@@ -90,7 +90,7 @@
       "task_key": "run_source_ingestion",
       "job_cluster_key": "ingestion_cluster",
       "notebook_task": {
-        "notebook_path": "REPLACE_WITH_REPO_PATH/main/main",
+        "notebook_path": "REPLACE_WITH_REPO_PATH/src/main/main",
         "base_parameters": {
           "source_system_id":       "{{job.parameters.source_system_id}}",
           "source_name":            "{{job.parameters.source_name}}",

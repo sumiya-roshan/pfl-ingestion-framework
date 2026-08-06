@@ -40,6 +40,8 @@ from typing import List, Optional, Tuple
 from pyspark.sql import DataFrame
 
 from .base_connector import BaseConnector
+import paramiko
+
 
 # Default staging root when landing_volume_path is not set in config_source_system.
 # In production, override this via landing_volume_path pointing to a Databricks Volume.
@@ -55,7 +57,6 @@ class SftpConnector(BaseConnector):
 
     def _get_sftp_client(self):
         """Open a paramiko SFTP client and return (sftp, transport)."""
-        import paramiko
 
         ss = self.source_system
         username, password = self.secrets.get_credentials(
