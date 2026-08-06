@@ -16,6 +16,7 @@ is not a pipeline-level concept in this framework, the constant
 DEFAULT_DEPARTMENT_ID (0) is written for every run.  Override it by passing
 department_id to AuditLogger.__init__.
 """
+import threading
 import uuid
 from datetime import datetime, date
 from typing import Optional
@@ -40,6 +41,10 @@ class AuditLogger:
         self.spark         = spark
         self.table         = audit_table
         self.department_id = department_id
+        # Serialise concurrent audit writes from parallel ingestion threads.
+        # Bronze writes (to different tables) remain fully parallel — only the
+        # single shared audit table needs this guard.
+        self._write_lock   = threading.Lock()
 
     # ── Run lifecycle methods ─────────────────────────────────────────────────
 
@@ -121,7 +126,8 @@ class AuditLogger:
         )]
 
         df = self.spark.createDataFrame(row, schema=schema)
-        df.writeTo(self.table).using("delta").append()
+        with self._write_lock:
+            df.writeTo(self.table).using("delta").append()
         return run_id
 
     def complete_run(
