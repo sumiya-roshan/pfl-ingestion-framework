@@ -45,29 +45,26 @@ class AuditLogger:
 
     def start_run(
         self,
-        ingestion_object_id: int,
-        source_name: str,
+        ingest_obj,
+        source_sys,
         pipeline_name: str,
-        load_type: str,
-        source_schema: Optional[str],
-        source_table: Optional[str],
-        target_schema: str,
-        target_table: str,
         delta_layer: str = "BRONZE",
         trigger_type: Optional[str] = "MANUAL",
         trigger_id: Optional[str] = None,
-        trigger_name: Optional[str] = None,
         business_date: Optional[date] = None,
         frequency: Optional[str] = None,
     ) -> str:
         """
         Inserts a RUNNING row into data_pipeline_execution_master.
         Returns the run_id (UUID string) that must be passed to complete_run().
+
+        Accepts ingest_obj (IngestionObjectConfig) and source_sys (SourceSystemConfig)
+        directly — no manual field mapping required in the caller.
         """
-        run_id    = str(uuid.uuid4())
-        now       = datetime.utcnow()
-        biz_date  = business_date if business_date is not None else now.date()
-        obj_id_int = int(ingestion_object_id)
+        run_id     = str(uuid.uuid4())
+        now        = datetime.utcnow()
+        biz_date   = business_date if business_date is not None else now.date()
+        obj_id_int = int(ingest_obj.ingestion_object_id)
 
         schema = StructType([
             StructField("config_master_id",       IntegerType(),        False),
@@ -81,12 +78,11 @@ class AuditLogger:
             StructField("run_id",                 StringType(),         False),
             StructField("trigger_type",           StringType(),         True),
             StructField("trigger_id",             StringType(),         True),
-            StructField("trigger_name",           StringType(),         True),
             StructField("trigger_time",           TimestampType(),      False),
             StructField("end_time",               TimestampType(),      True),
             StructField("execution_duration_sec", DecimalType(10, 2),   True),
             StructField("source_schema",          StringType(),         True),
-            StructField("source_table",           StringType(),         True),
+            StructField("source_object_name",     StringType(),         True),
             StructField("target_schema",          StringType(),         True),
             StructField("target_table",           StringType(),         True),
             StructField("rows_read",              LongType(),           False),
@@ -98,29 +94,28 @@ class AuditLogger:
         ])
 
         row = [(
-            obj_id_int,   # config_master_id (reuses ingestion_object_id)
-            obj_id_int,   # table_id
+            obj_id_int,                      # config_master_id
+            obj_id_int,                      # table_id
             delta_layer,
-            source_name,
+            source_sys.source_name,
             pipeline_name,
-            load_type,
+            ingest_obj.load_type,
             frequency,
             biz_date,
             run_id,
             trigger_type,
             trigger_id,
-            trigger_name,
-            now,          # trigger_time
-            None,         # end_time (set on complete)
-            None,         # execution_duration_sec (set on complete)
-            source_schema,
-            source_table,
-            target_schema,
-            target_table,
-            0,            # rows_read
-            0,            # rows_copied
-            0,            # rows_deleted
-            None,         # total_cost
+            now,                             # trigger_time
+            None,                            # end_time (set on complete)
+            None,                            # execution_duration_sec (set on complete)
+            ingest_obj.source_schema,
+            ingest_obj.source_object_name,
+            ingest_obj.target_schema,
+            ingest_obj.target_table,
+            0,                               # rows_read
+            0,                               # rows_copied
+            0,                               # rows_deleted
+            None,                            # total_cost
             int(self.department_id),
             "RUNNING",
         )]

@@ -75,7 +75,7 @@ class IngestionOrchestrator:
         self,
         ingestion_object_id: int,
         landing_volume_path: Optional[str] = None,
-        job_run_id: Optional[str]          = None,
+        trigger_id: Optional[str]          = None,
         trigger_type: str                  = "MANUAL",
         business_date: Optional[date]      = None,
     ) -> dict:
@@ -90,7 +90,7 @@ class IngestionOrchestrator:
         ingestion_object_id : PK of ingestion_config row to run
         landing_volume_path : base S3/Volume path for raw landing write (widget value);
                               if None/empty, landing write is skipped
-        job_run_id          : Databricks job run ID (for audit traceability)
+        trigger_id          : Databricks job run ID (for audit traceability)
         trigger_type        : 'SCHEDULED' | 'MANUAL' | 'EVENT'
         business_date       : override for business_date audit column (defaults to today UTC)
 
@@ -108,19 +108,7 @@ class IngestionOrchestrator:
         watermark_start = self._resolve_watermark(ingest_obj)
 
         run_id = self.audit.start_run(
-            ingestion_object_id = ingestion_object_id,
-            source_name         = source_sys.source_name,
-            pipeline_name       = pipeline_name,
-            load_type           = ingest_obj.load_type,
-            source_schema       = ingest_obj.source_schema,
-            source_table        = ingest_obj.source_object_name,
-            target_schema       = ingest_obj.target_schema,
-            target_table        = ingest_obj.target_table,
-            delta_layer         = delta_layer,
-            trigger_type        = trigger_type,
-            trigger_id          = job_run_id,
-            trigger_name        = job_run_id,
-            business_date       = business_date,
+            ingest_obj, source_sys, pipeline_name, delta_layer, trigger_type, trigger_id, business_date
         )
 
         self.logger.info(
