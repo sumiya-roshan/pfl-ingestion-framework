@@ -24,7 +24,7 @@
 # COMMAND ----------
 
 import sys
-sys.path.append("../src")
+sys.path.append("..")   # src/main/ → up one level reaches src/ where ingestion package lives
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ingestion.utils.config_manager import (
@@ -98,10 +98,23 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Discover ingestion objects for this source
+# MAGIC ### Validate config tables are accessible
 
 # COMMAND ----------
 
+for tbl in [source_system_table, ingestion_config_table, audit_table]:
+    try:
+        spark.table(tbl).limit(1).collect()
+        print(f"  ✅ {tbl}")
+    except Exception as e:
+        raise RuntimeError(f"Cannot access config table '{tbl}': {e}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Discover ingestion objects for this source
+
+# COMMAND ----------
 
 config_mgr = ConfigManager(
     spark,
