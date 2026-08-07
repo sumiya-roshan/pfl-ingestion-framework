@@ -62,11 +62,14 @@ class S3Connector(BaseConnector):
 
     def _apply_credentials(self) -> None:
         """
-        Sets fs.s3a access/secret keys on the Spark session's Hadoop
-        configuration when explicit credentials are configured. When
-        secret_scope/secret_key_credentials are unset, relies on the
-        cluster's instance profile or a Unity Catalog external
-        location/storage credential already granting bucket access.
+        Sets fs.s3a access/secret keys via spark.conf (spark.hadoop.* keys
+        are merged into the Hadoop configuration at file-read time) when
+        explicit credentials are configured. Uses the public SparkSession
+        conf API rather than sparkContext._jsc.hadoopConfiguration() — that
+        private/JVM-internal path isn't available on Spark Connect /
+        serverless compute. When secret_scope/secret_key_credentials are
+        unset, relies on the cluster's instance profile or a Unity Catalog
+        external location/storage credential already granting bucket access.
         """
         ss = self.source_system
         if not ss.secret_scope or not ss.secret_key_credentials:
@@ -75,9 +78,8 @@ class S3Connector(BaseConnector):
         access_key, secret_key = self.secrets.get_credentials(
             ss.secret_scope, ss.secret_key_credentials
         )
-        hadoop_conf = self.spark.sparkContext._jsc.hadoopConfiguration()
-        hadoop_conf.set("fs.s3a.access.key", access_key)
-        hadoop_conf.set("fs.s3a.secret.key", secret_key)
+        self.spark.conf.set("spark.hadoop.fs.s3a.access.key", access_key)
+        self.spark.conf.set("spark.hadoop.fs.s3a.secret.key", secret_key)
 
     # ── Public extract ────────────────────────────────────────────────────────
 
