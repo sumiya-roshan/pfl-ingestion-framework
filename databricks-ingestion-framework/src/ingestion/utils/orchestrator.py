@@ -41,6 +41,13 @@ class IngestionOrchestrator:
     pipeline_name          : fallback name if ingestion_config.pipeline_name is NULL
     environment            : 'dev' | 'uat' | 'prod' — controls log level
     department_id          : written to audit table department_id NOT NULL column
+    config_mgr             : pre-built config manager to use instead of the default
+                              ConfigManager(source_system_table, ingestion_config_table).
+                              Pass an S3ConfigManager here to drive S3 ingestion off
+                              s3_config_master through this same orchestrator — it only
+                              needs get_source_system/get_ingestion_object/
+                              get_active_ingestion_objects, so any object with that
+                              surface works.
     """
 
     def __init__(
@@ -53,12 +60,13 @@ class IngestionOrchestrator:
         pipeline_name: str          = "ingestion_framework",
         environment: str            = "dev",
         department_id: int          = 0,
+        config_mgr                  = None,
     ):
         self.spark         = spark
         self.pipeline_name = pipeline_name
         self.environment   = environment
 
-        self.config_mgr    = ConfigManager(
+        self.config_mgr    = config_mgr or ConfigManager(
             spark,
             source_system_table    = source_system_table,
             ingestion_config_table = ingestion_config_table,

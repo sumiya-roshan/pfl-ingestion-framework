@@ -22,7 +22,13 @@
     "Table name overrides (leave blank to use framework defaults from config_manager.py):",
     "  source_system_table    : migration_x_catalog.pfl_x_schema.config_source_system",
     "  ingestion_config_table : migration_x_catalog.pfl_x_schema.ingestion_config",
+    "  s3_config_table        : migration_x_catalog.pfl_x_schema.s3_config_master",
     "  audit_table            : main.monitoring.data_pipeline_execution_master",
+    "",
+    "S3 ingestion: set source_type = S3 to switch main.py to S3ConfigManager,",
+    "which reads s3_config_master (a single denormalized table, one row per",
+    "report/object) instead of source_system_table/ingestion_config_table.",
+    "Combine with source_system_id/source_name to scope to one S3 source.",
     "",
     "delta_layer is read from ingestion_config.delta_layer per object — not a job parameter.",
     "landing_volume_path is a job parameter — set it to your S3/Volume base path."
@@ -101,6 +107,7 @@
           "trigger_type":           "SCHEDULED",
           "source_system_table":    "",
           "ingestion_config_table": "",
+          "s3_config_table":        "",
           "audit_table":            ""
         }
       },

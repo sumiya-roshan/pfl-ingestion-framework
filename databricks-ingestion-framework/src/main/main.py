@@ -8,13 +8,20 @@
 # MAGIC The notebook discovers every ingestion object under that source from
 # MAGIC `ingestion_config` and processes them concurrently.
 # MAGIC
+# MAGIC **source_type = 'S3' is special:** S3 ingestion is config-driven from the
+# MAGIC separate `s3_config_master` table (one denormalized row per report/object)
+# MAGIC instead of `config_source_system` + `ingestion_config`. Setting the
+# MAGIC `source_type` widget to `S3` switches config backends to `S3ConfigManager`
+# MAGIC for this run — everything downstream (orchestrator, connector factory,
+# MAGIC parallel execution, audit) is unchanged.
+# MAGIC
 # MAGIC **Fault tolerance:** a failure on one table does NOT stop the others.
 # MAGIC All objects are attempted; a summary is printed at the end. The notebook
 # MAGIC raises a final exception only if at least one table failed, so the
 # MAGIC Databricks Job task correctly shows FAILED.
 # MAGIC
 # MAGIC **From config table (not widgets):**
-# MAGIC - `delta_layer`   → `ingestion_config.delta_layer` per object
+# MAGIC - `delta_layer`   → `ingestion_config.delta_layer` per object (S3: always BRONZE)
 # MAGIC - `pipeline_name` → auto-detected from Databricks Job name
 
 # COMMAND ----------
@@ -34,8 +41,10 @@ sys.path.append("..")
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ingestion.utils.config_manager import (
     ConfigManager,
+    S3ConfigManager,
     SOURCE_SYSTEM_TABLE,
     INGESTION_CONFIG_TABLE,
+    S3_CONFIG_TABLE,
     AUDIT_TABLE,
 )
 from ingestion.utils.orchestrator import IngestionOrchestrator
@@ -57,6 +66,7 @@ dbutils.widgets.text("max_parallel",           "4",                    "Max para
 dbutils.widgets.text("trigger_type",           "SCHEDULED",            "Trigger Type: SCHEDULED | MANUAL | EVENT")
 dbutils.widgets.text("source_system_table",    SOURCE_SYSTEM_TABLE,    "Source System Table (override)")
 dbutils.widgets.text("ingestion_config_table", INGESTION_CONFIG_TABLE, "Ingestion Config Table (override)")
+dbutils.widgets.text("s3_config_table",        S3_CONFIG_TABLE,        "s3_config_master Table (override, only used when source_type=S3)")
 dbutils.widgets.text("audit_table",            AUDIT_TABLE,            "Audit Table (override)")
 
 # COMMAND ----------
@@ -71,9 +81,11 @@ max_parallel           = int(dbutils.widgets.get("max_parallel")       or 4)
 trigger_type           = dbutils.widgets.get("trigger_type")           or "SCHEDULED"
 source_system_table    = dbutils.widgets.get("source_system_table")    or SOURCE_SYSTEM_TABLE
 ingestion_config_table = dbutils.widgets.get("ingestion_config_table") or INGESTION_CONFIG_TABLE
+s3_config_table         = dbutils.widgets.get("s3_config_table")        or S3_CONFIG_TABLE
 audit_table            = dbutils.widgets.get("audit_table")            or AUDIT_TABLE
 
 source_system_id = int(source_system_id_raw) if source_system_id_raw else None
+is_s3 = bool(source_type) and source_type.upper() == "S3"
 
 # COMMAND ----------
 
@@ -112,11 +124,21 @@ else:
 
 # COMMAND ----------
 
-config_mgr = ConfigManager(
-    spark,
-    source_system_table    = source_system_table,
-    ingestion_config_table = ingestion_config_table,
-)
+if is_s3:
+    # s3_config_master replaces ingestion_config for S3 only (one row per
+    # report/object). Source system identity + AWS credentials still come
+    # from config_source_system, same table/shape every other connector uses.
+    config_mgr = S3ConfigManager(
+        spark,
+        s3_config_table     = s3_config_table,
+        source_system_table = source_system_table,
+    )
+else:
+    config_mgr = ConfigManager(
+        spark,
+        source_system_table    = source_system_table,
+        ingestion_config_table = ingestion_config_table,
+    )
 
 object_ids = config_mgr.get_active_ingestion_objects(
     source_system_id = source_system_id,
@@ -130,6 +152,7 @@ print(f"  source_system_id : {source_system_id}")
 print(f"  source_name      : {source_name}")
 print(f"  source_type      : {source_type}")
 print(f"  pipeline_name    : {pipeline_name}")
+print(f"  config backend   : {'S3ConfigManager (s3_config_master)' if is_s3 else 'ConfigManager'}")
 print(f"\nFound {len(object_ids)} ingestion object(s) to run: {object_ids}")
 
 if not object_ids:
@@ -167,13 +190,33 @@ orchestrator = IngestionOrchestrator(
     audit_table            = audit_table,
     pipeline_name          = pipeline_name,
     environment            = environment,
+    config_mgr             = config_mgr,
 )
 
 def run_one(obj_id: int) -> dict:
-    """Run a single ingestion object through the orchestrator."""
+    """
+    Run a single ingestion object through the orchestrator.
+
+    landing_volume_path: for S3 (is_s3=True), each s3_config_master row
+    carries its own raw_sink_bucket_name/raw_sink_file_path, so the landing
+    path is resolved per-object here instead of using the shared widget
+    (blank on either column skips the raw landing write for that object).
+    For every other source_type, the shared landing_volume_path widget
+    applies to all objects, same as before.
+    """
+    object_landing_path = landing_volume_path
+    if is_s3:
+        ingest_obj = config_mgr.get_ingestion_object(obj_id)
+        object_landing_path = None
+        if ingest_obj.s3_raw_sink_bucket_name and ingest_obj.s3_raw_sink_file_path:
+            object_landing_path = (
+                f"s3://{ingest_obj.s3_raw_sink_bucket_name.strip('/')}/"
+                f"{ingest_obj.s3_raw_sink_file_path.strip('/')}"
+            )
+
     return orchestrator.run(
         ingestion_object_id = obj_id,
-        landing_volume_path = landing_volume_path,
+        landing_volume_path = object_landing_path,
         trigger_id          = trigger_id,
         trigger_type        = trigger_type,
     )

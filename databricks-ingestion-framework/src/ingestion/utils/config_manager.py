@@ -2,11 +2,16 @@
 Reads config_source_system / ingestion_config Delta tables and returns
 typed config objects consumed by the rest of the framework.
 
+Also defines S3ConfigManager, which reads the separate, S3-only
+s3_config_master table and adapts it into the same SourceSystemConfig /
+IngestionObjectConfig shapes — see the S3ConfigManager docstring below.
+
 Default table locations
 -----------------------
   SOURCE_SYSTEM_TABLE    = migration_x_catalog.pfl_x_schema.config_source_system
   INGESTION_CONFIG_TABLE = migration_x_catalog.pfl_x_schema.ingestion_config
   AUDIT_TABLE            = main.monitoring.data_pipeline_execution_master
+  S3_CONFIG_TABLE         = migration_x_catalog.pfl_x_schema.s3_config_master
 
 DDL note
 --------
@@ -25,6 +30,11 @@ from typing import Optional, List, Dict
 SOURCE_SYSTEM_TABLE    = "migration_x_catalog.pfl_x_schema.config_source_system"
 INGESTION_CONFIG_TABLE = "migration_x_catalog.pfl_x_schema.ingestion_config"
 AUDIT_TABLE            = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master"
+S3_CONFIG_TABLE        = "migration_x_catalog.pfl_x_schema.s3_config_master"
+
+# s3_config_master has no catalog column — fixed to match config_source_system /
+# ingestion_config, which both live under this catalog today.
+DEFAULT_S3_TARGET_CATALOG = "migration_x_catalog"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,6 +97,13 @@ class IngestionObjectConfig:
 
     file_format: Optional[str]
     sheet_name: Optional[str]
+
+    s3_source_bucket_name: Optional[str]
+    s3_external_path: Optional[str]
+    s3_column_delimiter: Optional[str]
+    s3_first_row_header: Optional[bool]
+    s3_raw_sink_bucket_name: Optional[str]
+    s3_raw_sink_file_path: Optional[str]
 
     target_catalog: str
     target_schema: str
@@ -187,6 +204,12 @@ class ConfigManager:
             data_read_size       = r.get("data_read_size"),
             file_format          = r.get("file_format"),
             sheet_name           = r.get("sheet_name"),
+            s3_source_bucket_name   = r.get("s3_source_bucket_name"),
+            s3_external_path        = r.get("s3_external_path"),
+            s3_column_delimiter     = r.get("s3_column_delimiter"),
+            s3_first_row_header     = r.get("s3_first_row_header"),
+            s3_raw_sink_bucket_name = r.get("s3_raw_sink_bucket_name"),
+            s3_raw_sink_file_path   = r.get("s3_raw_sink_file_path"),
             target_catalog       = r["target_catalog"],
             target_schema        = r["target_schema"],
             target_table         = r["target_table"],
@@ -262,3 +285,156 @@ class ConfigManager:
             int(r["ingestion_object_id"])
             for r in ic.select("ingestion_object_id").collect()
         ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S3ConfigManager
+# ─────────────────────────────────────────────────────────────────────────────
+
+class S3ConfigManager:
+    """
+    Same public surface as ConfigManager (get_source_system /
+    get_ingestion_object / get_active_ingestion_objects). Unlike
+    ConfigManager, only the ingestion-object side is backed by a different
+    table:
+
+      get_source_system()           → reads config_source_system, the SAME
+                                       table every other connector uses —
+                                       S3 sources get a normal row there
+                                       (source_type='S3') for identity and
+                                       AWS keys (.secret_scope/
+                                       .secret_key_credentials). Unchanged
+                                       from before this table existed.
+
+      get_ingestion_object()        → reads s3_config_master instead of
+      get_active_ingestion_objects()  ingestion_config. s3_config_master
+                                       REPLACES ingestion_config for S3
+                                       only: one row per report/object
+                                       (config_master_id), carrying the
+                                       source bucket/path, sink and
+                                       schedule columns for that report.
+                                       Its secret_scope/secret_key_credentials
+                                       columns are NOT read — AWS auth stays
+                                       a source_system-level concern, same as
+                                       every other connector.
+
+    This table is read only by S3ConfigManager and is only ever routed to
+    S3Connector — no other connector touches it.
+
+    Row → dataclass mapping (s3_config_master → IngestionObjectConfig)
+    ---------------------------------------------------------------------
+      .ingestion_object_id      = config_master_id
+      .source_object_name       = report_name
+      .s3_source_bucket_name    = source_bucket_name
+      .s3_external_path         = external_path
+      .s3_column_delimiter      = column_delimiter (default ',' at read time)
+      .s3_first_row_header      = first_row_header (default True at read time)
+      .primary_key_cols         = key_column
+      .write_mode               = 'merge' when key_column is set, else 'append'
+      .target_catalog            = DEFAULT_S3_TARGET_CATALOG (fixed — table has no
+                                    catalog column)
+      .target_schema             = bronze_sink_schema_name (used as-is)
+      .target_table              = bronze_sink_table_name
+    """
+
+    def __init__(
+        self,
+        spark,
+        s3_config_table: str = S3_CONFIG_TABLE,
+        source_system_table: str = SOURCE_SYSTEM_TABLE,
+    ):
+        self.spark = spark
+        self.s3_config_table = s3_config_table
+        self.source_system_table = source_system_table
+
+    # ── Row builders ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _build_ingestion_object(r: dict) -> IngestionObjectConfig:
+        key_column = r.get("key_column")
+
+        return IngestionObjectConfig(
+            ingestion_object_id     = int(r["config_master_id"]),
+            source_system_id        = int(r["source_system_id"]),
+            source_schema           = None,
+            source_object_name      = r["report_name"],
+            source_object_type      = "FILE",
+            custom_query            = None,
+            source_filter           = None,
+            load_type               = str(r.get("load_type") or "FULL").upper(),
+            write_mode              = "merge" if key_column else "append",
+            incremental_column      = None,
+            incremental_end_value   = None,
+            primary_key_cols        = key_column,
+            partition_column        = None,
+            data_read_size          = None,
+            file_format             = "csv",
+            sheet_name              = None,
+            s3_source_bucket_name   = r.get("source_bucket_name"),
+            s3_external_path        = r.get("external_path"),
+            s3_column_delimiter     = r.get("column_delimiter"),
+            s3_first_row_header     = r.get("first_row_header"),
+            s3_raw_sink_bucket_name = r.get("raw_sink_bucket_name"),
+            s3_raw_sink_file_path   = r.get("raw_sink_file_path"),
+            target_catalog          = DEFAULT_S3_TARGET_CATALOG,
+            target_schema           = r["bronze_sink_schema_name"],
+            target_table            = r["bronze_sink_table_name"],
+            schema_evolution_mode   = None,
+            pipeline_name           = r.get("pipeline_name") or "s3_ingestion",
+            delta_layer             = "BRONZE",
+        )
+
+    # ── Delta table readers ───────────────────────────────────────────────────
+
+    def get_source_system(self, source_system_id: int) -> SourceSystemConfig:
+        """Reads config_source_system — same table and row shape every
+        other connector uses. S3 sources are just another row there."""
+        rows = (
+            self.spark.table(self.source_system_table)
+            .filter(f"source_id = {source_system_id} AND is_active = true")
+            .collect()
+        )
+        if not rows:
+            raise ValueError(
+                f"No active row in {self.source_system_table} for source_id={source_system_id}"
+            )
+        return ConfigManager._build_source_system(rows[0].asDict())
+
+    def get_ingestion_object(self, ingestion_object_id: int) -> IngestionObjectConfig:
+        rows = (
+            self.spark.table(self.s3_config_table)
+            .filter(f"config_master_id = {ingestion_object_id}")
+            .collect()
+        )
+        if not rows:
+            raise ValueError(
+                f"No row in {self.s3_config_table} for config_master_id={ingestion_object_id}"
+            )
+        return self._build_ingestion_object(rows[0].asDict())
+
+    def get_active_ingestion_objects(
+        self,
+        source_type: Optional[str]      = None,
+        source_system_id: Optional[int] = None,
+        source_name: Optional[str]      = None,
+        pipeline_name: Optional[str]    = None,
+    ) -> List[int]:
+        """
+        Return config_master_id values matching the given filters.
+        source_type is accepted for interface compatibility with
+        ConfigManager but is always 'S3' here, so it only excludes results
+        when explicitly set to something else.
+        """
+        if source_type and source_type.upper() != "S3":
+            return []
+
+        df = self.spark.table(self.s3_config_table).filter("is_active = true")
+
+        if source_system_id:
+            df = df.filter(f"source_system_id = {source_system_id}")
+        if source_name:
+            df = df.filter(f"lower(source_name) = '{source_name.lower()}'")
+        if pipeline_name:
+            df = df.filter(f"pipeline_name = '{pipeline_name}'")
+
+        return [int(r["config_master_id"]) for r in df.select("config_master_id").collect()]
