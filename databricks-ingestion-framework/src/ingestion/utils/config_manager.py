@@ -434,7 +434,7 @@ class S3ConfigManager:
             df = df.filter(f"source_system_id = {source_system_id}")
         if source_name:
             df = df.filter(f"lower(source_name) = '{source_name.lower()}'")
-        if pipeline_name:
-            df = df.filter(f"pipeline_name = '{pipeline_name}'")
+        # if pipeline_name:
+        #     df = df.filter(f"pipeline_name = '{pipeline_name}'")
 
         return [int(r["config_master_id"]) for r in df.select("config_master_id").collect()]
