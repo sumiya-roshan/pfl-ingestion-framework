@@ -25,5 +25,6 @@ CREATE TABLE migration_x_catalog.pfl_x_schema.config_source_system (
   created_by               STRING,
   created_ts               TIMESTAMP,
   updated_by               STRING,
-  updated_ts               TIMESTAMP
+  updated_ts               TIMESTAMP,
+  extra_params             STRING
 ) USING DELTA;

@@ -1,8 +1,4 @@
 # Databricks notebook source
-dbutils.library.restartPython()
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC # Ingestion — Source System Entry Point
 # MAGIC
@@ -23,11 +19,16 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 # MAGIC %pip install paramiko --quiet
 
 # COMMAND ----------
 
 import sys
+import json
 sys.path.append("..")   
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -182,6 +183,7 @@ with ThreadPoolExecutor(max_workers=max_parallel) as pool:
     futures = {pool.submit(run_one, oid): oid for oid in object_ids}
     for future in as_completed(futures):
         results.append(future.result())
+        print(results)
 
 # COMMAND ----------
 
