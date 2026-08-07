@@ -53,6 +53,8 @@ class SourceSystemConfig:
     sftp_file_pattern: Optional[str]
     sftp_host_key_fingerprint: Optional[str]
 
+    extra_params: Optional[str]
+
     secret_scope: str
     secret_key_credentials: Optional[str]   # key → JSON {"username":…,"password":…}
 
@@ -163,6 +165,7 @@ class ConfigManager:
             secret_scope            = r["secret_scope"],
             secret_key_credentials  = r.get("secret_key_credentials"),
             is_active               = r.get("is_active", True),
+            extra_params            = r.get("extra_params"),
         )
 
     @staticmethod

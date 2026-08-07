@@ -43,7 +43,8 @@ writers, which write one partition per task, so this is also what gives the
 write side its parallelism — no separate write-side setting needed.
 """
 from typing import Optional, Tuple
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlencode
+import json
 
 from pyspark.sql import DataFrame
 
@@ -60,12 +61,12 @@ class MongoConnector(BaseConnector):
 
     def _build_connection_uri(self) -> str:
         """
-        Construct a MongoDB connection URI.
-        If connection_uri is set in config_source_system, it is treated as a
-        template that may contain the literal placeholders {username} and
-        {password}; they are substituted with the credential values from the
-        secret.  If no placeholders are present, credentials are prepended in
-        the standard  mongodb://user:pass@  fashion.
+        Construct a MongoDB Atlas SRV connection URI dynamically from
+        config_source_system columns (no raw connection_uri column).
+
+        .host          → Atlas cluster host, e.g. 'cluster0.3enwjat.mongodb.net'
+        .extra_params  → JSON string of extra query params, e.g.
+                            {"authSource": "admin", "appName": "Cluster0"}
         """
         ss = self.source_system
         username, password = self.secrets.get_credentials(
@@ -74,18 +75,24 @@ class MongoConnector(BaseConnector):
         enc_user = quote_plus(username)
         enc_pass = quote_plus(password)
 
-        if ss.connection_uri:
-            uri = ss.connection_uri
-            if "{username}" in uri or "{password}" in uri:
-                return uri.format(username=enc_user, password=enc_pass)
-            # Assume the URI already contains credentials (e.g. injected at provisioning)
-            return uri
+        host = ss.host
+        if not host:
+            raise ValueError(
+                f"config_source_system.host is not set for source '{ss.source_name}'"
+            )
 
-        # Build a standard URI from host/port
-        # host = ss.host or "localhost"
-        # port = ss.port or 27017
-        return f"mongodb+srv://{enc_user}:{enc_pass}@cluster0.3enwjat.mongodb.net/"
-    
+        uri = f"mongodb+srv://{enc_user}:{enc_pass}@{host}/"
+
+        if ss.extra_params:
+            try:
+                params = json.loads(ss.extra_params)
+            except (TypeError, ValueError):
+                raise ValueError(f"extra_params is not valid JSON: {ss.extra_params!r}")
+            query_string = urlencode(params)
+            uri = f"{uri}?{query_string}"
+
+        return uri
+
 
     def _resolve_database(self) -> str:
         """
@@ -195,3 +202,4 @@ class MongoConnector(BaseConnector):
                 max_watermark = str(max_row[0][0])
 
         return df, max_watermark
+ 
