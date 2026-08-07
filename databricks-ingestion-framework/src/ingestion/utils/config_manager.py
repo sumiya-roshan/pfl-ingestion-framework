@@ -66,6 +66,12 @@ class IngestionTaskConfig:
     target_table: str
     pipeline_name: str
     delta_layer: Optional[str]
+    data_read_size: Optional[int]
+    file_format: Optional[str]
+    write_mode: str
+    schema_evolution_mode: Optional[str]
+    partition_column: Optional[str]
+    source_filter: Optional[str]
 
     @property
     def primary_key_list(self) -> Optional[List[str]]:
@@ -151,12 +157,15 @@ class ConfigManager:
             r.get("Primary_Key_Cols")
         )
 
+        load_type = str(r.get("Load_type") or r.get("Load_Type") or "FULL").upper()
+        default_write_mode = "overwrite" if load_type == "FULL" else "append"
+
         return IngestionTaskConfig(
             config_id           = int(r.get("Config_ID", 0)),
             source_schema       = r.get("Source_Schema_Name"),
             source_object_name  = source_object,
             custom_query        = r.get("Source_Query"),
-            load_type           = str(r.get("Load_type") or r.get("Load_Type") or "FULL").upper(),
+            load_type           = load_type,
             incremental_column  = inc_col,
             primary_key_cols    = pk_cols,
             target_catalog      = self.target_catalog,
@@ -164,6 +173,12 @@ class ConfigManager:
             target_table        = r.get("Sink_Table_Name"),
             pipeline_name       = r.get("Pipeline_Name"),
             delta_layer         = r.get("Delta_Layer"),
+            data_read_size      = r.get("data_size") or r.get("data_read_size"),
+            file_format         = r.get("file_format"),
+            write_mode          = r.get("write_mode") or default_write_mode,
+            schema_evolution_mode = r.get("schema_evolution_mode"),
+            partition_column    = r.get("partition_column"),
+            source_filter       = r.get("source_filter"),
         )
 
     # ── Database Operations ───────────────────────────────────────────────────
