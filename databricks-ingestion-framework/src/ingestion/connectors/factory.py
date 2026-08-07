@@ -4,7 +4,7 @@ Maps source_type → connector implementation.
 This is the single file to touch when a new source type is added.
 Routing is based on source_system.source_type (case-insensitive).
 """
-from ..utils.config_manager import SourceSystemConfig, IngestionObjectConfig
+from ..utils.config_manager import SourceSystemConfig, IngestionTaskConfig
 from .base_connector import BaseConnector
 from .jdbc_connector import JdbcConnector
 from .sftp_connector import SftpConnector
@@ -30,7 +30,7 @@ _CONNECTOR_MAP: dict = {
 def get_connector(
     spark,
     source_system: SourceSystemConfig,
-    ingest_obj: IngestionObjectConfig,
+    ingest_obj: IngestionTaskConfig,
     secrets,
 ) -> BaseConnector:
     """
@@ -40,7 +40,7 @@ def get_connector(
     ----------
     spark         : active SparkSession
     source_system : SourceSystemConfig loaded from config_source_system
-    ingest_obj    : IngestionObjectConfig loaded from ingestion_config
+    ingest_obj    : IngestionTaskConfig loaded from ingestion_config
     secrets       : SecretResolver instance
 
     Raises

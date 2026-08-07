@@ -63,14 +63,13 @@ class AuditLogger:
         Inserts a RUNNING row into data_pipeline_execution_master.
         Returns the run_id (UUID string) that must be passed to complete_run().
 
-        Accepts ingest_obj (IngestionObjectConfig) and source_sys (SourceSystemConfig)
+        Accepts ingest_obj (IngestionTaskConfig) and source_sys (SourceSystemConfig)
         directly — no manual field mapping required in the caller.
         """
         run_id     = str(uuid.uuid4())
         now        = datetime.utcnow()
         biz_date   = business_date if business_date is not None else now.date()
-        obj_id_int = int(ingest_obj.ingestion_object_id)
-
+        obj_id_int = int(ingest_obj.config_id)
 
         schema = StructType([
             StructField("config_master_id",       IntegerType(),        True),
@@ -163,14 +162,14 @@ class AuditLogger:
 
     # ── Query helpers ─────────────────────────────────────────────────────────
 
-    def get_last_run_status(self, ingestion_object_id: int) -> Optional[str]:
+    def get_last_run_status(self, config_id: int) -> Optional[str]:
         """
         Returns the status of the most recent run for the given
-        ingestion_object_id, or None if no runs exist.
+        config_id, or None if no runs exist.
         """
         rows = (
             self.spark.table(self.table)
-            .filter(f"table_id = {int(ingestion_object_id)}")
+            .filter(f"table_id = {int(config_id)}")
             .orderBy("trigger_time", ascending=False)
             .limit(1)
             .select("status")

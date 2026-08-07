@@ -1,31 +1,21 @@
 """
-Reads config_source_system / ingestion_config Delta tables and returns
-typed config objects consumed by the rest of the framework.
+Reads config_source_system and dynamically routes to child ingestion config tables
+via the config_master table. Returns typed config objects.
 
 Default table locations
 -----------------------
-  SOURCE_SYSTEM_TABLE    = migration_x_catalog.pfl_x_schema.config_source_system
-  INGESTION_CONFIG_TABLE = migration_x_catalog.pfl_x_schema.ingestion_config
-  AUDIT_TABLE            = main.monitoring.data_pipeline_execution_master
-
-DDL note
---------
-  ingestion_config requires two columns beyond the original schema:
-    pipeline_name  STRING   -- groups tables by Databricks Job name
-    delta_layer    STRING   -- e.g. BRONZE; falls back to 'BRONZE' if NULL
-  Run once:
-    ALTER TABLE migration_x_catalog.pfl_x_schema.ingestion_config
-      ADD COLUMNS (pipeline_name STRING, delta_layer STRING);
+  SOURCE_SYSTEM_TABLE = migration_x_catalog.pfl_x_schema.config_source_system
+  CONFIG_MASTER_TABLE = migration_x_catalog.pfl_x_schema.config_master
+  AUDIT_TABLE         = migration_x_catalog.pfl_x_schema.data_pipeline_execution_master
 """
 import json
 from dataclasses import dataclass
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 # ── Fully-qualified table name defaults ───────────────────────────────────────
-SOURCE_SYSTEM_TABLE    = "migration_x_catalog.pfl_x_schema.config_source_system"
-INGESTION_CONFIG_TABLE = "migration_x_catalog.pfl_x_schema.ingestion_config"
-AUDIT_TABLE            = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master"
-
+SOURCE_SYSTEM_TABLE = "migration_x_catalog.pfl_x_schema.config_source_system"
+CONFIG_MASTER_TABLE = "migration_x_catalog.pfl_x_schema.config_master"
+AUDIT_TABLE         = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data classes
@@ -43,8 +33,8 @@ class SourceSystemConfig:
     port: Optional[int]
     database_name: Optional[str]
 
-    driver_class: Optional[str]       # explicit JDBC driver; falls back to built-in map
-    connection_uri: Optional[str]     # full URI override
+    driver_class: Optional[str]       
+    connection_uri: Optional[str]     
 
     nosql_replica_set: Optional[str]
     nosql_collection_name: Optional[str]
@@ -56,51 +46,26 @@ class SourceSystemConfig:
     extra_params: Optional[str]
 
     secret_scope: str
-    secret_key_credentials: Optional[str]   # key → JSON {"username":…,"password":…}
+    secret_key_credentials: Optional[str] 
 
     is_active: Optional[bool] = True
 
 
 @dataclass
-class IngestionObjectConfig:
-    """One row per object (table / view / query / file) → ingestion_config."""
-    ingestion_object_id: int
-    source_system_id: int
-
+class IngestionTaskConfig:
+    """Unified configuration for a single ingestion task, reading from flattened child config tables."""
+    config_id: int
     source_schema: Optional[str]
     source_object_name: str
-    source_object_type: str          # TABLE | VIEW | QUERY | FILE
-
     custom_query: Optional[str]
-    source_filter: Optional[str]
-
-    load_type: str                   # FULL | INCREMENTAL
-    write_mode: str                  # append | merge | overwrite
-
+    load_type: str
     incremental_column: Optional[str]
-    incremental_end_value: Optional[str]
-
-    primary_key_cols: Optional[str]  # comma-separated
-    partition_column: Optional[str]
-
-    data_read_size: Optional[int]
-
-    file_format: Optional[str]
-    sheet_name: Optional[str]
-
-    target_catalog: str
+    primary_key_cols: Optional[str]
+    target_catalog: str           
     target_schema: str
     target_table: str
-
-    schema_evolution_mode: Optional[str]
-
-    # Pipeline grouping — matches Databricks Job name
     pipeline_name: str
-
-    # Delta layer (BRONZE / SILVER / GOLD) — from config table, not widget
     delta_layer: Optional[str]
-
-    # ── Derived helpers ────────────────────────────────────────────────────
 
     @property
     def primary_key_list(self) -> Optional[List[str]]:
@@ -114,7 +79,6 @@ class IngestionObjectConfig:
 
     @property
     def effective_delta_layer(self) -> str:
-        """Returns delta_layer from config, defaulting to BRONZE."""
         return (self.delta_layer or "BRONZE").upper()
 
 
@@ -124,24 +88,21 @@ class IngestionObjectConfig:
 
 class ConfigManager:
     """
-    Loads source system and ingestion object configuration from Delta tables
-    or a local JSON file (dev / test only).
+    Loads source system configuration, and routes through config_master to dynamically
+    fetch active ingestion tasks from the appropriate child config table.
     """
 
     def __init__(
         self,
         spark,
         source_system_table: str = SOURCE_SYSTEM_TABLE,
-        ingestion_config_table: str = INGESTION_CONFIG_TABLE,
+        config_master_table: str = CONFIG_MASTER_TABLE,
+        target_catalog: str      = "hive_metastore"
     ):
-        self.spark                 = spark
-        self.source_system_table   = source_system_table
-        self.ingestion_config_table = ingestion_config_table
-
-        self._source_systems:   Dict[int, SourceSystemConfig]   = {}
-        self._ingestion_objects: Dict[int, IngestionObjectConfig] = {}
-
-
+        self.spark               = spark
+        self.source_system_table = source_system_table
+        self.config_master_table = config_master_table
+        self.target_catalog      = target_catalog
 
     # ── Row builders ─────────────────────────────────────────────────────────
 
@@ -168,37 +129,46 @@ class ConfigManager:
             extra_params            = r.get("extra_params"),
         )
 
-    @staticmethod
-    def _build_ingestion_object(r: dict) -> IngestionObjectConfig:
-        return IngestionObjectConfig(
-            ingestion_object_id  = int(r["ingestion_object_id"]),
-            source_system_id     = int(r["source_system_id"]),
-            source_schema        = r.get("source_schema"),
-            source_object_name   = r["source_object_name"],
-            source_object_type   = str(r.get("source_object_type", "TABLE")).upper(),
-            custom_query         = r.get("custom_query"),
-            source_filter        = r.get("source_filter"),
-            load_type            = str(r.get("load_type", "FULL")).upper(),
-            write_mode           = str(r.get("write_mode", "append")).lower(),
-            incremental_column   = r.get("incremental_column"),
-            incremental_end_value= r.get("incremental_end_value"),
-            primary_key_cols     = r.get("primary_key_cols"),
-            partition_column     = r.get("partition_column"),
-            data_read_size       = r.get("data_read_size"),
-            file_format          = r.get("file_format"),
-            sheet_name           = r.get("sheet_name"),
-            target_catalog       = r["target_catalog"],
-            target_schema        = r["target_schema"],
-            target_table         = r["target_table"],
-            schema_evolution_mode= r.get("schema_evolution_mode"),
-            pipeline_name        = r.get("pipeline_name"),
-            delta_layer          = r.get("delta_layer"),
+    def _build_ingestion_task(self, r: dict) -> IngestionTaskConfig:
+        """
+        Dynamically falls back across different column aliases to support 
+        both RDBMS and NoSQL schema structures without hardcoding.
+        """
+        source_object = (
+            r.get("Source_Table_Name") or 
+            r.get("Source_Collection_Name") or 
+            r.get("Source_Object_Name") or 
+            ""
+        )
+        
+        inc_col = (
+            r.get("Key_Column") or 
+            r.get("Incremental_Column")
+        )
+        
+        pk_cols = (
+            r.get("Key_Column") or 
+            r.get("Primary_Key_Cols")
         )
 
-    # ── Delta table readers ───────────────────────────────────────────────────
+        return IngestionTaskConfig(
+            config_id           = int(r.get("Config_ID", 0)),
+            source_schema       = r.get("Source_Schema_Name"),
+            source_object_name  = source_object,
+            custom_query        = r.get("Source_Query"),
+            load_type           = str(r.get("Load_type") or r.get("Load_Type") or "FULL").upper(),
+            incremental_column  = inc_col,
+            primary_key_cols    = pk_cols,
+            target_catalog      = self.target_catalog,
+            target_schema       = r.get("Sink_Schema_Name"),
+            target_table        = r.get("Sink_Table_Name"),
+            pipeline_name       = r.get("Pipeline_Name"),
+            delta_layer         = r.get("Delta_Layer"),
+        )
+
+    # ── Database Operations ───────────────────────────────────────────────────
 
     def get_source_system(self, source_system_id: int) -> SourceSystemConfig:
-
         rows = (
             self.spark.table(self.source_system_table)
             .filter(f"source_id = {source_system_id} AND is_active = true")
@@ -210,55 +180,47 @@ class ConfigManager:
             )
         return self._build_source_system(rows[0].asDict())
 
-    def get_ingestion_object(self, ingestion_object_id: int) -> IngestionObjectConfig:
+    def get_active_tasks(
+        self,
+        config_master_id: int,
+        source_system_id: int
+    ) -> Tuple[SourceSystemConfig, List[IngestionTaskConfig]]:
+        """
+        1. Fetch Source System by source_system_id to get credentials & source_name.
+        2. Fetch the specific child config table location from config_master.
+        3. Query the child config table for all active tasks for this source_name.
+        """
+        
+        # 1. Resolve source system
+        source_sys = self.get_source_system(source_system_id)
+        source_name = source_sys.source_name
 
-        rows = (
-            self.spark.table(self.ingestion_config_table)
-            .filter(f"ingestion_object_id = {ingestion_object_id}")
+        # 2. Find child config table location from master
+        master_rows = (
+            self.spark.table(self.config_master_table)
+            .filter(f"config_id = {config_master_id}")
             .collect()
         )
-        if not rows:
-            raise ValueError(
-                f"No row in {self.ingestion_config_table} "
-                f"for ingestion_object_id={ingestion_object_id}"
-            )
-        return self._build_ingestion_object(rows[0].asDict())
+        if not master_rows:
+            raise ValueError(f"No entry in {self.config_master_table} for config_id={config_master_id}")
+        
+        m_row = master_rows[0].asDict()
+        catalog = m_row.get("config_catalog_name")
+        schema = m_row.get("config_schema_name")
+        table = m_row.get("config_table_name")
+        
+        child_table_fqn = f"{catalog}.{schema}.{table}"
 
-    def get_active_ingestion_objects(
-        self,
-        source_type: Optional[str]      = None,
-        source_system_id: Optional[int] = None,
-        source_name: Optional[str]      = None,
-        pipeline_name: Optional[str]    = None,
-    ) -> List[int]:
-        """
-        Return ingestion_object_id values matching the given filters.
-        All filters are optional and ANDed together.
+        # 3. Query the child config table
+        # We assume the child table uses 'Is_Active = 1' and 'Source_Name' based on the schemas provided.
+        child_rows = (
+            self.spark.table(child_table_fqn)
+            .filter(f"Source_Name = '{source_name}' AND Is_Active = 1")
+            .collect()
+        )
 
-        Parameters
-        ----------
-        source_type      : filter by config_source_system.source_type (e.g. 'POSTGRES')
-        source_system_id : filter by config_source_system.source_id
-        source_name      : filter by config_source_system.source_name (case-insensitive)
-        pipeline_name    : filter by ingestion_config.pipeline_name
-        """
+        tasks = []
+        for r in child_rows:
+            tasks.append(self._build_ingestion_task(r.asDict()))
 
-        ic = self.spark.table(self.ingestion_config_table)
-
-        if pipeline_name:
-            ic = ic.filter(f"pipeline_name = '{pipeline_name}'")
-
-        if source_system_id or source_type or source_name:
-            ss = self.spark.table(self.source_system_table).filter("is_active = true")
-            if source_system_id:
-                ss = ss.filter(f"source_id = {source_system_id}")
-            if source_type:
-                ss = ss.filter(f"upper(source_type) = '{source_type.upper()}'")
-            if source_name:
-                ss = ss.filter(f"lower(source_name) = '{source_name.lower()}'")
-            ic = ic.join(ss.select("source_id"), ic["source_system_id"] == ss["source_id"], "inner")
-
-        return [
-            int(r["ingestion_object_id"])
-            for r in ic.select("ingestion_object_id").collect()
-        ]
+        return source_sys, tasks

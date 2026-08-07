@@ -17,8 +17,7 @@ Key behaviours
 from datetime import date
 from typing import Optional
 
-from .config_manager import ConfigManager, IngestionObjectConfig, SourceSystemConfig
-from .config_manager import SOURCE_SYSTEM_TABLE, INGESTION_CONFIG_TABLE, AUDIT_TABLE
+from .config_manager import IngestionTaskConfig, SourceSystemConfig
 from .audit import AuditLogger
 from ..connectors.factory import get_connector
 from .writers.s3_writer import S3RawWriter
@@ -47,9 +46,7 @@ class IngestionOrchestrator:
         self,
         spark,
         dbutils=None,
-        source_system_table: str    = SOURCE_SYSTEM_TABLE,
-        ingestion_config_table: str = INGESTION_CONFIG_TABLE,
-        audit_table: str            = AUDIT_TABLE,
+        audit_table: str            = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master",
         pipeline_name: str          = "ingestion_framework",
         environment: str            = "dev",
         department_id: int          = 0,
@@ -58,11 +55,6 @@ class IngestionOrchestrator:
         self.pipeline_name = pipeline_name
         self.environment   = environment
 
-        self.config_mgr    = ConfigManager(
-            spark,
-            source_system_table    = source_system_table,
-            ingestion_config_table = ingestion_config_table,
-        )
         self.audit         = AuditLogger(spark, audit_table=audit_table, department_id=department_id)
         self.secrets       = SecretResolver(dbutils)
         self.s3_writer     = S3RawWriter()
@@ -73,7 +65,8 @@ class IngestionOrchestrator:
 
     def run(
         self,
-        ingestion_object_id: int,
+        source_sys: SourceSystemConfig,
+        task: IngestionTaskConfig,
         landing_volume_path: Optional[str] = None,
         trigger_id: Optional[str]          = None,
         trigger_type: str                  = "MANUAL",
@@ -87,7 +80,8 @@ class IngestionOrchestrator:
 
         Parameters
         ----------
-        ingestion_object_id : PK of ingestion_config row to run
+        source_sys          : Pre-fetched SourceSystemConfig
+        task                : Pre-fetched IngestionTaskConfig
         landing_volume_path : base S3/Volume path for raw landing write (widget value);
                               if None/empty, landing write is skipped
         trigger_id          : Databricks job run ID (for audit traceability)
@@ -96,10 +90,9 @@ class IngestionOrchestrator:
 
         Returns
         -------
-        dict with keys: ingestion_object_id, run_id, status, rows_read, error
+        dict with keys: config_id, run_id, status, rows_read, error
         """
-        ingest_obj  = self.config_mgr.get_ingestion_object(ingestion_object_id)
-        source_sys  = self.config_mgr.get_source_system(ingest_obj.source_system_id)
+        ingest_obj = task
 
         # pipeline_name and delta_layer come from config table, with fallbacks
         pipeline_name = ingest_obj.pipeline_name or self.pipeline_name
@@ -112,7 +105,7 @@ class IngestionOrchestrator:
         )
 
         self.logger.info(
-            f"[{run_id}] START ingestion_object_id={ingestion_object_id} "
+            f"[{run_id}] START config_id={ingest_obj.config_id} "
             f"source='{source_sys.source_name}' object='{ingest_obj.source_object_name}' "
             f"load_type={ingest_obj.load_type} delta_layer={delta_layer} "
             f"watermark_start={watermark_start}"
@@ -166,7 +159,7 @@ class IngestionOrchestrator:
             )
             self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
             return {
-                "ingestion_object_id": ingestion_object_id,
+                "config_id": ingest_obj.config_id,
                 "run_id":   run_id,
                 "status":   "SUCCESS",
                 "rows_read": rows_read,
@@ -179,7 +172,7 @@ class IngestionOrchestrator:
             # raises a summary exception if any table failed.
             error_msg = str(exc)
             self.logger.error(
-                f"[{run_id}] FAILED ingestion_object_id={ingestion_object_id}: {error_msg}",
+                f"[{run_id}] FAILED config_id={ingest_obj.config_id}: {error_msg}",
                 exc_info=True,
             )
             try:
@@ -187,7 +180,7 @@ class IngestionOrchestrator:
             except Exception as audit_exc:
                 self.logger.error(f"[{run_id}] Could not write FAILED status to audit: {audit_exc}")
             return {
-                "ingestion_object_id": ingestion_object_id,
+                "config_id": ingest_obj.config_id,
                 "run_id":   run_id,
                 "status":   "FAILED",
                 "rows_read": 0,
@@ -196,7 +189,7 @@ class IngestionOrchestrator:
 
     # ── Watermark resolution ──────────────────────────────────────────────────
 
-    def _resolve_watermark(self, ingest_obj: IngestionObjectConfig) -> Optional[str]:
+    def _resolve_watermark(self, ingest_obj: IngestionTaskConfig) -> Optional[str]:
         if ingest_obj.load_type != "INCREMENTAL" or not ingest_obj.incremental_column:
             return None
 
