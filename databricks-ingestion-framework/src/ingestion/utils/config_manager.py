@@ -68,7 +68,7 @@ class SourceSystemConfig:
     secret_scope: str
     secret_key_credentials: Optional[str]   # key → JSON {"username":…,"password":…}
 
-    is_active: Optional[bool] = True
+    is_active: int
 
 
 @dataclass
@@ -181,7 +181,7 @@ class ConfigManager:
             sftp_host_key_fingerprint = r.get("sftp_host_key_fingerprint"),
             secret_scope            = r["secret_scope"],
             secret_key_credentials  = r.get("secret_key_credentials"),
-            is_active               = r.get("is_active", True),
+            is_active               = r.get("is_active", 1),
             extra_params            = r.get("extra_params"),
         )
 
@@ -224,7 +224,7 @@ class ConfigManager:
 
         rows = (
             self.spark.table(self.source_system_table)
-            .filter(f"source_id = {source_system_id} AND is_active = true")
+            .filter(f"source_id = {source_system_id} AND is_active = 1")
             .collect()
         )
         if not rows:
@@ -272,7 +272,7 @@ class ConfigManager:
             ic = ic.filter(f"pipeline_name = '{pipeline_name}'")
 
         if source_system_id or source_type or source_name:
-            ss = self.spark.table(self.source_system_table).filter("is_active = true")
+            ss = self.spark.table(self.source_system_table).filter("is_active = 1")
             if source_system_id:
                 ss = ss.filter(f"source_id = {source_system_id}")
             if source_type:
@@ -391,7 +391,7 @@ class S3ConfigManager:
         other connector uses. S3 sources are just another row there."""
         rows = (
             self.spark.table(self.source_system_table)
-            .filter(f"source_id = {source_system_id} AND is_active = true")
+            .filter(f"source_id = {source_system_id} AND is_active = 1")
             .collect()
         )
         if not rows:
@@ -428,7 +428,7 @@ class S3ConfigManager:
         if source_type and source_type.upper() != "S3":
             return []
 
-        df = self.spark.table(self.s3_config_table).filter("is_active = true")
+        df = self.spark.table(self.s3_config_table).filter("is_active = 1")
 
         if source_system_id:
             df = df.filter(f"source_system_id = {source_system_id}")
