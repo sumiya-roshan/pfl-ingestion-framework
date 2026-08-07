@@ -190,4 +190,3 @@ class SecretResolver:
                 f"'password' field. Keys found: {list(payload.keys())}"
             )
         return username, password
-

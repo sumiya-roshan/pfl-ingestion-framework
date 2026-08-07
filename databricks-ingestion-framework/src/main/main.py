@@ -52,8 +52,8 @@ dbutils.widgets.text("trigger_type",           "SCHEDULED",            "Trigger 
 
 # COMMAND ----------
 
-config_master_id_raw   = dbutils.widgets.get("config_master_id")
-source_system_id_raw   = dbutils.widgets.get("source_system_id")
+config_master_id_raw   = int(dbutils.widgets.get("config_master_id"))
+source_system_id_raw   = int(dbutils.widgets.get("source_system_id"))
 
 if not config_master_id_raw or not source_system_id_raw:
     dbutils.notebook.exit("Error: config_master_id and source_system_id are required.")

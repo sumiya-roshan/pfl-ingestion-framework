@@ -57,7 +57,6 @@ class SftpConnector(BaseConnector):
 
     def _get_sftp_client(self):
         """Open a paramiko SFTP client and return (sftp, transport)."""
-
         ss = self.source_system
         username, password = self.secrets.get_credentials(
             ss.secret_scope, ss.secret_key_credentials
@@ -162,7 +161,7 @@ class SftpConnector(BaseConnector):
     # ── Public extract ────────────────────────────────────────────────────────
 
     def extract(self, watermark_start: Optional[str]) -> Tuple[DataFrame, Optional[str]]:
-        sftp, transport = self._get_sftp_client()
+        # sftp, transport = self._get_sftp_client()
         remote_dir  = self._resolve_remote_dir()
         pattern     = self._resolve_file_pattern()
         local_dir   = self._resolve_staging_dir()

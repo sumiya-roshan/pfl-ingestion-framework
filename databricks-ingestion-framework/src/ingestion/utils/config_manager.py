@@ -48,7 +48,7 @@ class SourceSystemConfig:
     secret_scope: str
     secret_key_credentials: Optional[str] 
 
-    is_active: Optional[bool] = True
+    is_active: int
 
 
 @dataclass
@@ -131,7 +131,7 @@ class ConfigManager:
             sftp_host_key_fingerprint = r.get("sftp_host_key_fingerprint"),
             secret_scope            = r["secret_scope"],
             secret_key_credentials  = r.get("secret_key_credentials"),
-            is_active               = r.get("is_active", True),
+            is_active               = r.get("is_active", 1),
             extra_params            = r.get("extra_params"),
         )
 
@@ -186,7 +186,7 @@ class ConfigManager:
     def get_source_system(self, source_system_id: int) -> SourceSystemConfig:
         rows = (
             self.spark.table(self.source_system_table)
-            .filter(f"source_id = {source_system_id} AND is_active = true")
+            .filter(f"source_id = {source_system_id} AND is_active = 1")
             .collect()
         )
         if not rows:
@@ -209,6 +209,8 @@ class ConfigManager:
         # 1. Resolve source system
         source_sys = self.get_source_system(source_system_id)
         source_name = source_sys.source_name
+        print(source_sys)
+        print(source_name)
 
         # 2. Find child config table location from master
         master_rows = (
@@ -216,6 +218,7 @@ class ConfigManager:
             .filter(f"config_id = {config_master_id}")
             .collect()
         )
+        print(master_rows)
         if not master_rows:
             raise ValueError(f"No entry in {self.config_master_table} for config_id={config_master_id}")
         
@@ -230,7 +233,7 @@ class ConfigManager:
         # We assume the child table uses 'Is_Active = 1' and 'Source_Name' based on the schemas provided.
         child_rows = (
             self.spark.table(child_table_fqn)
-            .filter(f"Source_Name = '{source_name}' AND Is_Active = 1")
+            .filter(f"source_Name = '{source_name}' AND is_active = 1")
             .collect()
         )
 
