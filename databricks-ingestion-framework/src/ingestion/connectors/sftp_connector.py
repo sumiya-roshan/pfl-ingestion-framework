@@ -35,35 +35,30 @@ This is enabled by default; to disable, set source_filter = 'no_archive'
 """
 import fnmatch
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
 from pyspark.sql import DataFrame
 
 from .base_connector import BaseConnector
+from io import StringIO
 import paramiko
-
-
-# Default staging root when landing_volume_path is not set in config_source_system.
-# In production, override this via landing_volume_path pointing to a Databricks Volume.
-_FALLBACK_STAGING_ROOT = "/tmp/sftp_staging"
-
-# Convention: set source_filter = 'no_archive' to skip post-download archival.
-_NO_ARCHIVE_FLAG = "no_archive"
-
 
 class SftpConnector(BaseConnector):
 
-    # ── Private helpers ───────────────────────────────────────────────────────
-
     def _get_sftp_client(self):
-        """Open a paramiko SFTP client and return (sftp, transport)."""
         ss = self.source_system
-        username, password = self.secrets.get_credentials(
-            ss.secret_scope, ss.secret_key_credentials
+        username, private_key = self.secrets.get_credentials(
+            ss.secret_scope,
+            ss.secret_key_credentials
         )
-
+        key_file = StringIO(private_key)
+        pkey = paramiko.RSAKey.from_private_key(key_file)
         transport = paramiko.Transport((ss.host, ss.port or 22))
-        transport.connect(username=username, password=password)
+        transport.connect(
+            username=username,
+            pkey=pkey
+        )
         sftp = paramiko.SFTPClient.from_transport(transport)
         return sftp, transport
 
@@ -77,6 +72,7 @@ class SftpConnector(BaseConnector):
         root = (ss.sftp_root_path or "/").rstrip("/")
         if io.source_schema:
             return f"{root}/{io.source_schema.strip('/')}"
+        print('root:',root)
         return root
 
     def _resolve_file_pattern(self) -> str:
@@ -88,32 +84,59 @@ class SftpConnector(BaseConnector):
         io = self.ingest_obj
         ss = self.source_system
         obj_name = io.source_object_name or ""
+        print('obj_name:',obj_name)
         glob_chars = {"*", "?", "[", "]"}
         if any(c in obj_name for c in glob_chars):
             return obj_name
+        print('obj_name:',obj_name)
         return "*"
 
     def _resolve_staging_dir(self) -> str:
         """Return the local staging directory for downloaded files."""
         ss = self.source_system
         io = self.ingest_obj
-        root = (ss.landing_volume_path or _FALLBACK_STAGING_ROOT).rstrip("/")
+        root = ss.landing_volume_path.rstrip("/")
+        print('_resolve_staging_dir:',root,io.ingestion_object_id)
         return os.path.join(root, str(io.ingestion_object_id))
 
-    def _list_matching_files(self, sftp, remote_dir: str, pattern: str) -> List[str]:
-        all_files = sftp.listdir(remote_dir)
-        return [f for f in all_files if fnmatch.fnmatch(f, pattern)]
+    def _list_matching_files(self,sftp,remote_dir: str,pattern: str) -> List[str]:
+        return [
+            entry.filename
+            for entry in sftp.listdir_iter(remote_dir) if fnmatch.fnmatch(entry.filename, pattern)
+        ]
 
-    def _download_files(
-        self, sftp, remote_dir: str, filenames: List[str], local_dir: str
-    ) -> List[str]:
-        os.makedirs(local_dir, exist_ok=True)
-        local_paths = []
-        for filename in filenames:
+    def _download_one_file(self,remote_dir: str,filename: str,local_dir: str) -> str:
+        
+        sftp, transport = self._get_sftp_client()
+        try:
             remote_path = f"{remote_dir.rstrip('/')}/{filename}"
             local_path = os.path.join(local_dir, filename)
             sftp.get(remote_path, local_path)
-            local_paths.append(local_path)
+            return local_path
+        finally:
+            sftp.close()
+            transport.close()
+
+    def _download_files(self, remote_dir: str, filenames: List[str], local_dir: str) -> List[str]:
+        
+        os.makedirs(local_dir, exist_ok=True)
+        max_workers = min(4, len(filenames))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(
+                    self._download_one_file,
+                    remote_dir,
+                    filename,
+                    local_dir
+                )
+                for filename in filenames
+            ]
+
+            local_paths = [
+                future.result()
+                for future in futures
+            ]
+
         return local_paths
 
     def _load_files(self, local_paths: List[str]) -> DataFrame:
@@ -158,31 +181,20 @@ class SftpConnector(BaseConnector):
                 f"{archive_dir}/{filename}",
             )
 
-    # ── Public extract ────────────────────────────────────────────────────────
-
     def extract(self, watermark_start: Optional[str]) -> Tuple[DataFrame, Optional[str]]:
-        # sftp, transport = self._get_sftp_client()
+        sftp, transport = self._get_sftp_client()
         remote_dir  = self._resolve_remote_dir()
         pattern     = self._resolve_file_pattern()
         local_dir   = self._resolve_staging_dir()
-
-        # archive unless source_filter flags 'no_archive'
-        archive = (self.ingest_obj.source_filter or "").strip().lower() != _NO_ARCHIVE_FLAG
-
         try:
             matched = self._list_matching_files(sftp, remote_dir, pattern)
             if not matched:
                 raise FileNotFoundError(
                     f"No files matched pattern='{pattern}' in remote_dir='{remote_dir}'"
                 )
-
-            local_paths = self._download_files(sftp, remote_dir, matched, local_dir)
+            local_paths = self._download_files(remote_dir,matched,local_dir)
             df = self._load_files(local_paths)
-
-            if archive:
-                self._archive_files(sftp, remote_dir, matched)
-
-            # SFTP ingestion is file-batch oriented; watermark is not applicable.
+            self._archive_files(sftp, remote_dir, matched)
             return df, None
         finally:
             sftp.close()
