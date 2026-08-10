@@ -142,11 +142,12 @@ class SecretResolver:
     def get_service_credentials_provider(self, credential_name: str):
         """
         Return a botocore-compatible credentials provider for a Unity Catalog
-        Service Credential, for attaching to a boto3 Session:
+        Service Credential, passed as the botocore_session for a boto3 Session
+        (NOT a raw Credentials object — do not assign to Session._credentials):
 
-            session = boto3.Session()
-            session._session._credentials = \
-                secrets.get_service_credentials_provider("<name>")
+            session = boto3.Session(
+                botocore_session=secrets.get_service_credentials_provider("<name>")
+            )
             s3 = session.client("s3")
 
         Only works where dbutils is available (serverless/notebook runtime);

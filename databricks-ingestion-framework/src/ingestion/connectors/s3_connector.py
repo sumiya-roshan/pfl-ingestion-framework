@@ -162,9 +162,10 @@ class S3Connector(BaseConnector):
         delimiter = io.s3_column_delimiter or ","
         header = io.s3_first_row_header if io.s3_first_row_header is not None else True
 
-        session = boto3.Session()
-        session._session._credentials = self.secrets.get_service_credentials_provider(
-            self._SERVICE_CREDENTIAL_NAME
+        session = boto3.Session(
+            botocore_session=self.secrets.get_service_credentials_provider(
+                self._SERVICE_CREDENTIAL_NAME
+            )
         )
         s3_client = session.client("s3")
 
