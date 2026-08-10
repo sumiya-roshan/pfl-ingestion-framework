@@ -142,32 +142,23 @@ class S3Connector(BaseConnector):
             .csv(path)
         )
 
-    # TODO: hardcoded for testing — replace with a config-driven credential
-    # name (source_system or s3_config_master) once the vending path is confirmed.
-    _SERVICE_CREDENTIAL_NAME = "benny_credential"
-
     def _extract_serverless(self) -> DataFrame:
         """
         Reads via boto3 end-to-end (list/get/parse) since spark.read's s3a
         path isn't usable under Spark Connect. Rows land as string columns —
         there's no boto3-side equivalent of Spark's inferSchema — and only
         the final createDataFrame call touches Spark.
-
-        Credentials come from a Unity Catalog Service Credential, vended via
-        dbutils.credentials.getServiceCredentialsProvider — serverless has no
-        instance profile / ambient credential chain for boto3 to fall back on.
         """
         io = self.ingest_obj
         bucket, key = self._parse_s3_uri(self._resolve_source_path())
         delimiter = io.s3_column_delimiter or ","
         header = io.s3_first_row_header if io.s3_first_row_header is not None else True
 
-        session = boto3.Session(
-            botocore_session=self.secrets.get_service_credentials_provider(
-                self._SERVICE_CREDENTIAL_NAME
-            )
-        )
-        s3_client = session.client("s3")
+        credentials = self._get_credentials()
+        client_kwargs = {}
+        if credentials:
+            client_kwargs["aws_access_key_id"], client_kwargs["aws_secret_access_key"] = credentials
+        s3_client = boto3.client("s3", **client_kwargs)
 
         columns: Optional[List[str]] = None
         rows: List[List[str]] = []
