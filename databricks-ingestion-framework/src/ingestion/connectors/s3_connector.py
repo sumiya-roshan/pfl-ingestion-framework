@@ -34,8 +34,11 @@ watermark=None. load_type / write_mode on the ingestion object (derived from
 key_column) still control how the bronze writer applies the result —
 append for plain loads, merge on key_column when one is configured.
 """
-from typing import Optional, Tuple
+import csv
+from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 
+import boto3
 from pyspark.sql import DataFrame
 
 from .base_connector import BaseConnector
@@ -60,32 +63,69 @@ class S3Connector(BaseConnector):
             )
         return f"s3://{bucket.strip('/')}/{external_path.lstrip('/')}"
 
+    def _is_serverless(self) -> bool:
+        """
+        Serverless compute runs the driver on Spark Connect, which has no
+        local SparkContext — hadoopConfiguration() (used for s3a credentials
+        below) isn't reachable there, and serverless also blocks setting
+        spark.hadoop.* at runtime outright. extract() therefore routes
+        serverless through boto3 end-to-end instead of spark.read.
+        """
+        return "connect" in type(self.spark).__module__
+
+    def _get_credentials(self) -> Optional[Tuple[str, str]]:
+        ss = self.source_system
+        if not ss.secret_scope or not ss.secret_key_credentials:
+            return None
+        return self.secrets.get_credentials(ss.secret_scope, ss.secret_key_credentials)
+
     def _apply_credentials(self) -> None:
         """
         Sets fs.s3a access/secret keys on the Spark session's Hadoop
-        configuration when explicit credentials are configured. Requires a
-        classic (non-serverless) cluster — sparkContext._jsc is a JVM-internal
-        handle that Spark Connect / serverless compute does not expose, and
-        serverless also blocks setting spark.hadoop.* at runtime outright, so
-        neither approach works there. When secret_scope/secret_key_credentials
-        are unset, relies on the cluster's instance profile or a Unity
-        Catalog external location/storage credential already granting
-        bucket access.
+        configuration when explicit credentials are configured. Classic
+        cluster only — see _is_serverless. When secret_scope/
+        secret_key_credentials are unset, relies on the cluster's instance
+        profile or a Unity Catalog external location/storage credential
+        already granting bucket access.
         """
-        ss = self.source_system
-        if not ss.secret_scope or not ss.secret_key_credentials:
+        credentials = self._get_credentials()
+        if not credentials:
             return
 
-        access_key, secret_key = self.secrets.get_credentials(
-            ss.secret_scope, ss.secret_key_credentials
-        )
+        access_key, secret_key = credentials
         hadoop_conf = self.spark.sparkContext._jsc.hadoopConfiguration()
         hadoop_conf.set("fs.s3a.access.key", access_key)
         hadoop_conf.set("fs.s3a.secret.key", secret_key)
 
-    # ── Public extract ────────────────────────────────────────────────────────
+    @staticmethod
+    def _parse_s3_uri(uri: str) -> Tuple[str, str]:
+        parsed = urlparse(uri)
+        return parsed.netloc, parsed.path.lstrip("/")
 
-    def extract(self, watermark_start: Optional[str]) -> Tuple[DataFrame, Optional[str]]:
+    @staticmethod
+    def _list_object_keys(s3_client, bucket: str, key: str) -> List[str]:
+        """external_path may name a single object or a prefix/folder — try
+        the exact key first, then fall back to listing under it as a prefix."""
+        if not key.endswith("/"):
+            try:
+                s3_client.head_object(Bucket=bucket, Key=key)
+                return [key]
+            except s3_client.exceptions.ClientError:
+                pass
+
+        prefix = key if key.endswith("/") else f"{key}/"
+        keys = []
+        paginator = s3_client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                if not obj["Key"].endswith("/") and obj["Size"] > 0:
+                    keys.append(obj["Key"])
+
+        if not keys:
+            raise ValueError(f"No objects found under s3://{bucket}/{key}")
+        return keys
+
+    def _extract_classic(self) -> DataFrame:
         io = self.ingest_obj
 
         self._apply_credentials()
@@ -94,13 +134,51 @@ class S3Connector(BaseConnector):
         delimiter = io.s3_column_delimiter or ","
         header = io.s3_first_row_header if io.s3_first_row_header is not None else True
 
-        df = (
+        return (
             self.spark.read
             .option("header", str(bool(header)).lower())
             .option("delimiter", delimiter)
             .option("inferSchema", "true")
             .csv(path)
         )
+
+    def _extract_serverless(self) -> DataFrame:
+        """
+        Reads via boto3 end-to-end (list/get/parse) since spark.read's s3a
+        path isn't usable under Spark Connect. Rows land as string columns —
+        there's no boto3-side equivalent of Spark's inferSchema — and only
+        the final createDataFrame call touches Spark.
+        """
+        io = self.ingest_obj
+        bucket, key = self._parse_s3_uri(self._resolve_source_path())
+        delimiter = io.s3_column_delimiter or ","
+        header = io.s3_first_row_header if io.s3_first_row_header is not None else True
+
+        credentials = self._get_credentials()
+        client_kwargs = {}
+        if credentials:
+            client_kwargs["aws_access_key_id"], client_kwargs["aws_secret_access_key"] = credentials
+        s3_client = boto3.client("s3", **client_kwargs)
+
+        columns: Optional[List[str]] = None
+        rows: List[List[str]] = []
+        for object_key in self._list_object_keys(s3_client, bucket, key):
+            body = s3_client.get_object(Bucket=bucket, Key=object_key)["Body"].read()
+            for i, row in enumerate(csv.reader(body.decode("utf-8").splitlines(), delimiter=delimiter)):
+                if header and i == 0:
+                    columns = columns or row
+                    continue
+                rows.append(row)
+
+        if columns is None:
+            columns = [f"_c{i}" for i in range(len(rows[0]))] if rows else []
+
+        return self.spark.createDataFrame(rows, columns)
+
+    # ── Public extract ────────────────────────────────────────────────────────
+
+    def extract(self, watermark_start: Optional[str]) -> Tuple[DataFrame, Optional[str]]:
+        df = self._extract_serverless() if self._is_serverless() else self._extract_classic()
 
         # File-batch source: no column-based watermark to push down.
         return df, None
