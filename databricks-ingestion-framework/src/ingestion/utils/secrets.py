@@ -137,6 +137,28 @@ class SecretResolver:
             )
         return value
 
+    # ── Unity Catalog service credential vending (boto3) ──────────────────────
+
+    def get_service_credentials_provider(self, credential_name: str):
+        """
+        Return a botocore-compatible credentials provider for a Unity Catalog
+        Service Credential, for attaching to a boto3 Session:
+
+            session = boto3.Session()
+            session._session._credentials = \
+                secrets.get_service_credentials_provider("<name>")
+            s3 = session.client("s3")
+
+        Only works where dbutils is available (serverless/notebook runtime);
+        raises if dbutils was not supplied to this resolver.
+        """
+        if self._dbutils is None:
+            raise RuntimeError(
+                "get_service_credentials_provider requires dbutils, which was "
+                "not supplied to this SecretResolver."
+            )
+        return self._dbutils.credentials.getServiceCredentialsProvider(credential_name)
+
     # ── High-level: parse JSON credential blob ────────────────────────────────
 
     def get_credentials(self, scope: str, key: str) -> Tuple[str, str]:
