@@ -148,17 +148,19 @@ class S3Connector(BaseConnector):
         path isn't usable under Spark Connect. Rows land as string columns —
         there's no boto3-side equivalent of Spark's inferSchema — and only
         the final createDataFrame call touches Spark.
+
+        Always uses boto3's default credential chain — no explicit keys.
+        Serverless compute has no cluster instance profile to fall back to,
+        so bucket access here must come from the workspace's default
+        credential chain (e.g. a Unity Catalog external location) rather
+        than secret_scope-sourced keys.
         """
         io = self.ingest_obj
         bucket, key = self._parse_s3_uri(self._resolve_source_path())
         delimiter = io.s3_column_delimiter or ","
         header = io.s3_first_row_header if io.s3_first_row_header is not None else True
 
-        credentials = self._get_credentials()
-        client_kwargs = {}
-        if credentials:
-            client_kwargs["aws_access_key_id"], client_kwargs["aws_secret_access_key"] = credentials
-        s3_client = boto3.client("s3", **client_kwargs)
+        s3_client = boto3.client("s3")
 
         columns: Optional[List[str]] = None
         rows: List[List[str]] = []
