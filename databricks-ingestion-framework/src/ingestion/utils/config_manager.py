@@ -50,6 +50,8 @@ class SourceSystemConfig:
 
     is_active: int
 
+    landing_volume_path: Optional[str]
+
 
 @dataclass
 class IngestionTaskConfig:
@@ -133,6 +135,7 @@ class ConfigManager:
             secret_key_credentials  = r.get("secret_key_credentials"),
             is_active               = r.get("is_active", 1),
             extra_params            = r.get("extra_params"),
+            landing_volume_path     = r.get("landing_volume_path"),
         )
 
     def _build_ingestion_task(self, r: dict) -> IngestionTaskConfig:
