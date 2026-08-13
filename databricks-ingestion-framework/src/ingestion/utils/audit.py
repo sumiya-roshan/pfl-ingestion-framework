@@ -34,10 +34,7 @@ class AuditLogger:
         rows_deleted=0,
         **_unused,
     ):
-        """Append one record without requiring Delta schema migration.
-
-        The managed audit table has a fixed, ACL-protected schema.  Keep this
-        DataFrame aligned to that schema; operational-only fields are not
+        """Append one record without requiring Delta schema migration.Operational-only fields are not
         persisted until the table is intentionally altered by its owner.
         """
         ctx = job_context or {}
@@ -46,6 +43,7 @@ class AuditLogger:
             return str(value) if value is not None else default
 
         execution_duration_sec = (end_time - start_time).total_seconds()
+        print("execution_dur", execution_duration_sec)
         row = [(
             int(task.config_master_id),
             int(task.config_id),
@@ -101,5 +99,7 @@ class AuditLogger:
             StructField("department_id", IntegerType(), True),
             StructField("status", StringType(), True),
         ])
+        print(self.table)
 
         self.spark.createDataFrame(row, schema=schema).writeTo(self.table).using("delta").append()
+        print("Table write successfull to the path", self.table)
