@@ -30,34 +30,24 @@ class IngestionOrchestrator:
     """
     Orchestrates a single ingestion run end-to-end.
 
-    Parameters
-    ----------
-    spark                  : active SparkSession
-    dbutils                : Databricks dbutils; None in unit tests
-    source_system_table    : FQN of config_source_system
-    ingestion_config_table : FQN of ingestion_config
-    audit_table            : FQN of data_pipeline_execution_master
-    pipeline_name          : fallback name if ingestion_config.pipeline_name is NULL
-    environment            : 'dev' | 'uat' | 'prod' — controls log level
-    department_id          : written to audit table department_id NOT NULL column
     """
 
     def __init__(
         self,
         spark,
-        dbutils=None,
-        audit_table: str            = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master",
-        pipeline_name: str          = "ingestion_framework",
-        environment: str            = "dev",
-        department_id: int          = 0,
+        dbutils,
+        pipeline_name,
+        audit_table: str            = "migration_x_catalog.pfl_x_schema.tb_audit_log",
+        environment = "dev",
+        job_context =None
     ):
         self.spark         = spark
         self.pipeline_name = pipeline_name
         self.environment   = environment
-
-        self.audit         = AuditLogger(spark, audit_table=audit_table, department_id=department_id)
-        self.secrets       = SecretResolver(dbutils)
-        self.s3_writer     = S3RawWriter()
+        self.job_context = job_context or {}
+        self.audit = AuditLogger( spark=spark,audit_table=audit_table,)
+        self.secrets = SecretResolver(dbutils)
+        self.s3_writer = S3RawWriter()
         self.bronze_writer = BronzeWriter(spark)
         self.logger        = get_logger(environment=environment)
 
@@ -68,31 +58,22 @@ class IngestionOrchestrator:
         source_sys: SourceSystemConfig,
         task: IngestionTaskConfig,
         landing_volume_path: Optional[str] = None,
-        trigger_id: Optional[str]          = None,
-        trigger_type: str                  = "MANUAL",
-        business_date: Optional[date]      = None,
-    ) -> dict:
+        job_context=None,
+        task_start_time=None,
+    ):
         """
         Execute a single ingestion object end-to-end.
 
         Never re-raises — catches all exceptions and returns a result dict.
         Callers should check result["status"] == "FAILED" and act accordingly.
 
-        Parameters
-        ----------
-        source_sys          : Pre-fetched SourceSystemConfig
-        task                : Pre-fetched IngestionTaskConfig
-        landing_volume_path : base S3/Volume path for raw landing write (widget value);
-                              if None/empty, landing write is skipped
-        trigger_id          : Databricks job run ID (for audit traceability)
-        trigger_type        : 'SCHEDULED' | 'MANUAL' | 'EVENT'
-        business_date       : override for business_date audit column (defaults to today UTC)
-
         Returns
         -------
-        dict with keys: config_id, run_id, status, rows_read, error
+        dict with keys: config_id, status, rows_read, error
         """
         ingest_obj = task
+        ctx = job_context or self.job_context
+        start_time = task_start_time or datetime.utcnow()
 
         # pipeline_name and delta_layer come from config table, with fallbacks
         pipeline_name = ingest_obj.pipeline_name or self.pipeline_name
@@ -100,12 +81,8 @@ class IngestionOrchestrator:
 
         watermark_start = self._resolve_watermark(ingest_obj)
 
-        run_id = self.audit.start_run(
-            ingest_obj, source_sys, pipeline_name, delta_layer, trigger_type, trigger_id, business_date
-        )
-
         self.logger.info(
-            f"[{run_id}] START config_id={ingest_obj.config_id} "
+            f" START config_id={ingest_obj.config_id} "
             f"source='{source_sys.source_name}' object='{ingest_obj.source_object_name}' "
             f"load_type={ingest_obj.load_type} delta_layer={delta_layer} "
             f"watermark_start={watermark_start}"
@@ -131,10 +108,11 @@ class IngestionOrchestrator:
                     file_format         = fmt,
                 )
                 self.logger.info(
-                    f"[{run_id}] Landing write → {landing_path} ({rows_read} rows, format={fmt})"
+                    f" Landing write → {landing_path} ({rows_read} rows, format={fmt})"
                 )
 
             # ── Bronze Delta write ─────────────────────────────────────────────
+            bronze_start = datetime.utcnow()
             target_table = self.bronze_writer.write(
                 df,
                 catalog               = ingest_obj.target_catalog,
@@ -145,46 +123,81 @@ class IngestionOrchestrator:
                 schema_evolution_mode = ingest_obj.schema_evolution_mode,
                 partition_column      = ingest_obj.partition_column,
             )
+            copy_duration = (
+                datetime.utcnow() - bronze_start
+            ).total_seconds()
+
             rows_copied = rows_read
+            # ---------------------------------------------------------
+            # 5. SUCCESS audit
+            # ---------------------------------------------------------
+
+            self.audit.log_execution(
+                task=task,
+                source_sys=source_sys,
+                job_context=ctx,
+                pipeline_name=(
+                    ctx.get("job_name")
+                    or task.pipeline_name
+                    or self.pipeline_name
+                ),
+                start_time=start_time,
+                end_time=datetime.utcnow(),
+                rows_read=rows_read,
+                rows_copied=rows_copied,
+                copy_duration_sec=copy_duration,
+                status="SUCCESS")
+            
             self.logger.info(
-                f"[{run_id}] Bronze write → {target_table} ({rows_read} rows, mode={ingest_obj.write_mode})"
+                f" Bronze write → {target_table} ({rows_read} rows, mode={ingest_obj.write_mode})"
             )
 
-            self.audit.complete_run(
-                run_id       = run_id,
-                status       = "SUCCESS",
-                rows_read    = rows_read,
-                rows_copied  = rows_copied,
-                rows_deleted = rows_deleted,
-            )
-            self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
+            self.logger.info(f" SUCCESS — {rows_read} records processed.")
+
+
             return {
                 "config_id": ingest_obj.config_id,
-                "run_id":   run_id,
                 "status":   "SUCCESS",
                 "rows_read": rows_read,
+                "rows_copied": rows_copied,
                 "error":    None,
             }
 
         except Exception as exc:
-            # Never re-raise — record FAILED in audit and return error dict.
-            # The fan-out driver (run_all_sources.py) collects results and
-            # raises a summary exception if any table failed.
-            error_msg = str(exc)
+            # ---------------------------------------------------------
+            # FAILED audit
+            # ---------------------------------------------------------
+
+            self.audit.log_execution(
+                task=task,
+                source_sys=source_sys,
+                job_context=ctx,
+                pipeline_name=(
+                    ctx.get("job_name")
+                    or task.pipeline_name
+                    or self.pipeline_name
+                ),
+                start_time=start_time,
+                end_time=datetime.utcnow(),
+                status="FAILED",
+                error_code=type(exc).__name__,
+                error_message=str(exc),
+            )
             self.logger.error(
-                f"[{run_id}] FAILED config_id={ingest_obj.config_id}: {error_msg}",
+                f" FAILED config_id={ingest_obj.config_id}: {exc}",
                 exc_info=True,
             )
             try:
-                self.audit.fail_run(run_id=run_id, error_message=error_msg)
+                self.audit.fail_run(error_message=exc)
             except Exception as audit_exc:
-                self.logger.error(f"[{run_id}] Could not write FAILED status to audit: {audit_exc}")
+                self.logger.error(f" Could not write FAILED status to audit: {audit_exc}")
             return {
                 "config_id": ingest_obj.config_id,
-                "run_id":   run_id,
                 "status":   "FAILED",
                 "rows_read": 0,
-                "error":    error_msg,
+                 "rows_copied": 0,
+                "error": str(exc),
+                "error_code": type(exc).__name__,
             }
 
     # ── Watermark resolution ──────────────────────────────────────────────────
