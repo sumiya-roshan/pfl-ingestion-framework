@@ -180,7 +180,7 @@ if failed:
 
 dbutils.notebook.exit(
     f"SUCCESS: "
-    f"{len(succeeded)}/{len(results)} "
+    f"{len(results)} "
     f"objects ingested successfully. "
     f"Job Run ID: {job_run_id}"
 )
