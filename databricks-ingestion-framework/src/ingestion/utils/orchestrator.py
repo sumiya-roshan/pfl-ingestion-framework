@@ -181,10 +181,6 @@ class IngestionOrchestrator:
                 f" FAILED config_id={ingest_obj.config_id}: {exc}",
                 exc_info=True,
             )
-            try:
-                self.audit.fail_run(error_message=exc)
-            except Exception as audit_exc:
-                self.logger.error(f" Could not write FAILED status to audit: {audit_exc}")
             return {
                 "config_id": ingest_obj.config_id,
                 "status":   "FAILED",

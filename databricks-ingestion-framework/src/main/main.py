@@ -127,6 +127,8 @@ def get_databricks_job_context():
     return {
         "job_id": get_context_value("jobId"),
         "job_name": get_context_value("jobName"),
+        "notebook_name": get_context_value("notebookPath"),
+        "databricks_url": get_context_value("apiUrl"),
         "trigger_type": get_context_value("triggerType"),
         "trigger_id": get_context_value("triggerId"),
         "trigger_name": get_context_value("triggerName"),
@@ -140,6 +142,8 @@ print("\nDatabricks Job Context")
 print("=" * 60)
 print(f"Job ID       : {job_context.get('job_id')}")
 print(f"Job Name     : {job_context.get('job_name')}")
+print(f"Notebook     : {job_context.get('notebook_name')}")
+print(f"Workspace URL: {job_context.get('databricks_url')}")
 print(f"Trigger Type : {job_context.get('trigger_type')}")
 print(f"Trigger ID   : {job_context.get('trigger_id')}")
 print(f"Trigger Name : {job_context.get('trigger_name')}")
