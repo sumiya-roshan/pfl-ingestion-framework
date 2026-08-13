@@ -25,9 +25,9 @@ class AuditLogger:
 
         execution_duration_sec = (end_time - start_time).total_seconds()
         row = [(
-            # department_id is not part of the ingestion configuration, so
-            # retain the required table column with a NULL value.
-            int(task.config_master_id), int(task.config_id), None,
+            # department_id is not part of the ingestion configuration. The
+            # target table requires a value, so use 0 as the neutral sentinel.
+            int(task.config_master_id), int(task.config_id), 0,
             required_string(task.effective_delta_layer), required_string(source_sys.source_name),
             required_string(pipeline_name, "manual_run"), required_string(task.load_type),
             task.frequency, start_time.date(),
