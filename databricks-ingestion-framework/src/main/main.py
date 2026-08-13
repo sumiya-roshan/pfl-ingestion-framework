@@ -29,7 +29,7 @@
 # COMMAND ----------
 
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.append("..")   
 
@@ -222,12 +222,11 @@ for task in tasks:
         f"(Config ID: {task.config_id})"
     )
 
-    task_start_time = datetime.utcnow()
+    task_start_time = datetime.now(timezone.utc)
 
     try:
 
         result = orchestrator.run(
-            config_master_id=config_master_id,
             source_sys=source_sys,
             task=task,
             landing_volume_path=landing_volume_path,

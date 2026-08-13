@@ -14,7 +14,7 @@ Key behaviours
                   returns a result dict — it never re-raises. The calling
                   notebook decides whether to raise after collecting all results.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from .config_manager import IngestionTaskConfig, SourceSystemConfig
@@ -73,7 +73,7 @@ class IngestionOrchestrator:
         """
         ingest_obj = task
         ctx = job_context or self.job_context
-        start_time = task_start_time or datetime.utcnow()
+        start_time = task_start_time or datetime.now(timezone.utc)
 
         # pipeline_name and delta_layer come from config table, with fallbacks
         pipeline_name = ingest_obj.pipeline_name or self.pipeline_name
@@ -112,7 +112,7 @@ class IngestionOrchestrator:
                 )
 
             # ── Bronze Delta write ─────────────────────────────────────────────
-            bronze_start = datetime.utcnow()
+            bronze_start = datetime.now(timezone.utc)
             target_table = self.bronze_writer.write(
                 df,
                 catalog               = ingest_obj.target_catalog,
@@ -124,7 +124,7 @@ class IngestionOrchestrator:
                 partition_column      = ingest_obj.partition_column,
             )
             copy_duration = (
-                datetime.utcnow() - bronze_start
+                datetime.now(timezone.utc) - bronze_start
             ).total_seconds()
 
             rows_copied = rows_read
@@ -138,7 +138,7 @@ class IngestionOrchestrator:
                 pipeline_name=(self.pipeline_name
                 ),
                 start_time=start_time,
-                end_time=datetime.utcnow(),
+                end_time=datetime.now(timezone.utc),
                 rows_read=rows_read,
                 rows_copied=rows_copied,
                 copy_duration_sec=copy_duration,
