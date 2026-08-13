@@ -60,6 +60,7 @@ class IngestionTaskConfig:
     source_object_name: str
     custom_query: Optional[str]
     load_type: str
+    frequency: str
     incremental_column: Optional[str]
     primary_key_cols: Optional[str]
     target_catalog: str           
