@@ -105,7 +105,7 @@ class ConfigManager:
         spark,
         source_system_table: str = SOURCE_SYSTEM_TABLE,
         config_master_table: str = CONFIG_MASTER_TABLE,
-        target_catalog: str      = "hive_metastore"
+        target_catalog: str      = "migration_x_catalog",
     ):
         self.spark               = spark
         self.source_system_table = source_system_table

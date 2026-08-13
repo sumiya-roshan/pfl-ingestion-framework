@@ -51,7 +51,7 @@ from ingestion.utils.config_manager import IngestionTaskConfig
 
 dbutils.widgets.text("config_master_id",       "",                     "Config Master ID (int, points to child table)")
 dbutils.widgets.text("source_system_id",       "",                     "Source System ID (int, gets connection info)")
-dbutils.widgets.text("target_catalog",         "hive_metastore",       "Target Catalog (e.g. main, hive_metastore)")
+dbutils.widgets.text("target_catalog",         "migration_x_catalog",  "Target Catalog")
 dbutils.widgets.text("pipeline_name",          "",                     "Pipeline Name (blank = auto-detect from job)")
 dbutils.widgets.text("landing_volume_path",    "",                     "Landing Volume Base Path (blank = skip landing write)")
 dbutils.widgets.text("environment",            "dev",                  "Environment: dev | uat | prod")
@@ -67,7 +67,7 @@ if not config_master_id_raw or not source_system_id_raw:
 config_master_id = int(config_master_id_raw)
 source_system_id = int(source_system_id_raw)
 
-target_catalog         = dbutils.widgets.get("target_catalog")         or "hive_metastore"
+target_catalog         = dbutils.widgets.get("target_catalog")         or "migration_x_catalog"
 pipeline_name_widget   = dbutils.widgets.get("pipeline_name")          or None
 landing_volume_path    = dbutils.widgets.get("landing_volume_path")    or None
 environment            = dbutils.widgets.get("environment")            or "dev"

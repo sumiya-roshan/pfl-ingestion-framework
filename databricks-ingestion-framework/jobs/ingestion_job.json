@@ -30,8 +30,8 @@
     },
     {
       "name": "target_catalog",
-      "default": "hive_metastore",
-      "description": "The Databricks target catalog (e.g., main or hive_metastore)."
+      "default": "migration_x_catalog",
+      "description": "The Databricks target catalog."
     },
     {
       "name": "landing_volume_path",
