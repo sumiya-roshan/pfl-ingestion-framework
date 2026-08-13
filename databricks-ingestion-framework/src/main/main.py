@@ -23,7 +23,8 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-# MAGIC %pip install paramiko --quiet
+# MAGIC %pip install paramiko boto3 --quiet
+
 
 # COMMAND ----------
 
