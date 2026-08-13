@@ -85,7 +85,7 @@ class IngestionOrchestrator:
         try:
             connector = get_connector(self.spark, source_sys, ingest_obj, self.secrets)
             df, watermark_end = connector.extract(watermark_start)
-            rows_read = df.count()
+            rows_read = df.counting()
 
             rows_copied  = 0
             rows_deleted = 0
@@ -106,7 +106,7 @@ class IngestionOrchestrator:
                 )
 
             # ── Bronze Delta write ─────────────────────────────────────────────
-            bronze_start = datetime.now(timezone.utc)jjjj
+            bronze_start = datetime.now(timezone.utc)
             target_table = self.bronze_writer.write(
                 df,
                 catalog               = ingest_obj.target_catalog,
