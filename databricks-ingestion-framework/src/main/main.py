@@ -24,7 +24,7 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 # MAGIC %pip install paramiko boto3 --quiet
-
+# MAGIC
 
 # COMMAND ----------
 
@@ -55,6 +55,7 @@ dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Ba
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("trigger_type",        "SCHEDULED",      "Trigger Type: SCHEDULED | MANUAL | EVENT")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
+dbutils.widgets.text("max_workers",         "4",      "Max Parallel workers")
 
 # COMMAND ----------
 
@@ -73,6 +74,7 @@ landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
 trigger_type         = dbutils.widgets.get("trigger_type")         or "SCHEDULED"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
+max_workers          = int(dbutils.widgets.get("max_workers")      or "4")
 
 # COMMAND ----------
 
@@ -166,7 +168,7 @@ def run_one(task: IngestionTaskConfig) -> dict:
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 results = []
-max_workers = 4 # Adjust depending on cluster size and DB load
+# max_workers = 4 # Adjust depending on cluster size and DB load
 
 print(f"\nStarting {len(tasks)} tasks with ThreadPoolExecutor (max_workers={max_workers})...")
 with ThreadPoolExecutor(max_workers=max_workers) as executor:
