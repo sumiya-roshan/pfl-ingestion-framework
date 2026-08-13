@@ -1,5 +1,19 @@
-# Databricks notebook source
+"""
+Main driver: given an ingestion_object_id, resolves config, extracts data,
+writes to landing path (if provided) and/or bronze Delta table, and records
+the run in data_pipeline_execution_master.
 
+Key behaviours
+--------------
+- delta_layer   : read from ingestion_config.delta_layer (not a widget)
+- pipeline_name : read from ingestion_config.pipeline_name (auto-detected from
+                  Databricks Job context in the calling notebook)
+- landing_volume_path : passed as a parameter from the job widget — NOT from
+                  config_source_system (removed)
+- Fault tolerance: run() catches all exceptions, records FAILED in audit, and
+                  returns a result dict — it never re-raises. The calling
+                  notebook decides whether to raise after collecting all results.
+"""
 from datetime import datetime, timezone
 from typing import Optional
 
