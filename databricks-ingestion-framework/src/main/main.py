@@ -134,6 +134,7 @@ def get_databricks_job_context():
 
 
 job_context = get_databricks_job_context()
+job_context["job_run_id"] = job_run_id
 
 print("\nDatabricks Job Context")
 print("=" * 60)
@@ -145,7 +146,7 @@ print(f"Trigger Name : {job_context.get('trigger_name')}")
 print("=" * 60)
 
 # Pipeline name should come from Job Name.
-pipeline_name = job_context.get("job_name")
+pipeline_name = job_context.get("job_name") or pipeline_name
 
 # Job Run ID is the execution identifier.
 job_run_id = job_run_id

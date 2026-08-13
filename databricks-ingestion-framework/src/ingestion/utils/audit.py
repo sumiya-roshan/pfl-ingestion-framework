@@ -50,8 +50,14 @@ class AuditLogger:
         # Databricks execution information
         # -------------------------------------------------------------
 
-        job_id = ctx.get("job_id")
-        job_run_id = ctx.get("job_run_id")
+        # Spark validates values for non-nullable StringType fields before the
+        # DataFrame is written.  Job context values are absent for some manual
+        # and triggered runs, so use stable audit placeholders in that case.
+        def required_string(value, default="UNKNOWN"):
+            return str(value) if value is not None else default
+
+        job_id = required_string(ctx.get("job_id"), "MANUAL")
+        job_run_id = required_string(ctx.get("job_run_id"), "MANUAL")
         trigger_type = ctx.get("trigger_type")
         trigger_id = ctx.get("trigger_id")
         trigger_name = ctx.get("trigger_name")
@@ -72,10 +78,10 @@ class AuditLogger:
             int(task.config_master_id),
             int(task.config_id),
 
-            task.effective_delta_layer,
-            source_sys.source_name,
-            pipeline_name,
-            task.load_type,
+            required_string(task.effective_delta_layer),
+            required_string(source_sys.source_name),
+            required_string(pipeline_name, "manual_run"),
+            required_string(task.load_type),
             task.frequency,
 
             start_time.date(),
@@ -94,8 +100,8 @@ class AuditLogger:
             task.source_schema,
             task.source_object_name,
 
-            task.target_schema,
-            task.target_table,
+            required_string(task.target_schema),
+            required_string(task.target_table),
 
             int(rows_read or 0),
             int(rows_copied or 0),
@@ -122,7 +128,7 @@ class AuditLogger:
 
             operation_performed,
 
-            status,
+            required_string(status),
 
             error_code,
             error_message,
