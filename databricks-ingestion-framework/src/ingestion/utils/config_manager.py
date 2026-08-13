@@ -6,7 +6,7 @@ Default table locations
 -----------------------
   SOURCE_SYSTEM_TABLE = migration_x_catalog.pfl_x_schema.config_source_system
   CONFIG_MASTER_TABLE = migration_x_catalog.pfl_x_schema.config_master
-  AUDIT_TABLE         = migration_x_catalog.pfl_x_schema.data_pipeline_execution_master
+  AUDIT_TABLE         = migration_x_catalog.pfl_x_schema.tb_audit_log
 """
 import json
 from dataclasses import dataclass
@@ -15,7 +15,7 @@ from typing import Optional, List, Dict, Tuple
 # ── Fully-qualified table name defaults ───────────────────────────────────────
 SOURCE_SYSTEM_TABLE = "migration_x_catalog.pfl_x_schema.config_source_system"
 CONFIG_MASTER_TABLE = "migration_x_catalog.pfl_x_schema.config_master"
-AUDIT_TABLE         = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master"
+AUDIT_TABLE         = "migration_x_catalog.pfl_x_schema.tb_audit_log"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data classes

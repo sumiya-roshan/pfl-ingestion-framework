@@ -208,6 +208,8 @@ orchestrator = IngestionOrchestrator(
 
 )
 
+print(f"Audit table      : {AUDIT_TABLE}")
+
 # def run_one(task: IngestionTaskConfig) -> dict:
 #     """Run a single ingestion object through the orchestrator."""
 #     return orchestrator.run(
