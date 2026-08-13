@@ -163,11 +163,29 @@ def run_one(task: IngestionTaskConfig) -> dict:
         trigger_type        = trigger_type,
     )
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 results = []
-for task in tasks:
-    print(f"Starting task: {task.source_object_name} (Config ID: {task.config_id})...")
-    res = run_one(task)
-    results.append(res)
+max_workers = 4 # Adjust depending on cluster size and DB load
+
+print(f"\nStarting {len(tasks)} tasks with ThreadPoolExecutor (max_workers={max_workers})...")
+with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    future_to_task = {executor.submit(run_one, task): task for task in tasks}
+    
+    for future in as_completed(future_to_task):
+        task = future_to_task[future]
+        try:
+            res = future.result()
+            results.append(res)
+        except Exception as exc:
+            print(f"Task {task.source_object_name} (Config ID: {task.config_id}) failed with exception: {exc}")
+            results.append({
+                "config_id": task.config_id,
+                "run_id":   None,
+                "status":   "FAILED",
+                "rows_read": 0,
+                "error":    str(exc),
+            })
 
 # COMMAND ----------
 
