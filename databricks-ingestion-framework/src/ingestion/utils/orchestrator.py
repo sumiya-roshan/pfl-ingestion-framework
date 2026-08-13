@@ -92,7 +92,7 @@ class IngestionOrchestrator:
                 )
 
             # ── Bronze Delta write ─────────────────────────────────────────────
-            bronze_start = datetime.now(timezone.utc)
+            bronze_start = datetime.now(timezone.utc)jjjj
             target_table = self.bronze_writer.write(
                 df,
                 catalog               = ingest_obj.target_catalog,
