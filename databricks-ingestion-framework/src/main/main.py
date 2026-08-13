@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md
 # MAGIC # Ingestion — Source System Entry Point
 # MAGIC
@@ -15,11 +19,12 @@
 
 # COMMAND ----------
 
-dbutils.library.restartPython()
+
 
 # COMMAND ----------
 
 # MAGIC %pip install paramiko --quiet
+# MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -50,7 +55,6 @@ dbutils.widgets.text("target_catalog",         "hive_metastore",       "Target C
 dbutils.widgets.text("pipeline_name",          "",                     "Pipeline Name (blank = auto-detect from job)")
 dbutils.widgets.text("landing_volume_path",    "",                     "Landing Volume Base Path (blank = skip landing write)")
 dbutils.widgets.text("environment",            "dev",                  "Environment: dev | uat | prod")
-dbutils.widgets.text("trigger_type",           "SCHEDULED",            "Trigger Type: SCHEDULED | MANUAL | EVENT")
 
 # COMMAND ----------
 
@@ -67,7 +71,7 @@ target_catalog         = dbutils.widgets.get("target_catalog")         or "hive_
 pipeline_name_widget   = dbutils.widgets.get("pipeline_name")          or None
 landing_volume_path    = dbutils.widgets.get("landing_volume_path")    or None
 environment            = dbutils.widgets.get("environment")            or "dev"
-trigger_type           = dbutils.widgets.get("trigger_type")           or "SCHEDULED"
+
 
 # COMMAND ----------
 
@@ -102,6 +106,8 @@ else:
 
 # COMMAND ----------
 
+job_run_id = dbutils.widgets.get("run_id")
+print(f"Current Job Run ID: {job_run_id}")
 def get_databricks_job_context():
 
     context = (
@@ -120,7 +126,6 @@ def get_databricks_job_context():
 
     return {
         "job_id": get_context_value("jobId"),
-        "job_run_id": get_context_value("currentRunId"),
         "job_name": get_context_value("jobName"),
         "trigger_type": get_context_value("triggerType"),
         "trigger_id": get_context_value("triggerId"),
@@ -133,7 +138,6 @@ job_context = get_databricks_job_context()
 print("\nDatabricks Job Context")
 print("=" * 60)
 print(f"Job ID       : {job_context.get('job_id')}")
-print(f"Job Run ID   : {job_context.get('job_run_id')}")
 print(f"Job Name     : {job_context.get('job_name')}")
 print(f"Trigger Type : {job_context.get('trigger_type')}")
 print(f"Trigger ID   : {job_context.get('trigger_id')}")
@@ -144,7 +148,7 @@ print("=" * 60)
 pipeline_name = job_context.get("job_name")
 
 # Job Run ID is the execution identifier.
-job_run_id = job_context.get("job_run_id")
+job_run_id = job_run_id
 
 if not job_run_id:
     raise RuntimeError(
@@ -223,6 +227,7 @@ for task in tasks:
     try:
 
         result = orchestrator.run(
+            config_master_id=config_master_id,
             source_sys=source_sys,
             task=task,
             landing_volume_path=landing_volume_path,
@@ -283,7 +288,7 @@ for r in sorted(
 
     error = (
         r.get("error") or ""
-    )[:50]
+    )[:500000]
 
     print(
         f"{r['config_id']:>10}  "

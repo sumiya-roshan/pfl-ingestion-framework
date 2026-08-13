@@ -1,6 +1,15 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional, Dict, Any
+from pyspark.sql.types import (
+    StructType,
+    StructField,
+    IntegerType,
+    StringType,
+    DateType,
+    TimestampType,
+    LongType,
+    DecimalType,
+)
 
 
 class AuditLogger:
@@ -8,339 +17,328 @@ class AuditLogger:
     def __init__(
         self,
         spark,
-        audit_table: str
+        audit_table,
     ):
         self.spark = spark
-        self.audit_table = audit_table
-
-    # -------------------------------------------------------------------------
-    # Databricks Runtime Context
-    # -------------------------------------------------------------------------
-
-    def _get_databricks_context(self) -> Dict[str, Any]:
-        """
-        Reads execution metadata from the current Databricks Job/Task context.
-
-        """
-
-        job_id = (
-            self.spark.sparkContext
-            .getLocalProperty("spark.databricks.job.id")
-        )
-
-        job_run_id = (
-            self.spark.sparkContext
-            .getLocalProperty("spark.databricks.job.runId")
-        )
-
-        task_key = (
-            self.spark.sparkContext
-            .getLocalProperty("spark.databricks.job.taskKey")
-        )
-
-        return {
-            "job_id": job_id,
-            "job_run_id": job_run_id,
-            "task_key": task_key
-        }
-
-    # -------------------------------------------------------------------------
-    # Notebook / Databricks Information
-    # -------------------------------------------------------------------------
-
-    def _get_notebook_context(self) -> Dict[str, Any]:
-        """
-        Gets notebook/task information from Databricks notebook context.
-        """
-
-        try:
-            dbutils = self.spark._jvm.com.databricks.dbutils_v1.DBUtilsHolder.dbutils()
-
-            notebook_context = (
-                dbutils.notebook()
-                .getContext()
-            )
-
-            notebook_path = (
-                notebook_context
-                .notebookPath()
-                .getOrElse(None)
-            )
-
-            browser_host = (
-                notebook_context
-                .browserHostName()
-                .getOrElse(None)
-            )
-
-            return {
-                "notebook_name": notebook_path,
-                "databricks_url": (
-                    f"https://{browser_host}"
-                    if browser_host
-                    else None
-                )
-            }
-
-        except Exception:
-            return {
-                "notebook_name": None,
-                "databricks_url": None
-            }
-
-    # -------------------------------------------------------------------------
-    # Trigger Information
-    # -------------------------------------------------------------------------
-
-    def _get_trigger_context(self) -> Dict[str, Any]:
-        """
-        Gets trigger information when exposed by the Databricks runtime.
-
-        Values remain NULL when the runtime does not expose them.
-        """
-
-        return {
-            "trigger_type": self.spark.sparkContext.getLocalProperty(
-                "spark.databricks.job.trigger.type"
-            ),
-            "trigger_id": self.spark.sparkContext.getLocalProperty(
-                "spark.databricks.job.trigger.id"
-            ),
-            "trigger_name": self.spark.sparkContext.getLocalProperty(
-                "spark.databricks.job.trigger.name"
-            )
-        }
-
-    # -------------------------------------------------------------------------
-    # Write Audit Record
-    # -------------------------------------------------------------------------
+        self.table = audit_table
 
     def log_execution(
         self,
-        *,
-        config_master_id: int,
-        table_id: int,
-        department_id: int,
-        delta_layer: str,
-        source_name: str,
-        pipeline_name: str,
-        load_type: str,
-        frequency: Optional[str],
-        business_date,
-        source_schema: Optional[str],
-        source_table: Optional[str],
-        target_schema: str,
-        target_table: str,
+        source_sys,
+        job_context,
+        pipeline_name,
+        start_time,
+        end_time,
+        status,
+        rows_read=0,
+        rows_copied=0,
+        rows_deleted=0,
+        rows_affected=0,
+        data_read_bytes=0,
+        data_written_bytes=0,
+        throughput_mb_per_sec=None,
+        copy_duration_sec=None,
+        operation_performed=None,
+        error_code=None,
+        error_message=None,
+    ):
 
-        trigger_time: datetime,
-        end_time: datetime,
+        ctx = job_context or {}
 
-        rows_read: int = 0,
-        rows_copied: int = 0,
-        rows_deleted: int = 0,
-        rows_affected: int = 0,
+        # -------------------------------------------------------------
+        # Databricks execution information
+        # -------------------------------------------------------------
 
-        data_read_bytes: int = 0,
-        data_written_bytes: int = 0,
+        job_id = ctx.get("job_id")
+        job_run_id = ctx.get("job_run_id")
+        trigger_type = ctx.get("trigger_type")
+        trigger_id = ctx.get("trigger_id")
+        trigger_name = ctx.get("trigger_name")
 
-        throughput_mb_per_sec: Optional[float] = None,
-        copy_duration_sec: Optional[float] = None,
-
-        operation_performed: Optional[str] = None,
-
-        status: str = "SUCCESS",
-
-        error_code: Optional[str] = None,
-        error_message: Optional[str] = None
-    ) -> None:
-
-        # ---------------------------------------------------------------------
-        # Validate status
-        # ---------------------------------------------------------------------
-
-        status = status.upper()
-
-        if status not in ("SUCCESS", "FAILED"):
-            raise ValueError(
-                "status must be either SUCCESS or FAILED"
-            )
-
-        # ---------------------------------------------------------------------
-        # Get Databricks execution information
-        # ---------------------------------------------------------------------
-
-        dbx_context = self._get_databricks_context()
-        notebook_context = self._get_notebook_context()
-        trigger_context = self._get_trigger_context()
-
-        job_id = dbx_context.get("job_id")
-        job_run_id = dbx_context.get("job_run_id")
-
-        if not job_run_id:
-            raise RuntimeError(
-                "Databricks Job Run ID could not be determined from the "
-                "current execution context."
-            )
-
-        # ---------------------------------------------------------------------
-        # Calculate duration
-        # ---------------------------------------------------------------------
+        # -------------------------------------------------------------
+        # Execution duration
+        # -------------------------------------------------------------
 
         execution_duration_sec = (
-            end_time - trigger_time
+            end_time - start_time
         ).total_seconds()
 
-        # ---------------------------------------------------------------------
-        # Clean error information
-        # ---------------------------------------------------------------------
+        # -------------------------------------------------------------
+        # Create audit row
+        # -------------------------------------------------------------
 
-        if status == "SUCCESS":
-            error_code = None
-            error_message = None
+        row = [(
+            int(task.config_master_id),
+            int(task.config_id),
 
-        # ---------------------------------------------------------------------
-        # Calculate throughput if not supplied
-        # ---------------------------------------------------------------------
-
-        if (
-            throughput_mb_per_sec is None
-            and execution_duration_sec > 0
-            and data_read_bytes is not None
-        ):
-            throughput_mb_per_sec = (
-                data_read_bytes / (1024 * 1024)
-            ) / execution_duration_sec
-
-        # ---------------------------------------------------------------------
-        # Create one audit record
-        # ---------------------------------------------------------------------
-
-        data = [(
-            config_master_id,
-            table_id,
-            department_id,
-            delta_layer,
-            source_name,
+            task.effective_delta_layer,
+            source_sys.source_name,
             pipeline_name,
-            load_type,
-            frequency,
+            task.load_type,
+            task.frequency,
 
-            business_date,
+            start_time.date(),
 
             job_id,
             job_run_id,
 
-            trigger_context.get("trigger_type"),
-            trigger_context.get("trigger_id"),
-            trigger_context.get("trigger_name"),
+            trigger_type,
+            trigger_id,
+            trigger_name,
 
-            trigger_time,
+            start_time,
             end_time,
+            Decimal(str(execution_duration_sec)),
 
-            Decimal(str(round(execution_duration_sec, 2))),
+            task.source_schema,
+            task.source_object_name,
 
-            source_schema,
-            source_table,
+            task.target_schema,
+            task.target_table,
 
-            target_schema,
-            target_table,
+            int(rows_read or 0),
+            int(rows_copied or 0),
+            int(rows_deleted or 0),
+            int(rows_affected or 0),
 
-            rows_read,
-            rows_copied,
-            rows_deleted,
-            rows_affected,
-
-            data_read_bytes,
-            data_written_bytes,
+            int(data_read_bytes or 0),
+            int(data_written_bytes or 0),
 
             (
-                Decimal(str(round(throughput_mb_per_sec, 2)))
+                Decimal(str(throughput_mb_per_sec))
                 if throughput_mb_per_sec is not None
                 else None
             ),
 
             (
-                Decimal(str(round(copy_duration_sec, 2)))
+                Decimal(str(copy_duration_sec))
                 if copy_duration_sec is not None
                 else None
             ),
 
-            notebook_context.get("notebook_name"),
-            notebook_context.get("databricks_url"),
+            ctx.get("notebook_name"),
+            ctx.get("databricks_url"),
 
             operation_performed,
 
             status,
 
             error_code,
-            error_message
+            error_message,
         )]
 
-        # ---------------------------------------------------------------------
-        # Explicit schema
-        # ---------------------------------------------------------------------
+        schema = StructType([
 
-        schema = """
-            config_master_id INT,
-            table_id INT,
-            department_id INT,
-            delta_layer STRING,
-            source_name STRING,
-            pipeline_name STRING,
-            load_type STRING,
-            frequency STRING,
+            StructField(
+                "config_master_id",
+                IntegerType(),
+                False
+            ),
 
-            business_date DATE,
+            StructField(
+                "table_id",
+                IntegerType(),
+                False
+            ),
 
-            job_id STRING,
-            job_run_id STRING,
+            StructField(
+                "delta_layer",
+                StringType(),
+                False
+            ),
 
-            trigger_type STRING,
-            trigger_id STRING,
-            trigger_name STRING,
+            StructField(
+                "source_name",
+                StringType(),
+                False
+            ),
 
-            trigger_time TIMESTAMP,
-            end_time TIMESTAMP,
+            StructField(
+                "pipeline_name",
+                StringType(),
+                False
+            ),
 
-            execution_duration_sec DECIMAL(10,2),
+            StructField(
+                "load_type",
+                StringType(),
+                False
+            ),
 
-            source_schema STRING,
-            source_table STRING,
+            StructField(
+                "frequency",
+                StringType(),
+                True
+            ),
 
-            target_schema STRING,
-            target_table STRING,
+            StructField(
+                "business_date",
+                DateType(),
+                False
+            ),
 
-            rows_read BIGINT,
-            rows_copied BIGINT,
-            rows_deleted BIGINT,
-            rows_affected BIGINT,
+            StructField(
+                "job_id",
+                StringType(),
+                False
+            ),
 
-            data_read_bytes BIGINT,
-            data_written_bytes BIGINT,
+            StructField(
+                "job_run_id",
+                StringType(),
+                False
+            ),
 
-            throughput_mb_per_sec DECIMAL(10,2),
-            copy_duration_sec DECIMAL(10,2),
+            StructField(
+                "trigger_type",
+                StringType(),
+                True
+            ),
 
-            databricks_notebook_name STRING,
-            databricks_url STRING,
+            StructField(
+                "trigger_id",
+                StringType(),
+                True
+            ),
 
-            operation_performed STRING,
+            StructField(
+                "trigger_name",
+                StringType(),
+                True
+            ),
 
-            status STRING,
+            StructField(
+                "trigger_time",
+                TimestampType(),
+                False
+            ),
 
-            error_code STRING,
-            error_message STRING
-        """
+            StructField(
+                "end_time",
+                TimestampType(),
+                True
+            ),
 
-        # ---------------------------------------------------------------------
-        # Insert audit record
-        # ---------------------------------------------------------------------
+            StructField(
+                "execution_duration_sec",
+                DecimalType(10, 2),
+                True
+            ),
 
-        audit_df = self.spark.createDataFrame(
-            data,
+            StructField(
+                "source_schema",
+                StringType(),
+                True
+            ),
+
+            StructField(
+                "source_table",
+                StringType(),
+                True
+            ),
+
+            StructField(
+                "target_schema",
+                StringType(),
+                False
+            ),
+
+            StructField(
+                "target_table",
+                StringType(),
+                False
+            ),
+
+            StructField(
+                "rows_read",
+                LongType(),
+                True
+            ),
+
+            StructField(
+                "rows_copied",
+                LongType(),
+                True
+            ),
+
+            StructField(
+                "rows_deleted",
+                LongType(),
+                True
+            ),
+
+            StructField(
+                "rows_affected",
+                LongType(),
+                True
+            ),
+
+            StructField(
+                "data_read_bytes",
+                LongType(),
+                True
+            ),
+
+            StructField(
+                "data_written_bytes",
+                LongType(),
+                True
+            ),
+
+            StructField(
+                "throughput_mb_per_sec",
+                DecimalType(10, 2),
+                True
+            ),
+
+            StructField(
+                "copy_duration_sec",
+                DecimalType(10, 2),
+                True
+            ),
+
+            StructField(
+                "databricks_notebook_name",
+                StringType(),
+                True
+            ),
+
+            StructField(
+                "databricks_url",
+                StringType(),
+                True
+            ),
+
+            StructField(
+                "operation_performed",
+                StringType(),
+                True
+            ),
+
+            StructField(
+                "status",
+                StringType(),
+                False
+            ),
+
+            StructField(
+                "error_code",
+                StringType(),
+                True
+            ),
+
+            StructField(
+                "error_message",
+                StringType(),
+                True
+            ),
+        ])
+
+        df = self.spark.createDataFrame(
+            row,
             schema=schema
         )
 
-        audit_df.writeTo(
-            self.audit_table
+        df.writeTo(
+            self.table
         ).using("delta").append()

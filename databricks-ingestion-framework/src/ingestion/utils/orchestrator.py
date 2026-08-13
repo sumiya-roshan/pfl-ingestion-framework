@@ -14,7 +14,7 @@ Key behaviours
                   returns a result dict — it never re-raises. The calling
                   notebook decides whether to raise after collecting all results.
 """
-from datetime import date
+from datetime import datetime
 from typing import Optional
 
 from .config_manager import IngestionTaskConfig, SourceSystemConfig
@@ -133,13 +133,9 @@ class IngestionOrchestrator:
             # ---------------------------------------------------------
 
             self.audit.log_execution(
-                task=task,
                 source_sys=source_sys,
                 job_context=ctx,
-                pipeline_name=(
-                    ctx.get("job_name")
-                    or task.pipeline_name
-                    or self.pipeline_name
+                pipeline_name=(self.pipeline_name
                 ),
                 start_time=start_time,
                 end_time=datetime.utcnow(),
@@ -169,13 +165,9 @@ class IngestionOrchestrator:
             # ---------------------------------------------------------
 
             self.audit.log_execution(
-                task=task,
                 source_sys=source_sys,
                 job_context=ctx,
-                pipeline_name=(
-                    ctx.get("job_name")
-                    or task.pipeline_name
-                    or self.pipeline_name
+                pipeline_name=(self.pipeline_name
                 ),
                 start_time=start_time,
                 end_time=datetime.utcnow(),
