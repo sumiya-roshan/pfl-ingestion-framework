@@ -133,6 +133,7 @@ class IngestionOrchestrator:
             # ---------------------------------------------------------
 
             self.audit.log_execution(
+                task=ingest_obj,
                 source_sys=source_sys,
                 job_context=ctx,
                 pipeline_name=(self.pipeline_name
@@ -165,12 +166,13 @@ class IngestionOrchestrator:
             # ---------------------------------------------------------
 
             self.audit.log_execution(
+                task=ingest_obj,
                 source_sys=source_sys,
                 job_context=ctx,
                 pipeline_name=(self.pipeline_name
                 ),
                 start_time=start_time,
-                end_time=datetime.utcnow(),
+                end_time=datetime.now(timezone.utc),
                 status="FAILED",
                 error_code=type(exc).__name__,
                 error_message=str(exc),

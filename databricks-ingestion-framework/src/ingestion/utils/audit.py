@@ -24,6 +24,7 @@ class AuditLogger:
 
     def log_execution(
         self,
+        task,
         source_sys,
         job_context,
         pipeline_name,
