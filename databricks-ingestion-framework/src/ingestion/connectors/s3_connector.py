@@ -1,50 +1,41 @@
 """
-S3 connector — reads delimited (CSV-style) files from S3 using boto3.
+S3 connector — reads delimited (CSV-style) files directly from an S3 bucket
+via Spark's native s3a filesystem support.
 
-Why boto3 and not spark.read.csv(s3://...)?
---------------------------------------------
-On Unity Catalog-enabled clusters (Single User or Shared access mode),
-Databricks intercepts ALL cloud storage paths (s3://, s3a://, abfss://)
-at Spark's query *analysis* phase via ResolveWithCredential before any
-filesystem code runs. This means fs.s3a.access.key / fs.s3a.secret.key
-set on the Hadoop configuration are never reached — UC checks External
-Location permissions first and raises PERMISSION_DENIED.
+Config sources
+--------------
+  source_system  (config_source_system — SAME table every other connector
+                  uses, untouched by S3 support)
+    .secret_scope / .secret_key_credentials
+                               → optional AWS keys, JSON {"username": "<access_key>",
+                                 "password": "<secret_key>"}. Leave both unset when the
+                                 workspace already has bucket access via an instance
+                                 profile / Unity Catalog external location — in that
+                                 case this connector sets no explicit credentials.
 
-boto3 is the AWS Python SDK and bypasses Spark's filesystem layer entirely.
-We fetch the file content through the AWS SDK, parse it with pandas, and
-then convert the resulting DataFrame to a Spark DataFrame. This works on
-both classic and Unity Catalog-enabled clusters without needing External
-Locations or Storage Credentials configured in Unity Catalog.
+  ingest_obj  (s3_config_master, via S3ConfigManager — REPLACES ingestion_config
+              for S3 only; one row per report/object)
+    .s3_source_bucket_name    → source_bucket_name
+    .s3_external_path         → external_path — object key / prefix under the bucket
+                                 (or a full s3://... URI, used verbatim)
+    .s3_column_delimiter      → column_delimiter (default ',')
+    .s3_first_row_header      → first_row_header (default True)
 
-Credentials
------------
-  source_system.secret_scope / .secret_key_credentials
-      → secret stored in a Databricks secret scope as JSON:
-        {"username": "<AWS_ACCESS_KEY_ID>", "password": "<AWS_SECRET_ACCESS_KEY>"}
-      → when BOTH are set, boto3 client is created with explicit creds.
-      → when EITHER is unset, boto3 falls back to the cluster's IAM instance
-        profile (works on clusters that have an attached instance profile with
-        S3 read access).
-
-Config fields from ingest_obj (resolved from s3_config_master)
---------------------------------------------------------------
-  s3_source_bucket_name  → S3 bucket name (without s3:// prefix)
-  s3_external_path       → object key / prefix inside the bucket
-                           (or full s3[a]:// URI — bucket+key are extracted)
-  s3_column_delimiter    → column delimiter character (default ',')
-  s3_first_row_header    → bool, whether first row is a header (default True)
+Source path resolution
+-----------------------
+  s3://<source_bucket_name>/<external_path>
+  (external_path is used verbatim if it already starts with s3:// or s3a://)
 
 Load semantics
 --------------
-File-batch oriented: extract() always returns watermark=None.
-load_type / write_mode from the config row control how the bronze writer
-applies the result (overwrite for FULL, append or merge otherwise).
+This connector is file-batch oriented, like SFTP: there is no column to push
+an incremental predicate down to on the S3 side, so extract() always returns
+watermark=None. load_type / write_mode on the ingestion object (derived from
+key_column) still control how the bronze writer applies the result —
+append for plain loads, merge on key_column when one is configured.
 """
-import io
-import re
 from typing import Optional, Tuple
 
-import pandas as pd
 from pyspark.sql import DataFrame
 
 from .base_connector import BaseConnector
@@ -54,99 +45,63 @@ class S3Connector(BaseConnector):
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
-    def _parse_bucket_and_key(self) -> Tuple[str, str]:
-        """
-        Return (bucket, key) from the config fields.
+    def _resolve_source_path(self) -> str:
+        io = self.ingest_obj
 
-        Handles three formats in s3_external_path:
-          1. Full URI:  s3://my-bucket/path/to/file.csv
-          2. Full URI:  s3a://my-bucket/path/to/file.csv
-          3. Key only:  path/to/file.csv  (bucket = s3_source_bucket_name)
-        """
-        io_cfg = self.ingest_obj
-        external_path = (io_cfg.s3_external_path or "").strip()
+        external_path = (io.s3_external_path or "").strip()
+        if external_path.startswith("s3://") or external_path.startswith("s3a://"):
+            return external_path
 
-        uri_match = re.match(r"s3a?://([^/]+)/?(.*)", external_path)
-        if uri_match:
-            bucket = uri_match.group(1)
-            key    = uri_match.group(2)
-        else:
-            bucket = (io_cfg.s3_source_bucket_name or "").strip("/")
-            key    = external_path.lstrip("/")
-
+        bucket = io.s3_source_bucket_name
         if not bucket:
             raise ValueError(
-                f"source_bucket_name is not set for "
-                f"report '{io_cfg.source_object_name}' (config_id={io_cfg.config_id})"
+                f"s3_config_master.source_bucket_name is not set for "
+                f"report '{io.source_object_name}' (config_master_id={io.ingestion_object_id})"
             )
-        if not key:
-            raise ValueError(
-                f"s3_external_path / external_path is not set for "
-                f"report '{io_cfg.source_object_name}' (config_id={io_cfg.config_id})"
-            )
-        return bucket, key
+        return f"s3://{bucket.strip('/')}/{external_path.lstrip('/')}"
 
-    def _get_boto3_client(self):
+    def _apply_credentials(self) -> None:
         """
-        Build a boto3 S3 client.
-
-        Uses explicit credentials from the Databricks secret scope when both
-        secret_scope and secret_key_credentials are set on the source system row.
-        Falls back to the cluster's IAM instance profile otherwise.
+        Sets fs.s3a access/secret keys on the Spark session's Hadoop
+        configuration when explicit credentials are configured. Requires a
+        classic (non-serverless) cluster — sparkContext._jsc is a JVM-internal
+        handle that Spark Connect / serverless compute does not expose, and
+        serverless also blocks setting spark.hadoop.* at runtime outright, so
+        neither approach works there. When secret_scope/secret_key_credentials
+        are unset, relies on the cluster's instance profile or a Unity
+        Catalog external location/storage credential already granting
+        bucket access.
         """
-        import boto3
-
         ss = self.source_system
-        if ss.secret_scope and ss.secret_key_credentials:
-            access_key, secret_key = self.secrets.get_credentials(
-                ss.secret_scope, ss.secret_key_credentials
-            )
-            return boto3.client(
-                "s3",
-                aws_access_key_id     = access_key,
-                aws_secret_access_key = secret_key,
-            )
-        else:
-            # Rely on IAM instance profile attached to the cluster
-            return boto3.client("s3")
+        if not ss.secret_scope or not ss.secret_key_credentials:
+            return
+
+        access_key, secret_key = self.secrets.get_credentials(
+            ss.secret_scope, ss.secret_key_credentials
+        )
+        hadoop_conf = self.spark.sparkContext._jsc.hadoopConfiguration()
+        hadoop_conf.set("fs.s3a.access.key", access_key)
+        hadoop_conf.set("fs.s3a.secret.key", secret_key)
 
     # ── Public extract ────────────────────────────────────────────────────────
 
     def extract(self, watermark_start: Optional[str]) -> Tuple[DataFrame, Optional[str]]:
-        """
-        Download the S3 object via boto3, parse with pandas, return as Spark DF.
+        io = self.ingest_obj
 
-        Steps:
-          1. Resolve bucket + key from config fields.
-          2. Build a boto3 client (explicit creds or IAM profile).
-          3. Stream the object body into memory.
-          4. Parse with pandas.read_csv().
-          5. Convert to Spark DataFrame via spark.createDataFrame().
+        self._apply_credentials()
+        path = self._resolve_source_path()
 
-        Returns (df, None) — watermark is always None for file-batch sources.
-        """
-        bucket, key = self._parse_bucket_and_key()
-        client      = self._get_boto3_client()
+        delimiter = io.s3_column_delimiter or ","
+        header = io.s3_first_row_header if io.s3_first_row_header is not None else True
 
-        io_cfg    = self.ingest_obj
-        delimiter = io_cfg.s3_column_delimiter or ","
-        header    = io_cfg.s3_first_row_header if io_cfg.s3_first_row_header is not None else True
-
-        # Stream the S3 object body into an in-memory buffer
-        response = client.get_object(Bucket=bucket, Key=key)
-        body     = response["Body"].read()
-
-        pandas_df = pd.read_csv(
-            io.BytesIO(body),
-            sep           = delimiter,
-            header        = 0 if header else None,
+        df = (
+            self.spark.read
+            .option("header", str(bool(header)).lower())
+            .option("delimiter", delimiter)
+            .option("inferSchema", "true")
+            .csv(path)
         )
 
-        # Convert all column names to strings (pandas may infer int column names
-        # when header=False, which Spark does not accept)
-        pandas_df.columns = [str(c) for c in pandas_df.columns]
-
-        spark_df = self.spark.createDataFrame(pandas_df)
-
         # File-batch source: no column-based watermark to push down.
-        return spark_df, None
+        return df, None
+ 

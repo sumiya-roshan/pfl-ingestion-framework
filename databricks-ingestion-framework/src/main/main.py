@@ -199,3 +199,7 @@ if failed:
     )
 
 dbutils.notebook.exit(f"SUCCESS: {len(succeeded)}/{len(results)} objects ingested.")
+
+# COMMAND ----------
+
+
