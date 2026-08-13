@@ -54,6 +54,7 @@ class SourceSystemConfig:
 @dataclass
 class IngestionTaskConfig:
     """Unified configuration for a single ingestion task, reading from flattened child config tables."""
+    config_master_id: int
     config_id: int
     source_schema: Optional[str]
     source_object_name: str
@@ -135,7 +136,11 @@ class ConfigManager:
             extra_params            = r.get("extra_params"),
         )
 
-    def _build_ingestion_task(self, r: dict) -> IngestionTaskConfig:
+    def _build_ingestion_task(
+        self,
+        r: dict,
+        config_master_id: int,
+    ) -> IngestionTaskConfig:
         """
         Dynamically falls back across different column aliases to support 
         both RDBMS and NoSQL schema structures without hardcoding.
@@ -161,6 +166,7 @@ class ConfigManager:
         default_write_mode = "overwrite" if load_type == "FULL" else "append"
 
         return IngestionTaskConfig(
+            config_master_id    = config_master_id,
             config_id           = int(r.get("Config_ID", 0)),
             source_schema       = r.get("Source_Schema_Name"),
             source_object_name  = source_object,
@@ -239,6 +245,11 @@ class ConfigManager:
 
         tasks = []
         for r in child_rows:
-            tasks.append(self._build_ingestion_task(r.asDict()))
+            tasks.append(
+                self._build_ingestion_task(
+                    r.asDict(),
+                    config_master_id=config_master_id,
+                )
+            )
 
         return source_sys, tasks
