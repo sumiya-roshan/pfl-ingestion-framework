@@ -32,24 +32,22 @@ class IngestionOrchestrator:
 
     Parameters
     ----------
-    spark                  : active SparkSession
-    dbutils                : Databricks dbutils; None in unit tests
-    source_system_table    : FQN of config_source_system
-    ingestion_config_table : FQN of ingestion_config
-    audit_table            : FQN of data_pipeline_execution_master
-    pipeline_name          : fallback name if ingestion_config.pipeline_name is NULL
-    environment            : 'dev' | 'uat' | 'prod' — controls log level
-    department_id          : written to audit table department_id NOT NULL column
+    spark         : active SparkSession
+    dbutils       : Databricks dbutils; None in unit tests
+    audit_table   : FQN of data_pipeline_execution_master
+    pipeline_name : fallback name when config table pipeline_name is NULL
+    environment   : 'dev' | 'uat' | 'prod' — controls log level
+    department_id : written to audit table department_id NOT NULL column
     """
 
     def __init__(
         self,
         spark,
         dbutils=None,
-        audit_table: str            = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master",
-        pipeline_name: str          = "ingestion_framework",
-        environment: str            = "dev",
-        department_id: int          = 0,
+        audit_table: str   = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master",
+        pipeline_name: str = "ingestion_framework",
+        environment: str   = "dev",
+        department_id: int = 0,
     ):
         self.spark         = spark
         self.pipeline_name = pipeline_name
@@ -189,6 +187,7 @@ class IngestionOrchestrator:
 
     # ── Watermark resolution ──────────────────────────────────────────────────
 
+
     def _resolve_watermark(self, ingest_obj: IngestionTaskConfig) -> Optional[str]:
         if ingest_obj.load_type != "INCREMENTAL" or not ingest_obj.incremental_column:
             return None
@@ -196,10 +195,9 @@ class IngestionOrchestrator:
         full_table = ingest_obj.full_target_table
         if not self.spark.catalog.tableExists(full_table):
             self.logger.info(
-                f"Watermark: {full_table} does not exist yet — "
-                f"using incremental_end_value='{ingest_obj.incremental_end_value}'"
+                f"Watermark: {full_table} does not exist yet — starting full load."
             )
-            return ingest_obj.incremental_end_value
+            return None
 
         col = ingest_obj.incremental_column
         try:
@@ -215,6 +213,6 @@ class IngestionOrchestrator:
         except Exception as exc:
             self.logger.warning(
                 f"Watermark: could not read max({col}) from {full_table}: {exc}. "
-                f"Falling back to '{ingest_obj.incremental_end_value}'"
+                f"Falling back to None (full load)."
             )
-        return ingest_obj.incremental_end_value
+        return None

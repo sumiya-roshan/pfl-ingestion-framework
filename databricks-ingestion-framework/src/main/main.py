@@ -5,13 +5,17 @@
 # MAGIC Discovers and executes all active ingestion tasks for a given source system.
 # MAGIC
 # MAGIC **Input:** `config_master_id` and `source_system_id`.
-# MAGIC The notebook finds the correct child config table from `config_master`,
-# MAGIC fetches all active tasks (`Is_Active = 1`), and runs them.
+# MAGIC The notebook queries `config_master` to find the correct child config table
+# MAGIC (e.g. `rdbms_ingestion_config`, `nosql_ingestion_config`, `s3_config_master`),
+# MAGIC fetches all active rows (`Is_Active = 1`) for the resolved source name,
+# MAGIC and runs them sequentially.
+# MAGIC
+# MAGIC **All source types use the same flow** — RDBMS, NoSQL, and S3.
+# MAGIC The factory routes to the right connector based on `config_source_system.source_type`.
 # MAGIC
 # MAGIC **Fault tolerance:** a failure on one table does NOT stop the others.
 # MAGIC All objects are attempted; a summary is printed at the end. The notebook
-# MAGIC raises a final exception only if at least one table failed, so the
-# MAGIC Databricks Job task correctly shows FAILED.
+# MAGIC raises a final exception only if at least one table failed.
 
 # COMMAND ----------
 
@@ -24,7 +28,7 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 import sys
-sys.path.append("..")   
+sys.path.append("..")
 
 from ingestion.utils.config_manager import (
     ConfigManager,
@@ -42,30 +46,32 @@ from ingestion.utils.config_manager import IngestionTaskConfig
 
 # COMMAND ----------
 
-dbutils.widgets.text("config_master_id",       "",                     "Config Master ID (int, points to child table)")
-dbutils.widgets.text("source_system_id",       "",                     "Source System ID (int, gets connection info)")
-dbutils.widgets.text("target_catalog",         "hive_metastore",       "Target Catalog (e.g. main, hive_metastore)")
-dbutils.widgets.text("pipeline_name",          "",                     "Pipeline Name (blank = auto-detect from job)")
-dbutils.widgets.text("landing_volume_path",    "",                     "Landing Volume Base Path (blank = skip landing write)")
-dbutils.widgets.text("environment",            "dev",                  "Environment: dev | uat | prod")
-dbutils.widgets.text("trigger_type",           "SCHEDULED",            "Trigger Type: SCHEDULED | MANUAL | EVENT")
+dbutils.widgets.text("config_master_id",    "",               "Config Master ID (int — routes to correct child config table)")
+dbutils.widgets.text("source_system_id",    "",               "Source System ID (int — fetches credentials + source_name)")
+dbutils.widgets.text("target_catalog",      "hive_metastore", "Target Catalog (e.g. main, hive_metastore)")
+dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (blank = auto-detect from job)")
+dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Base Path (blank = skip landing write)")
+dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
+dbutils.widgets.text("trigger_type",        "SCHEDULED",      "Trigger Type: SCHEDULED | MANUAL | EVENT")
+dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
 
 # COMMAND ----------
 
-config_master_id_raw   = int(dbutils.widgets.get("config_master_id"))
-source_system_id_raw   = int(dbutils.widgets.get("source_system_id"))
+config_master_id_raw = dbutils.widgets.get("config_master_id") or None
+source_system_id_raw = dbutils.widgets.get("source_system_id") or None
 
 if not config_master_id_raw or not source_system_id_raw:
     dbutils.notebook.exit("Error: config_master_id and source_system_id are required.")
 
-config_master_id = int(config_master_id_raw)
-source_system_id = int(source_system_id_raw)
+config_master_id     = int(config_master_id_raw)
+source_system_id     = int(source_system_id_raw)
 
-target_catalog         = dbutils.widgets.get("target_catalog")         or "hive_metastore"
-pipeline_name_widget   = dbutils.widgets.get("pipeline_name")          or None
-landing_volume_path    = dbutils.widgets.get("landing_volume_path")    or None
-environment            = dbutils.widgets.get("environment")            or "dev"
-trigger_type           = dbutils.widgets.get("trigger_type")           or "SCHEDULED"
+target_catalog       = dbutils.widgets.get("target_catalog")       or "hive_metastore"
+pipeline_name_widget = dbutils.widgets.get("pipeline_name")        or None
+landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
+environment          = dbutils.widgets.get("environment")          or "dev"
+trigger_type         = dbutils.widgets.get("trigger_type")         or "SCHEDULED"
+audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
 
 # COMMAND ----------
 
@@ -93,7 +99,7 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Discover ingestion objects for this source
+# MAGIC ### Discover ingestion tasks for this source
 
 # COMMAND ----------
 
@@ -104,15 +110,18 @@ config_mgr = ConfigManager(
     target_catalog      = target_catalog,
 )
 
-# Fetch the source system config AND all active tasks from the correct child table
+# 1. Fetch source system creds + resolve source_name
+# 2. Look up the correct child config table from config_master
+# 3. Return all active rows for that source_name as IngestionTaskConfig objects
 source_sys, tasks = config_mgr.get_active_tasks(
     config_master_id = config_master_id,
-    source_system_id = source_system_id
+    source_system_id = source_system_id,
 )
 
 print(f"\nSource filters applied:")
 print(f"  config_master_id : {config_master_id}")
 print(f"  source_system_id : {source_system_id} -> Resolved to: {source_sys.source_name}")
+print(f"  source_type      : {source_sys.source_type}")
 print(f"  target_catalog   : {target_catalog}")
 print(f"\nFound {len(tasks)} ingestion task(s) to run.")
 
@@ -138,13 +147,13 @@ except Exception:
 orchestrator = IngestionOrchestrator(
     spark,
     dbutils,
-    audit_table   = AUDIT_TABLE,
+    audit_table   = audit_table,
     pipeline_name = pipeline_name,
     environment   = environment,
 )
 
 def run_one(task: IngestionTaskConfig) -> dict:
-    """Run a single ingestion object through the orchestrator."""
+    """Run a single ingestion task — works for RDBMS, NoSQL, and S3."""
     return orchestrator.run(
         source_sys          = source_sys,
         task                = task,
