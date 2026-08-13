@@ -173,6 +173,7 @@ class ConfigManager:
             source_object_name  = source_object,
             custom_query        = r.get("Source_Query"),
             load_type           = load_type,
+            frequency           = r.get("Frequency") or r.get("frequency"),
             incremental_column  = inc_col,
             primary_key_cols    = pk_cols,
             target_catalog      = self.target_catalog,
