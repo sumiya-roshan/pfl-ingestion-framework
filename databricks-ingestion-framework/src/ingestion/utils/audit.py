@@ -44,7 +44,7 @@ class AuditLogger:
             0,
             required_string(task.effective_delta_layer), 
             required_string(source_sys.source_name),
-            required_string(pipeline_name, "manual_run"), 
+            pipeline_name,
             required_string(task.load_type),
             task.frequency, start_time.date(),
             required_string(ctx.get("job_id"), "MANUAL"),
