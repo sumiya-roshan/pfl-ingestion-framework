@@ -1,19 +1,5 @@
-"""
-Main driver: given an ingestion_object_id, resolves config, extracts data,
-writes to landing path (if provided) and/or bronze Delta table, and records
-the run in data_pipeline_execution_master.
+# Databricks notebook source
 
-Key behaviours
---------------
-- delta_layer   : read from ingestion_config.delta_layer (not a widget)
-- pipeline_name : read from ingestion_config.pipeline_name (auto-detected from
-                  Databricks Job context in the calling notebook)
-- landing_volume_path : passed as a parameter from the job widget — NOT from
-                  config_source_system (removed)
-- Fault tolerance: run() catches all exceptions, records FAILED in audit, and
-                  returns a result dict — it never re-raises. The calling
-                  notebook decides whether to raise after collecting all results.
-"""
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -37,7 +23,7 @@ class IngestionOrchestrator:
         spark,
         dbutils,
         pipeline_name,
-        audit_table: str            = "migration_x_catalog.pfl_x_schema.tb_audit_log",
+        audit_table: str  = "migration_x_catalog.pfl_x_schema.tb_audit_log",
         environment = "dev",
         job_context =None
     ):
@@ -64,9 +50,6 @@ class IngestionOrchestrator:
         """
         Execute a single ingestion object end-to-end.
 
-        Never re-raises — catches all exceptions and returns a result dict.
-        Callers should check result["status"] == "FAILED" and act accordingly.
-
         Returns
         -------
         dict with keys: config_id, status, rows_read, error
@@ -74,11 +57,8 @@ class IngestionOrchestrator:
         ingest_obj = task
         ctx = job_context or self.job_context
         start_time = task_start_time or datetime.now(timezone.utc)
-
-        # pipeline_name and delta_layer come from config table, with fallbacks
         pipeline_name = ingest_obj.pipeline_name or self.pipeline_name
-        delta_layer   = ingest_obj.effective_delta_layer   # property: config → fallback 'BRONZE'
-
+        delta_layer   = ingest_obj.effective_delta_layer 
         watermark_start = self._resolve_watermark(ingest_obj)
 
         self.logger.info(
@@ -123,9 +103,7 @@ class IngestionOrchestrator:
                 schema_evolution_mode = ingest_obj.schema_evolution_mode,
                 partition_column      = ingest_obj.partition_column,
             )
-            copy_duration = (
-                datetime.now(timezone.utc) - bronze_start
-            ).total_seconds()
+            copy_duration = (datetime.now(timezone.utc) - bronze_start).total_seconds()
 
             rows_copied = rows_read
             # ---------------------------------------------------------

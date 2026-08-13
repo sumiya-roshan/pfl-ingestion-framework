@@ -1,22 +1,4 @@
 # Databricks notebook source
-# /// script
-# [tool.databricks.environment]
-# environment_version = "5"
-# ///
-# MAGIC %md
-# MAGIC # Ingestion — Source System Entry Point
-# MAGIC
-# MAGIC Discovers and executes all active ingestion tasks for a given source system.
-# MAGIC
-# MAGIC **Input:** `config_master_id` and `source_system_id`.
-# MAGIC The notebook finds the correct child config table from `config_master`,
-# MAGIC fetches all active tasks (`Is_Active = 1`), and runs them.
-# MAGIC
-# MAGIC **Fault tolerance:** a failure on one table does NOT stop the others.
-# MAGIC All objects are attempted; a summary is printed at the end. The notebook
-# MAGIC raises a final exception only if at least one table failed, so the
-# MAGIC Databricks Job task correctly shows FAILED.
-
 # COMMAND ----------
 
 
@@ -210,15 +192,6 @@ orchestrator = IngestionOrchestrator(
 
 print(f"Audit table      : {AUDIT_TABLE}")
 
-# def run_one(task: IngestionTaskConfig) -> dict:
-#     """Run a single ingestion object through the orchestrator."""
-#     return orchestrator.run(
-#         source_sys          = source_sys,
-#         task                = task,
-#         landing_volume_path = landing_volume_path,
-#         trigger_id          = trigger_id,
-#         trigger_type        = trigger_type,
-#     )
 results = []
 
 for task in tasks:
