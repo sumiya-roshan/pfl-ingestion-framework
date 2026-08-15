@@ -58,6 +58,7 @@ class AuditLogger:
         trigger_id: Optional[str] = None,
         business_date: Optional[date] = None,
         frequency: Optional[str] = None,
+        config_master_id: Optional[int] = None,
     ) -> str:
         """
         Inserts a RUNNING row into data_pipeline_execution_master.
@@ -66,10 +67,11 @@ class AuditLogger:
         Accepts ingest_obj (IngestionTaskConfig) and source_sys (SourceSystemConfig)
         directly — no manual field mapping required in the caller.
         """
-        run_id     = str(uuid.uuid4())
-        now        = datetime.utcnow()
-        biz_date   = business_date if business_date is not None else now.date()
-        obj_id_int = int(ingest_obj.config_id)
+        run_id          = str(uuid.uuid4())
+        now             = datetime.utcnow()
+        biz_date        = business_date if business_date is not None else now.date()
+        obj_id_int      = int(ingest_obj.config_id)         # row ID from child config table
+        cfg_master_int  = int(config_master_id) if config_master_id is not None else obj_id_int
 
         schema = StructType([
             StructField("config_master_id",       IntegerType(),        True),
@@ -100,8 +102,8 @@ class AuditLogger:
         ])
 
         row = [(
-            obj_id_int,                      # config_master_id
-            obj_id_int,                      # table_id
+            cfg_master_int,                  # config_master_id  ← widget value from main.py
+            obj_id_int,                      # table_id          ← row ID from child config table
             delta_layer,
             source_sys.source_name,
             pipeline_name,

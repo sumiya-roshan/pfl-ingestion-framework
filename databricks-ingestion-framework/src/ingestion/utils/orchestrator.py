@@ -66,6 +66,7 @@ class IngestionOrchestrator:
         self,
         source_sys: SourceSystemConfig,
         task: IngestionTaskConfig,
+        config_master_id: Optional[int]    = None,
         landing_volume_path: Optional[str] = None,
         trigger_id: Optional[str]          = None,
         trigger_type: str                  = "MANUAL",
@@ -81,6 +82,8 @@ class IngestionOrchestrator:
         ----------
         source_sys          : Pre-fetched SourceSystemConfig
         task                : Pre-fetched IngestionTaskConfig
+        config_master_id    : The config_master routing table ID (widget value from main.py);
+                              written to the audit table's config_master_id column
         landing_volume_path : base S3/Volume path for raw landing write (widget value);
                               if None/empty, landing write is skipped
         trigger_id          : Databricks job run ID (for audit traceability)
@@ -100,7 +103,9 @@ class IngestionOrchestrator:
         watermark_start = resolve_watermark(self.spark, self.logger, ingest_obj)
 
         run_id = self.audit.start_run(
-            ingest_obj, source_sys, pipeline_name, delta_layer, trigger_type, trigger_id, business_date
+            ingest_obj, source_sys, pipeline_name, delta_layer,
+            trigger_type, trigger_id, business_date,
+            config_master_id = config_master_id,
         )
 
         self.logger.info(

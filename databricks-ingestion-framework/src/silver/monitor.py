@@ -57,6 +57,7 @@ dbutils.widgets.text("silver_notebook_timeout","3600",         "Max seconds to w
 dbutils.widgets.text("silver_max_workers",     "4",            "Max parallel Silver notebook runs")
 dbutils.widgets.text("poll_interval_seconds",  "30",           "Seconds between audit polls")
 dbutils.widgets.text("timeout_minutes",        "120",          "Max wait time before giving up (minutes)")
+dbutils.widgets.text("lookback_minutes",       "60",           "How far back to look for Bronze SUCCESS rows (covers notebook startup delay)")
 
 # COMMAND ----------
 
@@ -78,6 +79,7 @@ silver_notebook_timeout  = int(dbutils.widgets.get("silver_notebook_timeout") or
 silver_max_workers       = int(dbutils.widgets.get("silver_max_workers")    or "4")
 poll_interval_seconds    = int(dbutils.widgets.get("poll_interval_seconds") or "30")
 timeout_minutes          = int(dbutils.widgets.get("timeout_minutes")       or "120")
+lookback_minutes         = int(dbutils.widgets.get("lookback_minutes")      or "60")
 
 # COMMAND ----------
 
@@ -107,6 +109,7 @@ print(f"  source_name      : {source_sys.source_name}")
 print(f"  Tables to watch     : {len(tasks)}")
 print(f"  poll interval       : {poll_interval_seconds}s")
 print(f"  timeout             : {timeout_minutes} min")
+print(f"  lookback window     : {lookback_minutes} min (covers notebook startup delay)")
 print(f"  silver_notebook     : {silver_notebook_path}")
 print(f"  silver_max_workers  : {silver_max_workers}")
 
@@ -117,9 +120,14 @@ print(f"  silver_max_workers  : {silver_max_workers}")
 
 # COMMAND ----------
 
-# Record the moment this monitor started — used to filter the audit table so we
-# only look at runs from THIS specific job execution, not historical rows.
-job_start_time = datetime.now(timezone.utc)
+# ── Lookback window ──────────────────────────────────────────────────────────
+# We look for Bronze SUCCESS rows written within the last `lookback_minutes`
+# rather than filtering by the exact monitor start time.
+# This handles the common case where notebook initialization (restartPython,
+# imports, ConfigManager setup) takes a minute or two, meaning Bronze may
+# have already completed by the time the polling loop actually starts.
+# The lookback window (default 60 min) is wide enough to catch any Bronze
+# row from the same job run, but short enough to exclude yesterday's history.
 
 # In-memory status table: one entry per table
 #   bronze_done : True when the audit table shows SUCCESS for this run
@@ -159,14 +167,18 @@ results         = []   # collects Silver trigger outcomes
 def check_bronze_done(config_id: int) -> bool:
     """
     Query the audit table to see if this config_id has a SUCCESS row
-    that was written AFTER this monitor started (i.e., in this job run).
+    written within the last `lookback_minutes` minutes.
+
+    Using a lookback window (not the exact monitor start time) handles
+    the case where notebook initialization takes longer than expected
+    and Bronze finishes before the polling loop begins.
     """
     rows = spark.sql(f"""
         SELECT 1
         FROM   {audit_table}
-        WHERE  table_id     = {int(config_id)}
-          AND  status       = 'SUCCESS'
-          AND  trigger_time >= '{job_start_time.strftime('%Y-%m-%d %H:%M:%S')}'
+        WHERE  table_id = {int(config_id)}
+          AND  status   = 'SUCCESS'
+          AND  end_time >= current_timestamp() - INTERVAL {lookback_minutes} MINUTES
         LIMIT  1
     """).collect()
     return len(rows) > 0
@@ -175,26 +187,25 @@ def check_bronze_done(config_id: int) -> bool:
 def trigger_silver(info: dict) -> dict:
     """
     Called inside a ThreadPoolExecutor worker thread.
-    Triggers the Silver Job for one table and returns a result dict.
+    Runs the Silver notebook for one table via dbutils.notebook.run()
+    and returns a result dict.
     """
     config_id  = info["config_id"]
     table_name = info["target_table"]
     try:
-        response = processor.trigger(config_id=config_id, table_name=table_name)
+        exit_value = processor.trigger(config_id=config_id, table_name=table_name)
         return {
-            "config_id":     config_id,
-            "name":          info["name"],
-            "status":        "TRIGGERED",
-            "silver_run_id": response.run_id,
-            "error":         None,
+            "config_id": config_id,
+            "name":      info["name"],
+            "status":    "TRIGGERED",
+            "error":     None,
         }
     except Exception as exc:
         return {
-            "config_id":     config_id,
-            "name":          info["name"],
-            "status":        "FAILED",
-            "silver_run_id": None,
-            "error":         str(exc),
+            "config_id": config_id,
+            "name":      info["name"],
+            "status":    "FAILED",
+            "error":     str(exc),
         }
 
 
@@ -251,14 +262,11 @@ with ThreadPoolExecutor(max_workers=silver_max_workers) as executor:
                     "silver_run_id": None,
                     "error":         str(exc),
                 }
-            results.append(res)
             tables_status[info["config_id"]]["silver_done"] = True
-            tables_status[info["config_id"]]["silver_run_id"] = res.get("silver_run_id")
             icon = "✅" if res["status"] == "TRIGGERED" else "❌"
             print(
                 f"  {icon} Silver {'triggered' if res['status'] == 'TRIGGERED' else 'FAILED'}  "
-                f"— config_id={info['config_id']} table='{info['name']}' "
-                f"silver_run_id={res.get('silver_run_id')}"
+                f"— config_id={info['config_id']} table='{info['name']}'"
             )
 
         # ── Exit condition: all tables Silver-done ────────────────────────

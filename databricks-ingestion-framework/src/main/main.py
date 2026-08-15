@@ -160,6 +160,7 @@ def run_one(task: IngestionTaskConfig) -> dict:
     return orchestrator.run(
         source_sys          = source_sys,
         task                = task,
+        config_master_id    = config_master_id,   # ← routing table ID from widget
         landing_volume_path = landing_volume_path,
         trigger_id          = trigger_id,
         trigger_type        = trigger_type,
