@@ -265,11 +265,15 @@ with ThreadPoolExecutor(max_workers=silver_max_workers) as executor:
                     "error":         str(exc),
                 }
             tables_status[info["config_id"]]["silver_done"] = True
+            results.append(res)   # ← must append before summary prints
             icon = "✅" if res["status"] == "TRIGGERED" else "❌"
             print(
                 f"  {icon} Silver {'triggered' if res['status'] == 'TRIGGERED' else 'FAILED'}  "
                 f"— config_id={info['config_id']} table='{info['name']}'"
             )
+            if res["status"] == "FAILED" and res.get("error"):
+                print(f"     ↳ Error: {res['error']}")
+
 
         # ── Exit condition: all tables Silver-done ────────────────────────
         if all(v["silver_done"] for v in tables_status.values()):
