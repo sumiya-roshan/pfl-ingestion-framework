@@ -16,7 +16,7 @@ Output path structure
 Supported formats (driven by ingestion_config.file_format):
   parquet (default) | delta | csv | json
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from pyspark.sql import DataFrame
@@ -47,7 +47,7 @@ class S3RawWriter:
         file_format         : output format
         mode                : Spark write mode (default: append)
         """
-        ingest_date = datetime.utcnow().strftime("%Y-%m-%d")
+        ingest_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         schema_part = f"{source_schema}/" if source_schema else ""
 
         target_path = (

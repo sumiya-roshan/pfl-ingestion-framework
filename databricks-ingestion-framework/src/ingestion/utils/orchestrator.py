@@ -14,7 +14,7 @@ Key behaviours
                   returns a result dict — it never re-raises. The calling
                   notebook decides whether to raise after collecting all results.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from .config_manager import IngestionTaskConfig, SourceSystemConfig
@@ -38,7 +38,7 @@ class IngestionOrchestrator:
         spark,
         dbutils,
         pipeline_name,
-        audit_table: str            = "migration_x_catalog.pfl_x_schema.tb_audit_log",
+        audit_table: str  = "migration_x_catalog.pfl_x_schema.tb_audit_log",
         environment = "dev",
         job_context =None
     ):
@@ -65,19 +65,15 @@ class IngestionOrchestrator:
         """
         Execute a single ingestion object end-to-end.
 
-        Never re-raises — catches all exceptions and returns a result dict.
-        Callers should check result["status"] == "FAILED" and act accordingly.
-
         Returns
         -------
         dict with keys: config_id, status, rows_read, error
         """
         ingest_obj = task
         ctx = job_context or self.job_context
-        start_time = task_start_time or datetime.utcnow()
-
-        # pipeline_name and delta_layer come from config table, with fallbacks
+        start_time = task_start_time or datetime.now(timezone.utc)
         pipeline_name = ingest_obj.pipeline_name or self.pipeline_name
+<<<<<<< HEAD
         delta_layer   = ingest_obj.effective_delta_layer   # property: config → fallback 'BRONZE'
 
         watermark_start = resolve_watermark(self.spark, self.logger, ingest_obj)
@@ -85,6 +81,10 @@ class IngestionOrchestrator:
         run_id = self.audit.start_run(
             ingest_obj, source_sys, pipeline_name, delta_layer, trigger_type, trigger_id, business_date
         )
+=======
+        delta_layer   = ingest_obj.effective_delta_layer 
+        watermark_start = self._resolve_watermark(ingest_obj)
+>>>>>>> 74928d3307b8422d9fb0797fcb76e3bd7a00cb50
 
         self.logger.info(
             f" START config_id={ingest_obj.config_id} "
@@ -117,7 +117,7 @@ class IngestionOrchestrator:
                 )
 
             # ── Bronze Delta write ─────────────────────────────────────────────
-            bronze_start = datetime.utcnow()
+            bronze_start = datetime.now(timezone.utc)
             target_table = self.bronze_writer.write(
                 df,
                 catalog               = ingest_obj.target_catalog,
@@ -128,9 +128,7 @@ class IngestionOrchestrator:
                 schema_evolution_mode = ingest_obj.schema_evolution_mode,
                 partition_column      = ingest_obj.partition_column,
             )
-            copy_duration = (
-                datetime.utcnow() - bronze_start
-            ).total_seconds()
+            copy_duration = (datetime.now(timezone.utc) - bronze_start).total_seconds()
 
             rows_copied = rows_read
             # ---------------------------------------------------------
@@ -138,12 +136,13 @@ class IngestionOrchestrator:
             # ---------------------------------------------------------
 
             self.audit.log_execution(
+                task=ingest_obj,
                 source_sys=source_sys,
                 job_context=ctx,
                 pipeline_name=(self.pipeline_name
                 ),
                 start_time=start_time,
-                end_time=datetime.utcnow(),
+                end_time=datetime.now(timezone.utc),
                 rows_read=rows_read,
                 rows_copied=rows_copied,
                 copy_duration_sec=copy_duration,
@@ -170,12 +169,13 @@ class IngestionOrchestrator:
             # ---------------------------------------------------------
 
             self.audit.log_execution(
+                task=ingest_obj,
                 source_sys=source_sys,
                 job_context=ctx,
                 pipeline_name=(self.pipeline_name
                 ),
                 start_time=start_time,
-                end_time=datetime.utcnow(),
+                end_time=datetime.now(timezone.utc),
                 status="FAILED",
                 error_code=type(exc).__name__,
                 error_message=str(exc),
@@ -184,10 +184,6 @@ class IngestionOrchestrator:
                 f" FAILED config_id={ingest_obj.config_id}: {exc}",
                 exc_info=True,
             )
-            try:
-                self.audit.fail_run(error_message=exc)
-            except Exception as audit_exc:
-                self.logger.error(f" Could not write FAILED status to audit: {audit_exc}")
             return {
                 "config_id": ingest_obj.config_id,
                 "status":   "FAILED",
