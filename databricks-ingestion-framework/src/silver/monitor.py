@@ -129,6 +129,8 @@ print(f"  silver_max_workers  : {silver_max_workers}")
 # The lookback window (default 60 min) is wide enough to catch any Bronze
 # row from the same job run, but short enough to exclude yesterday's history.
 
+job_start_time = datetime.now(timezone.utc)   # used for the polling loop log message
+
 # In-memory status table: one entry per table
 #   bronze_done : True when the audit table shows SUCCESS for this run
 #   silver_done : True after Silver Job has been triggered for this table
