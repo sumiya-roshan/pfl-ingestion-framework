@@ -9,6 +9,7 @@ from .base_connector import BaseConnector
 from .jdbc_connector import JdbcConnector
 from .sftp_connector import SftpConnector
 from .mongo_connector import MongoConnector
+from .s3_connector import S3Connector
 
 # ── Connector registry ────────────────────────────────────────────────────────
 # Key   : value of config_source_system.source_type (upper-cased)
@@ -24,6 +25,7 @@ _CONNECTOR_MAP: dict = {
     "SFTP":     SftpConnector,
     "MONGODB":  MongoConnector,
     "MONGO":    MongoConnector,
+    "S3":       S3Connector,
 }
 
 

@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Optional
 
 from .config_manager import IngestionTaskConfig, SourceSystemConfig
+from .watermark import resolve_watermark
 from .audit import AuditLogger
 from ..connectors.factory import get_connector
 from .writers.s3_writer import S3RawWriter
@@ -79,7 +80,11 @@ class IngestionOrchestrator:
         pipeline_name = ingest_obj.pipeline_name or self.pipeline_name
         delta_layer   = ingest_obj.effective_delta_layer   # property: config → fallback 'BRONZE'
 
-        watermark_start = self._resolve_watermark(ingest_obj)
+        watermark_start = resolve_watermark(self.spark, self.logger, ingest_obj)
+
+        run_id = self.audit.start_run(
+            ingest_obj, source_sys, pipeline_name, delta_layer, trigger_type, trigger_id, business_date
+        )
 
         self.logger.info(
             f" START config_id={ingest_obj.config_id} "
@@ -191,35 +196,3 @@ class IngestionOrchestrator:
                 "error": str(exc),
                 "error_code": type(exc).__name__,
             }
-
-    # ── Watermark resolution ──────────────────────────────────────────────────
-
-    def _resolve_watermark(self, ingest_obj: IngestionTaskConfig) -> Optional[str]:
-        if ingest_obj.load_type != "INCREMENTAL" or not ingest_obj.incremental_column:
-            return None
-
-        full_table = ingest_obj.full_target_table
-        if not self.spark.catalog.tableExists(full_table):
-            self.logger.info(
-                f"Watermark: {full_table} does not exist yet — "
-                f"using incremental_end_value='{ingest_obj.incremental_end_value}'"
-            )
-            return ingest_obj.incremental_end_value
-
-        col = ingest_obj.incremental_column
-        try:
-            row = (
-                self.spark.table(full_table)
-                .selectExpr(f"MAX(`{col}`) AS max_val")
-                .collect()
-            )
-            if row and row[0]["max_val"] is not None:
-                wm = str(row[0]["max_val"])
-                self.logger.info(f"Watermark: max({col})='{wm}' from {full_table}")
-                return wm
-        except Exception as exc:
-            self.logger.warning(
-                f"Watermark: could not read max({col}) from {full_table}: {exc}. "
-                f"Falling back to '{ingest_obj.incremental_end_value}'"
-            )
-        return ingest_obj.incremental_end_value
