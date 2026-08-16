@@ -73,6 +73,7 @@ source_system_id     = int(source_system_id_raw)
 
 target_catalog       = dbutils.widgets.get("target_catalog")       or "hive_metastore"
 pipeline_name        = dbutils.widgets.get("pipeline_name")        or None
+job_id              = dbutils.widgets.get("job_id")           or None
 job_run_id           = dbutils.widgets.get("run_id")           or None
 # trigger_type         = dbutils.widgets.get("trigger_type")         or None
 
@@ -114,12 +115,19 @@ def get_databricks_job_context():
             return getattr(context, method_name)().get()
         except Exception:
             return None
+    databricks_url = get_context_value("apiUrl")
+    job_id = dbutils.widgets.get("job_id")
 
+    databricks_url = (
+        f"{databricks_url}/#job/{job_id}"
+        if databricks_url and job_id
+        else None
+    )
     return {
         "job_id": get_context_value("jobId"),
         "job_name": get_context_value("jobName"),
         "notebook_name": get_context_value("notebookPath"),
-        "databricks_url": get_context_value("apiUrl"),
+        "databricks_url": databricks_url,
         "trigger_type": get_context_value("triggerType"),
         "trigger_id": get_context_value("triggerId"),
         "trigger_name": get_context_value("triggerName"),
