@@ -110,7 +110,7 @@ class AuditLogger:
                     data_written_bytes      = {int(data_written_bytes or 0)},
                     throughput_mb_per_sec   = {self._sql_numeric(throughput_mb_per_sec)},
                     copy_duration_sec       = {self._sql_numeric(copy_duration_sec)},
-                    error_code              = {self._sql_literal(error_code)}
+                    error_code              = {self._sql_literal(error_code)},
                     error_message           = {self._sql_literal(error_message)}
                 WHERE job_run_id = {self._sql_literal(audit_run['job_run_id'])}
                   AND table_id = {int(audit_run['table_id'])}
