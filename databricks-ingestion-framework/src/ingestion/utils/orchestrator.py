@@ -223,6 +223,7 @@ class IngestionOrchestrator:
                 "run_id":   run_id,
                 "status":   AUDIT_STATUS_SUCCESS,
                 "rows_read": rows_read,
+                "error_code": None,
                 "error":    None,
             }
 
@@ -231,12 +232,15 @@ class IngestionOrchestrator:
             # The fan-out driver (run_all_sources.py) collects results and
             # raises a summary exception if any table failed.
             error_msg = str(exc)
+            # if hasattr(exc, "getErrorClass"):
+            #     error_code_dtl = exc.getErrorClass()
+            error_code  = type(exc).__name__
             self.logger.error(
                 f"[{run_id}] FAILED config_id={ingest_obj.config_id}: {error_msg}",
                 exc_info=True,
             )
             try:
-                self.audit.fail_run(audit_run=audit_run, error_message=error_msg)
+                self.audit.fail_run(audit_run=audit_run, error_code = error_code,error_message=error_msg)
             except Exception as audit_exc:
                 self.logger.error(f"[{run_id}] Could not write FAILED status to audit: {audit_exc}")
             return {
@@ -244,5 +248,6 @@ class IngestionOrchestrator:
                 "run_id":   run_id,
                 "status":   AUDIT_STATUS_FAILED,
                 "rows_read": 0,
+                "error_code": error_code,
                 "error":    error_msg,
             }

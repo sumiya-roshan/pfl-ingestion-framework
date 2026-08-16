@@ -88,6 +88,7 @@ class AuditLogger:
         data_written_bytes: int = 0,
         throughput_mb_per_sec: Optional[float] = None,
         copy_duration_sec: Optional[float] = None,
+        error_code: Optional[str] = None,
         error_message: Optional[str] = None,
     ) -> None:
         """Set end time and final SUCCESS or FAILED status for an audit row."""
@@ -109,15 +110,16 @@ class AuditLogger:
                     data_written_bytes      = {int(data_written_bytes or 0)},
                     throughput_mb_per_sec   = {self._sql_numeric(throughput_mb_per_sec)},
                     copy_duration_sec       = {self._sql_numeric(copy_duration_sec)},
+                    error_code              = {self._sql_literal(error_code)}
                     error_message           = {self._sql_literal(error_message)}
                 WHERE job_run_id = {self._sql_literal(audit_run['job_run_id'])}
                   AND table_id = {int(audit_run['table_id'])}
                   AND status = {self._sql_literal(AUDIT_STATUS_INPROGRESS)}
             """)
 
-    def fail_run(self, audit_run: Dict[str, Any], error_message: str) -> None:
+    def fail_run(self, audit_run: Dict[str, Any],error_code: str, error_message: str) -> None:
         """Mark the active audit record as FAILED."""
-        self.complete_run(audit_run, AUDIT_STATUS_FAILED, error_message=error_message)
+        self.complete_run(audit_run, AUDIT_STATUS_FAILED,error_code= error_code, error_message=error_message)
 
     @staticmethod
     def _required_string(value: Any, default: str = "UNKNOWN") -> str:
