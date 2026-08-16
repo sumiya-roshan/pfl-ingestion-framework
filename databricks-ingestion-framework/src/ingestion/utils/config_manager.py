@@ -19,7 +19,12 @@ from typing import Optional, List, Dict, Tuple
 # ── Fully-qualified table name defaults ───────────────────────────────────────
 SOURCE_SYSTEM_TABLE = "migration_x_catalog.pfl_x_schema.config_source_system"
 CONFIG_MASTER_TABLE = "migration_x_catalog.pfl_x_schema.config_master"
-AUDIT_TABLE         = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master"
+AUDIT_TABLE         = "migration_x_catalog.pfl_x_schema.tb_audit_log"
+
+# Audit lifecycle values shared by the entry point, orchestrator, and logger.
+AUDIT_STATUS_INPROGRESS = "INPROGRESS"
+AUDIT_STATUS_SUCCESS    = "SUCCESS"
+AUDIT_STATUS_FAILED     = "FAILED"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data classes

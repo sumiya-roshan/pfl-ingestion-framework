@@ -17,7 +17,12 @@ Key behaviours
 from datetime import date
 from typing import Optional
 
-from .config_manager import IngestionTaskConfig, SourceSystemConfig
+from .config_manager import (
+    AUDIT_STATUS_FAILED,
+    AUDIT_STATUS_SUCCESS,
+    IngestionTaskConfig,
+    SourceSystemConfig,
+)
 from .watermark import resolve_watermark
 from .audit import AuditLogger
 from ..connectors.factory import get_connector
@@ -71,6 +76,7 @@ class IngestionOrchestrator:
         trigger_id: Optional[str]          = None,
         trigger_type: str                  = "MANUAL",
         business_date: Optional[date]      = None,
+        job_context: Optional[dict]        = None,
     ) -> dict:
         """
         Execute a single ingestion object end-to-end.
@@ -100,13 +106,19 @@ class IngestionOrchestrator:
         pipeline_name = ingest_obj.pipeline_name or self.pipeline_name
         delta_layer   = ingest_obj.effective_delta_layer   # property: config → fallback 'BRONZE'
 
-        # First audit execution: create the INPROGRESS record and capture the
-        # job start time before any work (including watermark resolution).
-        run_id = self.audit.start_run(
-            ingest_obj, source_sys, pipeline_name, delta_layer,
-            trigger_type, trigger_id, business_date,
-            config_master_id = config_master_id,
+        # Start audit: insert the INPROGRESS record before any ingestion work.
+        audit_context = dict(job_context or {})
+        audit_context.setdefault("trigger_type", trigger_type)
+        audit_context.setdefault("trigger_id", trigger_id)
+        audit_run = self.audit.start_run(
+            task=ingest_obj,
+            source_sys=source_sys,
+            job_context=audit_context,
+            pipeline_name=pipeline_name,
+            config_master_id=config_master_id,
+            business_date=business_date,
         )
+        run_id = audit_run["job_run_id"]
 
         try:
             watermark_start = resolve_watermark(self.spark, self.logger, ingest_obj)
@@ -155,10 +167,10 @@ class IngestionOrchestrator:
                 f"[{run_id}] Bronze write → {target_table} ({rows_read} rows, mode={ingest_obj.write_mode})"
             )
 
-            # Second audit execution: mark the run SUCCESS and stamp end_time.
+            # End audit: update the INPROGRESS record with SUCCESS and end time.
             self.audit.complete_run(
-                run_id       = run_id,
-                status       = "SUCCESS",
+                audit_run    = audit_run,
+                status       = AUDIT_STATUS_SUCCESS,
                 rows_read    = rows_read,
                 rows_copied  = rows_copied,
                 rows_deleted = rows_deleted,
@@ -167,7 +179,7 @@ class IngestionOrchestrator:
             return {
                 "config_id": ingest_obj.config_id,
                 "run_id":   run_id,
-                "status":   "SUCCESS",
+                "status":   AUDIT_STATUS_SUCCESS,
                 "rows_read": rows_read,
                 "error":    None,
             }
@@ -182,13 +194,13 @@ class IngestionOrchestrator:
                 exc_info=True,
             )
             try:
-                self.audit.fail_run(run_id=run_id, error_message=error_msg)
+                self.audit.fail_run(audit_run=audit_run, error_message=error_msg)
             except Exception as audit_exc:
                 self.logger.error(f"[{run_id}] Could not write FAILED status to audit: {audit_exc}")
             return {
                 "config_id": ingest_obj.config_id,
                 "run_id":   run_id,
-                "status":   "FAILED",
+                "status":   AUDIT_STATUS_FAILED,
                 "rows_read": 0,
                 "error":    error_msg,
             }

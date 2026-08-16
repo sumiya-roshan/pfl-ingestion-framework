@@ -32,6 +32,8 @@ import sys
 sys.path.append("..")
 
 from ingestion.utils.config_manager import (
+    AUDIT_STATUS_FAILED,
+    AUDIT_STATUS_SUCCESS,
     ConfigManager,
     SOURCE_SYSTEM_TABLE,
     CONFIG_MASTER_TABLE,
@@ -49,7 +51,7 @@ from ingestion.utils.config_manager import IngestionTaskConfig
 
 dbutils.widgets.text("config_master_id",    "",               "Config Master ID (int — routes to correct child config table)")
 dbutils.widgets.text("source_system_id",    "",               "Source System ID (int — fetches credentials + source_name)")
-dbutils.widgets.text("target_catalog",      "hive_metastore", "Target Catalog (e.g. main, hive_metastore)")
+dbutils.widgets.text("target_catalog",      "",               "Target Catalog (e.g. main, hive_metastore)")
 dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (blank = auto-detect from job)")
 dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Base Path (blank = skip landing write)")
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
@@ -75,6 +77,53 @@ environment          = dbutils.widgets.get("environment")          or "dev"
 trigger_type         = dbutils.widgets.get("trigger_type")         or "SCHEDULED"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
 max_workers          = int(dbutils.widgets.get("max_workers")      or "4")
+job_run_id = str(
+        dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+        .currentRunId().get()
+    )
+
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Get Databricks Job Context
+# MAGIC
+# MAGIC Job/run information comes from the Databricks runtime.
+# MAGIC Nothing is hardcoded.
+
+# COMMAND ----------
+
+def get_databricks_job_context():
+
+    context = (
+        dbutils.notebook.entry_point
+        .getDbutils()
+        .notebook()
+        .getContext()
+    )
+
+    def get_context_value(method_name):
+
+        try:
+            return getattr(context, method_name)().get()
+        except Exception:
+            return None
+
+    return {
+        "job_id": get_context_value("jobId"),
+        "job_name": get_context_value("jobName"),
+        "notebook_name": get_context_value("notebookPath"),
+        "databricks_url": get_context_value("apiUrl"),
+        "trigger_type": get_context_value("triggerType"),
+        "trigger_id": get_context_value("triggerId"),
+        "trigger_name": get_context_value("triggerName"),
+    }
+
+
+job_context = get_databricks_job_context()
+job_context["job_run_id"] = job_run_id
+job_context["trigger_type"] = trigger_type
+# Job Run ID identifies all audit records created by this notebook execution.
 
 # COMMAND ----------
 
@@ -147,6 +196,8 @@ try:
 except Exception:
     pass
 
+job_context["trigger_id"] = trigger_id
+
 orchestrator = IngestionOrchestrator(
     spark,
     dbutils,
@@ -164,6 +215,7 @@ def run_one(task: IngestionTaskConfig) -> dict:
         landing_volume_path = landing_volume_path,
         trigger_id          = trigger_id,
         trigger_type        = trigger_type,
+        job_context         = job_context,
     )
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -185,7 +237,7 @@ with ThreadPoolExecutor(max_workers=max_workers) as executor:
             results.append({
                 "config_id": task.config_id,
                 "run_id":   None,
-                "status":   "FAILED",
+                "status":   AUDIT_STATUS_FAILED,
                 "rows_read": 0,
                 "error":    str(exc),
             })
@@ -201,13 +253,13 @@ print(f"\n{'='*75}")
 print(f"{'CONF ID':>8}  {'STATUS':<10}  {'ROWS':>8}  ERROR")
 print(f"{'='*75}")
 for r in sorted(results, key=lambda x: x["config_id"]):
-    icon   = "✅" if r["status"] == "SUCCESS" else "❌"
+    icon   = "✅" if r["status"] == AUDIT_STATUS_SUCCESS else "❌"
     error  = (r.get("error") or "")[:50]
     print(f"{r['config_id']:>8}  {icon} {r['status']:<8}  {r.get('rows_read', 0):>8}  {error}")
 print(f"{'='*75}")
 
-succeeded = [r for r in results if r["status"] == "SUCCESS"]
-failed    = [r for r in results if r["status"] == "FAILED"]
+succeeded = [r for r in results if r["status"] == AUDIT_STATUS_SUCCESS]
+failed    = [r for r in results if r["status"] == AUDIT_STATUS_FAILED]
 print(f"Total: {len(results)} | ✅ Succeeded: {len(succeeded)} | ❌ Failed: {len(failed)}\n")
 
 # COMMAND ----------
