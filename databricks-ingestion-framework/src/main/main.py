@@ -77,7 +77,6 @@ environment          = dbutils.widgets.get("environment")          or "dev"
 trigger_type         = dbutils.widgets.get("trigger_type")         or "SCHEDULED"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
 max_workers          = int(dbutils.widgets.get("max_workers")      or "4")
-job_run_id           = dbutils.widgets.get("run_id")
 
 
 # COMMAND ----------
@@ -118,9 +117,25 @@ def get_databricks_job_context():
 
 
 job_context = get_databricks_job_context()
-job_context["job_run_id"] = job_run_id
-job_context["trigger_type"] = trigger_type
-# Job Run ID identifies all audit records created by this notebook execution.
+
+# ── job_run_id: the parent run ID shared by ALL tasks in this job execution ──
+# rootRunId() is the umbrella run ID created when you click "Run Now" on the
+# Databricks Job. Every task in that run (main.py, monitor.py) gets the same
+# rootRunId. The Silver monitor uses this to filter the audit table for rows
+# written by THIS run only — no time windows or guessing needed.
+try:
+    job_run_id = str(
+        dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+        .rootRunId().get()
+    )
+except Exception:
+    # Fallback for interactive runs where rootRunId isn't available
+    job_run_id = "MANUAL"
+
+print(f"job_run_id (rootRunId) : {job_run_id}")
+
+job_context["job_run_id"]    = job_run_id
+job_context["trigger_type"]  = trigger_type
 
 # COMMAND ----------
 
@@ -184,14 +199,9 @@ if not tasks:
 
 # COMMAND ----------
 
-trigger_id = None
-try:
-    trigger_id = str(
-        dbutils.notebook.entry_point.getDbutils().notebook().getContext()
-        .currentRunId().get()
-    )
-except Exception:
-    pass
+# trigger_id also set to rootRunId for traceability in audit trigger_id column
+trigger_id = job_run_id
+job_context["trigger_id"] = trigger_id
 
 job_context["trigger_id"] = trigger_id
 

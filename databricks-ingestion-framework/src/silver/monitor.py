@@ -57,7 +57,6 @@ dbutils.widgets.text("silver_notebook_timeout","3600",         "Max seconds to w
 dbutils.widgets.text("silver_max_workers",     "4",            "Max parallel Silver notebook runs")
 dbutils.widgets.text("poll_interval_seconds",  "30",           "Seconds between audit polls")
 dbutils.widgets.text("timeout_minutes",        "120",          "Max wait time before giving up (minutes)")
-dbutils.widgets.text("lookback_minutes",       "60",           "How far back to look for Bronze SUCCESS rows (covers notebook startup delay)")
 
 # COMMAND ----------
 
@@ -79,7 +78,6 @@ silver_notebook_timeout  = int(dbutils.widgets.get("silver_notebook_timeout") or
 silver_max_workers       = int(dbutils.widgets.get("silver_max_workers")    or "4")
 poll_interval_seconds    = int(dbutils.widgets.get("poll_interval_seconds") or "30")
 timeout_minutes          = int(dbutils.widgets.get("timeout_minutes")       or "120")
-lookback_minutes         = int(dbutils.widgets.get("lookback_minutes")      or "60")
 
 # COMMAND ----------
 
@@ -106,12 +104,11 @@ if not tasks:
 print(f"Silver Monitor started.")
 print(f"  config_master_id : {config_master_id}")
 print(f"  source_name      : {source_sys.source_name}")
-print(f"  Tables to watch     : {len(tasks)}")
-print(f"  poll interval       : {poll_interval_seconds}s")
-print(f"  timeout             : {timeout_minutes} min")
-print(f"  lookback window     : {lookback_minutes} min (covers notebook startup delay)")
-print(f"  silver_notebook     : {silver_notebook_path}")
-print(f"  silver_max_workers  : {silver_max_workers}")
+print(f"  Tables to watch  : {len(tasks)}")
+print(f"  poll interval    : {poll_interval_seconds}s")
+print(f"  timeout          : {timeout_minutes} min")
+print(f"  silver_notebook  : {silver_notebook_path}")
+print(f"  silver_max_workers: {silver_max_workers}")
 
 # COMMAND ----------
 
@@ -120,16 +117,22 @@ print(f"  silver_max_workers  : {silver_max_workers}")
 
 # COMMAND ----------
 
-# ── Lookback window ──────────────────────────────────────────────────────────
-# We look for Bronze SUCCESS rows written within the last `lookback_minutes`
-# rather than filtering by the exact monitor start time.
-# This handles the common case where notebook initialization (restartPython,
-# imports, ConfigManager setup) takes a minute or two, meaning Bronze may
-# have already completed by the time the polling loop actually starts.
-# The lookback window (default 60 min) is wide enough to catch any Bronze
-# row from the same job run, but short enough to exclude yesterday's history.
+# ── Capture rootRunId ────────────────────────────────────────────────────────────
+# rootRunId is the parent job run ID — the same for every task in this
+# job execution (main.py Bronze task AND monitor.py Silver task).
+# main.py writes this as job_run_id into the audit table.
+# We filter by it here so we only see rows from THIS run, not previous runs.
+try:
+    root_run_id = str(
+        dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+        .rootRunId().get()
+    )
+except Exception:
+    root_run_id = None   # interactive run — fallback handled in check_bronze_done()
 
-job_start_time = datetime.now(timezone.utc)   # used for the polling loop log message
+print(f"  root_run_id (job execution ID): {root_run_id}")
+
+job_start_time = datetime.now(timezone.utc)
 
 # In-memory status table: one entry per table
 #   bronze_done : True when the audit table shows SUCCESS for this run
@@ -168,21 +171,33 @@ results         = []   # collects Silver trigger outcomes
 
 def check_bronze_done(config_id: int) -> bool:
     """
-    Query the audit table to see if this config_id has a SUCCESS row
-    written within the last `lookback_minutes` minutes.
+    Query the audit table to see if Bronze ingestion has completed (SUCCESS)
+    for this table in THIS specific job run.
 
-    Using a lookback window (not the exact monitor start time) handles
-    the case where notebook initialization takes longer than expected
-    and Bronze finishes before the polling loop begins.
+    Filters by job_run_id = root_run_id so we only match rows written by
+    main.py's Bronze task in the same Databricks job execution.
+    If root_run_id is None (interactive run), falls back to checking for
+    any SUCCESS row for this config_id in the last 60 minutes.
     """
-    rows = spark.sql(f"""
-        SELECT 1
-        FROM   {audit_table}
-        WHERE  table_id = {int(config_id)}
-          AND  status   = 'SUCCESS'
-          AND  end_time >= current_timestamp() - INTERVAL {lookback_minutes} MINUTES
-        LIMIT  1
-    """).collect()
+    if root_run_id and root_run_id != "MANUAL":
+        rows = spark.sql(f"""
+            SELECT 1
+            FROM   {audit_table}
+            WHERE  table_id   = {int(config_id)}
+              AND  status     = 'SUCCESS'
+              AND  job_run_id = '{root_run_id}'
+            LIMIT  1
+        """).collect()
+    else:
+        # Fallback for interactive/manual runs: look back 60 minutes
+        rows = spark.sql(f"""
+            SELECT 1
+            FROM   {audit_table}
+            WHERE  table_id = {int(config_id)}
+              AND  status   = 'SUCCESS'
+              AND  end_time >= current_timestamp() - INTERVAL 60 MINUTES
+            LIMIT  1
+        """).collect()
     return len(rows) > 0
 
 
@@ -228,7 +243,7 @@ with ThreadPoolExecutor(max_workers=silver_max_workers) as executor:
                 if not v["silver_done"]
             ]
             print(
-                f"\n⚠️  Timeout reached after {timeout_minutes} min. "
+                f"\n Timeout reached after {timeout_minutes} min. "
                 f"Tables not yet Silver-triggered: {pending_names}"
             )
             break
@@ -277,7 +292,7 @@ with ThreadPoolExecutor(max_workers=silver_max_workers) as executor:
 
         # ── Exit condition: all tables Silver-done ────────────────────────
         if all(v["silver_done"] for v in tables_status.values()):
-            print(f"\n✅ All {len(tasks)} tables have been sent to the Silver Job.")
+            print(f"\n All {len(tasks)} tables have been sent to the Silver Job.")
             break
 
         # ── Status heartbeat every poll interval ──────────────────────────
@@ -311,7 +326,7 @@ print(f"{'='*70}")
 
 triggered = [r for r in results if r["status"] == "TRIGGERED"]
 failed    = [r for r in results if r["status"] == "FAILED"]
-print(f"Total: {len(results)} | ✅ Triggered: {len(triggered)} | ❌ Failed: {len(failed)}\n")
+print(f"Total: {len(results)} |  Triggered: {len(triggered)} |  Failed: {len(failed)}\n")
 
 if failed:
     failed_names = [r["name"] for r in failed]
