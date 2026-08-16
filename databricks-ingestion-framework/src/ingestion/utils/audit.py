@@ -1,193 +1,115 @@
-"""
-Writes execution records to data_pipeline_execution_master Delta table.
+from decimal import Decimal
 
-Each pipeline run produces:
-  - An INSERT at the start  (status = RUNNING)
-  - An UPDATE at the end    (status = SUCCESS | FAILED)
-
-Watermark tracking for INCREMENTAL loads is not stored here; the orchestrator
-derives the last watermark directly from the target Delta table (max of
-incremental_column), which is more robust and requires no schema changes here.
-
-Note on department_id
----------------------
-The pre-existing table requires department_id INT NOT NULL.  Because department
-is not a pipeline-level concept in this framework, the constant
-DEFAULT_DEPARTMENT_ID (0) is written for every run.  Override it by passing
-department_id to AuditLogger.__init__.
-"""
-import threading
-import uuid
-from datetime import datetime, date
-from typing import Optional
-from pyspark.sql.types import (
-    StructType, StructField,
-    IntegerType, StringType, DateType,
-    TimestampType, DecimalType, LongType, DoubleType,
-)
-from .config_manager import AUDIT_TABLE
-
-DEFAULT_DEPARTMENT_ID = 0
+from pyspark.sql.types import DateType, DecimalType, IntegerType, LongType, StringType, StructField, StructType, TimestampType
 
 
 class AuditLogger:
+    """Writes audit entries using the deployed, ACL-protected table schema."""
 
-    def __init__(
+    def __init__(self, spark, audit_table):
+        self.spark = spark
+        self.table = audit_table
+
+    def log_execution(
         self,
-        spark,
-        audit_table: str = AUDIT_TABLE,
-        department_id: int = DEFAULT_DEPARTMENT_ID,
+        task, 
+        source_sys, 
+        job_context, 
+        pipeline_name, 
+        start_time, 
+        end_time,
+        status, 
+        rows_read=0, 
+        rows_copied=0, 
+        rows_deleted=0, 
+        rows_affected=0,
+        data_read_bytes=0, 
+        data_written_bytes=0, 
+        throughput_mb_per_sec=None,
+        copy_duration_sec=None, 
+        operation_performed=None, 
+        error_code=None,
+        error_message=None,
     ):
-        self.spark         = spark
-        self.table         = audit_table
-        self.department_id = department_id
-        # Serialise concurrent audit writes from parallel ingestion threads.
-        # Bronze writes (to different tables) remain fully parallel — only the
-        # single shared audit table needs this guard.
-        self._write_lock   = threading.Lock()
+        """Append one audit entry without triggering Delta schema migration."""
+        ctx = job_context or {}
 
-    # ── Run lifecycle methods ─────────────────────────────────────────────────
+        def required_string(value, default="UNKNOWN"):
+            return str(value) if value is not None else default
 
-    def start_run(
-        self,
-        ingest_obj,
-        source_sys,
-        pipeline_name: str,
-        delta_layer: str = "BRONZE",
-        trigger_type: Optional[str] = "MANUAL",
-        trigger_id: Optional[str] = None,
-        business_date: Optional[date] = None,
-        frequency: Optional[str] = None,
-        config_master_id: Optional[int] = None,
-    ) -> str:
-        """
-        Inserts a RUNNING row into data_pipeline_execution_master.
-        Returns the run_id (UUID string) that must be passed to complete_run().
-
-        Accepts ingest_obj (IngestionTaskConfig) and source_sys (SourceSystemConfig)
-        directly — no manual field mapping required in the caller.
-        """
-        run_id          = str(uuid.uuid4())
-        now             = datetime.utcnow()
-        biz_date        = business_date if business_date is not None else now.date()
-        obj_id_int      = int(ingest_obj.config_id)         # row ID from child config table
-        cfg_master_int  = int(config_master_id) if config_master_id is not None else obj_id_int
-
-        schema = StructType([
-            StructField("config_master_id",       IntegerType(),        True),
-            StructField("table_id",               IntegerType(),        True),
-            StructField("delta_layer",            StringType(),         True),
-            StructField("source_name",            StringType(),         True),
-            StructField("pipeline_name",          StringType(),         True),
-            StructField("load_type",              StringType(),         True),
-            StructField("frequency",              StringType(),         True),
-            StructField("business_date",          DateType(),           True),
-            StructField("run_id",                 StringType(),         True),
-            StructField("trigger_type",           StringType(),         True),
-            StructField("trigger_id",             StringType(),         True),
-            StructField("trigger_name",           StringType(),         True),
-            StructField("trigger_time",           TimestampType(),      True),
-            StructField("end_time",               TimestampType(),      True),
-            StructField("execution_duration_sec", DecimalType(10, 2),   True),
-            StructField("source_schema",          StringType(),         True),
-            StructField("source_table",           StringType(),         True),
-            StructField("target_schema",          StringType(),         True),
-            StructField("target_table",           StringType(),         True),
-            StructField("rows_read",              LongType(),           True),
-            StructField("rows_copied",            LongType(),           True),
-            StructField("rows_deleted",           LongType(),           True),
-            StructField("total_cost",             DoubleType(),         True),   
-            StructField("department_id",          IntegerType(),        True),
-            StructField("status",                 StringType(),         True),
-        ])
-
+        execution_duration_sec = (end_time - start_time).total_seconds()
         row = [(
-            cfg_master_int,                  # config_master_id  ← widget value from main.py
-            obj_id_int,                      # table_id          ← row ID from child config table
-            delta_layer,
-            source_sys.source_name,
+            int(task.config_master_id), 
+            int(task.config_id), 
+            0,
+            required_string(task.effective_delta_layer), 
+            required_string(source_sys.source_name),
             pipeline_name,
-            ingest_obj.load_type,
-            frequency,
-            biz_date,
-            run_id,
-            trigger_type,
-            trigger_id,
-            None,
-            now,                             # trigger_time
-            None,                            # end_time (set on complete)
-            None,                            # execution_duration_sec (set on complete)
-            ingest_obj.source_schema,
-            ingest_obj.source_object_name,
-            ingest_obj.target_schema,
-            ingest_obj.target_table,
-            0,                               # rows_read
-            0,                               # rows_copied
-            0,                               # rows_deleted
-            0.0,                            # total_cost
-            int(self.department_id),
-            "RUNNING",
+            required_string(task.load_type),
+            task.frequency, start_time.date(),
+            required_string(ctx.get("job_id"), "MANUAL"),
+            required_string(ctx.get("job_run_id"), "MANUAL"),
+            ctx.get("trigger_type"), 
+            ctx.get("trigger_id"), 
+            ctx.get("trigger_name"),
+            start_time, end_time, 
+            Decimal(str(execution_duration_sec)),
+            task.source_schema, 
+            task.source_object_name,
+            required_string(task.target_schema), 
+            required_string(task.target_table),
+            int(rows_read or 0), 
+            int(rows_copied or 0), 
+            int(rows_deleted or 0),
+            int(rows_affected or 0), 
+            int(data_read_bytes or 0), 
+            int(data_written_bytes or 0),
+            Decimal(str(throughput_mb_per_sec)) if throughput_mb_per_sec is not None else None,
+            Decimal(str(copy_duration_sec)) if copy_duration_sec is not None else None,
+            ctx.get("notebook_name"), 
+            ctx.get("databricks_url"), 
+            operation_performed,
+            required_string(status), 
+            error_code, 
+            error_message,
         )]
 
-        df = self.spark.createDataFrame(row, schema=schema)
-        with self._write_lock:
-            df.writeTo(self.table).using("delta").append()
-        return run_id
+        schema = StructType([
+            StructField("config_master_id", IntegerType(), True),
+            StructField("table_id", IntegerType(), True),
+            StructField("department_id", IntegerType(), True),
+            StructField("delta_layer", StringType(), True),
+            StructField("source_name", StringType(), True),
+            StructField("pipeline_name", StringType(), True),
+            StructField("load_type", StringType(), True),
+            StructField("frequency", StringType(), True),
+            StructField("business_date", DateType(), True),
+            StructField("job_id", StringType(), True),
+            StructField("job_run_id", StringType(), True),
+            StructField("trigger_type", StringType(), True),
+            StructField("trigger_id", StringType(), True),
+            StructField("trigger_name", StringType(), True),
+            StructField("trigger_time", TimestampType(), True),
+            StructField("end_time", TimestampType(), True),
+            StructField("execution_duration_sec", DecimalType(10, 2), True),
+            StructField("source_schema", StringType(), True),
+            StructField("source_table", StringType(), True),
+            StructField("target_schema", StringType(), True),
+            StructField("target_table", StringType(), True),
+            StructField("rows_read", LongType(), True),
+            StructField("rows_copied", LongType(), True),
+            StructField("rows_deleted", LongType(), True),
+            StructField("rows_affected", LongType(), True),
+            StructField("data_read_bytes", LongType(), True),
+            StructField("data_written_bytes", LongType(), True),
+            StructField("throughput_mb_per_sec", DecimalType(10, 2), True),
+            StructField("copy_duration_sec", DecimalType(10, 2), True),
+            StructField("databricks_notebook_name", StringType(), True),
+            StructField("databricks_url", StringType(), True),
+            StructField("operation_performed", StringType(), True),
+            StructField("status", StringType(), True),
+            StructField("error_code", StringType(), True),
+            StructField("error_message", StringType(), True),
+        ])
 
-    def complete_run(
-        self,
-        run_id: str,
-        status: str,
-        rows_read: int = 0,
-        rows_copied: int = 0,
-        rows_deleted: int = 0,
-    ) -> None:
-        """
-        Updates the RUNNING row to SUCCESS or FAILED and stamps end metrics.
-        """
-        self.spark.sql(f"""
-            UPDATE {self.table}
-            SET end_time               = current_timestamp(),
-                execution_duration_sec = CAST(
-                    (unix_timestamp(current_timestamp()) - unix_timestamp(trigger_time))
-                    AS DECIMAL(10, 2)),
-                status       = '{status}',
-                rows_read    = {int(rows_read)},
-                rows_copied  = {int(rows_copied)},
-                rows_deleted = {int(rows_deleted)}
-            WHERE run_id = '{run_id}'
-        """)
-
-    def fail_run(self, run_id: str, error_message: str) -> None:
-        """Marks a run FAILED (error_message is logged by orchestrator)."""
-        self.complete_run(run_id=run_id, status="FAILED")
-
-    # ── Query helpers ─────────────────────────────────────────────────────────
-
-    def get_last_run_status(self, config_id: int) -> Optional[str]:
-        """
-        Returns the status of the most recent run for the given
-        config_id, or None if no runs exist.
-        """
-        rows = (
-            self.spark.table(self.table)
-            .filter(f"table_id = {int(config_id)}")
-            .orderBy("trigger_time", ascending=False)
-            .limit(1)
-            .select("status")
-            .collect()
-        )
-        return rows[0]["status"] if rows else None
-
-    def get_pipeline_failures(self, pipeline_name: str, run_id_prefix: Optional[str] = None):
-        """
-        Returns all FAILED rows for a given pipeline_name in the audit table.
-        Useful for the fan-out driver to report failures at the end of a run.
-        """
-        df = (
-            self.spark.table(self.table)
-            .filter(f"pipeline_name = '{pipeline_name}' AND status = 'FAILED'")
-        )
-        if run_id_prefix:
-            df = df.filter(f"run_id LIKE '{run_id_prefix}%'")
-        return df
+        self.spark.createDataFrame(row, schema=schema).writeTo(self.table).using("delta").append()

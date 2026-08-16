@@ -100,22 +100,23 @@ class IngestionOrchestrator:
         pipeline_name = ingest_obj.pipeline_name or self.pipeline_name
         delta_layer   = ingest_obj.effective_delta_layer   # property: config → fallback 'BRONZE'
 
-        watermark_start = resolve_watermark(self.spark, self.logger, ingest_obj)
-
+        # First audit execution: create the INPROGRESS record and capture the
+        # job start time before any work (including watermark resolution).
         run_id = self.audit.start_run(
             ingest_obj, source_sys, pipeline_name, delta_layer,
             trigger_type, trigger_id, business_date,
             config_master_id = config_master_id,
         )
 
-        self.logger.info(
-            f"[{run_id}] START config_id={ingest_obj.config_id} "
-            f"source='{source_sys.source_name}' object='{ingest_obj.source_object_name}' "
-            f"load_type={ingest_obj.load_type} delta_layer={delta_layer} "
-            f"watermark_start={watermark_start}"
-        )
-
         try:
+            watermark_start = resolve_watermark(self.spark, self.logger, ingest_obj)
+            self.logger.info(
+                f"[{run_id}] START config_id={ingest_obj.config_id} "
+                f"source='{source_sys.source_name}' object='{ingest_obj.source_object_name}' "
+                f"load_type={ingest_obj.load_type} delta_layer={delta_layer} "
+                f"watermark_start={watermark_start}"
+            )
+
             connector = get_connector(self.spark, source_sys, ingest_obj, self.secrets)
             df, watermark_end = connector.extract(watermark_start)
             rows_read = df.count()
@@ -154,6 +155,7 @@ class IngestionOrchestrator:
                 f"[{run_id}] Bronze write → {target_table} ({rows_read} rows, mode={ingest_obj.write_mode})"
             )
 
+            # Second audit execution: mark the run SUCCESS and stamp end_time.
             self.audit.complete_run(
                 run_id       = run_id,
                 status       = "SUCCESS",
