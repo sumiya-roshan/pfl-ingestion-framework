@@ -54,7 +54,7 @@ dbutils.widgets.text("source_system_id",    "",               "Source System ID 
 dbutils.widgets.text("target_catalog",      "",               "Target Catalog (e.g. main, hive_metastore)")
 dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (required)")
 dbutils.widgets.text("job_run_id",          "",               "Job Run ID (required) — set to {{job.run_id}} in job config")
-dbutils.widgets.text("trigger_type",        "",               "Trigger Type (required) — SCHEDULED | MANUAL | EVENT")
+# dbutils.widgets.text("trigger_type",        "",               "Trigger Type (required) — SCHEDULED | MANUAL | EVENT")
 dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Base Path (blank = skip landing write)")
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
@@ -74,14 +74,14 @@ source_system_id     = int(source_system_id_raw)
 target_catalog       = dbutils.widgets.get("target_catalog")       or "hive_metastore"
 pipeline_name        = dbutils.widgets.get("pipeline_name")        or None
 job_run_id           = dbutils.widgets.get("job_run_id")           or None
-trigger_type         = dbutils.widgets.get("trigger_type")         or None
+# trigger_type         = dbutils.widgets.get("trigger_type")         or None
 
 if not pipeline_name:
     dbutils.notebook.exit("Error: pipeline_name widget is required and cannot be empty.")
 if not job_run_id:
     dbutils.notebook.exit("Error: job_run_id widget is required and cannot be empty.")
-if not trigger_type:
-    dbutils.notebook.exit("Error: trigger_type widget is required and cannot be empty.")
+# if not trigger_type:
+#     dbutils.notebook.exit("Error: trigger_type widget is required and cannot be empty.")
 
 landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
@@ -130,10 +130,10 @@ job_context = get_databricks_job_context()
 
 # ── job_run_id and trigger_type from widget values ──
 print(f"job_run_id   : {job_run_id}")
-print(f"trigger_type : {trigger_type}")
+# print(f"trigger_type : {trigger_type}")
 
 job_context["job_run_id"]   = job_run_id
-job_context["trigger_type"] = trigger_type
+# job_context["trigger_type"] = trigger_type
 
 # COMMAND ----------
 
@@ -206,7 +206,7 @@ def run_one(task: IngestionTaskConfig) -> dict:
         config_master_id    = config_master_id,   # ← routing table ID from widget
         landing_volume_path = landing_volume_path,
         trigger_id          = trigger_id,
-        trigger_type        = trigger_type,
+        # trigger_type        = trigger_type,
         job_context         = job_context,
     )
 

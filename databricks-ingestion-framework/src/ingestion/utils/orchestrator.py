@@ -74,7 +74,7 @@ class IngestionOrchestrator:
         config_master_id: Optional[int]    = None,
         landing_volume_path: Optional[str] = None,
         trigger_id: Optional[str]          = None,
-        trigger_type: Optional[str]        = None,
+        # trigger_type: Optional[str]        = None,
         business_date: Optional[date]      = None,
         job_context: Optional[dict]        = None,
     ) -> dict:
@@ -108,7 +108,7 @@ class IngestionOrchestrator:
 
         # Start audit: insert the INPROGRESS record before any ingestion work.
         audit_context = dict(job_context or {})
-        audit_context.setdefault("trigger_type", trigger_type)
+        # audit_context.setdefault("trigger_type", trigger_type)
         audit_context.setdefault("trigger_id", trigger_id)
         audit_run = self.audit.start_run(
             task=ingest_obj,
