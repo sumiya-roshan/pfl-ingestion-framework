@@ -77,10 +77,7 @@ environment          = dbutils.widgets.get("environment")          or "dev"
 trigger_type         = dbutils.widgets.get("trigger_type")         or "SCHEDULED"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
 max_workers          = int(dbutils.widgets.get("max_workers")      or "4")
-job_run_id = str(
-        dbutils.notebook.entry_point.getDbutils().notebook().getContext()
-        .currentRunId().get()
-    )
+job_run_id           = dbutils.widgets.get("run_id")
 
 
 # COMMAND ----------
