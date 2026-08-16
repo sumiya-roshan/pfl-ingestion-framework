@@ -73,7 +73,7 @@ source_system_id     = int(source_system_id_raw)
 
 target_catalog       = dbutils.widgets.get("target_catalog")       or "hive_metastore"
 pipeline_name        = dbutils.widgets.get("pipeline_name")        or None
-job_run_id           = dbutils.widgets.get("job_run_id")           or None
+job_run_id           = dbutils.widgets.get("run_id")           or None
 # trigger_type         = dbutils.widgets.get("trigger_type")         or None
 
 if not pipeline_name:
