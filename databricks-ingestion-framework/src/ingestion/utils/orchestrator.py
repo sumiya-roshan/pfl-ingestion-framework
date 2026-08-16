@@ -131,7 +131,7 @@ class IngestionOrchestrator:
 
             connector = get_connector(self.spark, source_sys, ingest_obj, self.secrets)
             df, watermark_end = connector.extract(watermark_start)
-            rows_read = df.counting()
+            rows_read = df.count()
 
             rows_copied  = 0
             rows_deleted = 0
