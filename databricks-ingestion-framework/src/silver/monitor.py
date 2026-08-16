@@ -301,7 +301,7 @@ with ThreadPoolExecutor(max_workers=silver_max_workers) as executor:
         print(
             f"  ⏳ [{int(elapsed)}s elapsed] "
             f"Bronze done: {bronze_done_count}/{len(tasks)} | "
-            f"Silver triggered: {silver_done_count}/{len(tasks)} | "
+            f"Silver Finished: {silver_done_count}/{len(tasks)} | "
             f"Sleeping {poll_interval_seconds}s..."
         )
         time.sleep(poll_interval_seconds)
