@@ -57,6 +57,8 @@ dbutils.widgets.text("silver_notebook_timeout","3600",         "Max seconds to w
 dbutils.widgets.text("silver_max_workers",     "4",            "Max parallel Silver notebook runs")
 dbutils.widgets.text("poll_interval_seconds",  "30",           "Seconds between audit polls")
 dbutils.widgets.text("timeout_minutes",        "120",          "Max wait time before giving up (minutes)")
+# Must match the job_run_id widget in main.py — both set to {{job.run_id}} in job config.
+dbutils.widgets.text("job_run_id",             "",             "Job Run ID — set to {{job.run_id}} in job config")
 
 # COMMAND ----------
 
@@ -78,6 +80,9 @@ silver_notebook_timeout  = int(dbutils.widgets.get("silver_notebook_timeout") or
 silver_max_workers       = int(dbutils.widgets.get("silver_max_workers")    or "4")
 poll_interval_seconds    = int(dbutils.widgets.get("poll_interval_seconds") or "30")
 timeout_minutes          = int(dbutils.widgets.get("timeout_minutes")       or "120")
+# Same {{job.run_id}} value that main.py writes to the audit table as job_run_id.
+# Used in check_bronze_done() to filter only rows from THIS job execution.
+root_run_id              = dbutils.widgets.get("job_run_id") or None
 
 # COMMAND ----------
 
@@ -109,6 +114,7 @@ print(f"  poll interval    : {poll_interval_seconds}s")
 print(f"  timeout          : {timeout_minutes} min")
 print(f"  silver_notebook  : {silver_notebook_path}")
 print(f"  silver_max_workers: {silver_max_workers}")
+print(f"  job_run_id       : {root_run_id or 'NOT SET — fallback to 60-min lookback'}")
 
 # COMMAND ----------
 
@@ -116,19 +122,6 @@ print(f"  silver_max_workers: {silver_max_workers}")
 # MAGIC ### Build in-memory tracking dict
 
 # COMMAND ----------
-
-# ── Capture rootRunId ────────────────────────────────────────────────────────────
-# rootRunId is the parent job run ID — the same for every task in this
-# job execution (main.py Bronze task AND monitor.py Silver task).
-# main.py writes this as job_run_id into the audit table.
-# We filter by it here so we only see rows from THIS run, not previous runs.
-try:
-    root_run_id = str(
-        dbutils.notebook.entry_point.getDbutils().notebook().getContext()
-        .rootRunId().get()
-    )
-except Exception:
-    root_run_id = None   # interactive run — fallback handled in check_bronze_done()
 
 print(f"  root_run_id (job execution ID): {root_run_id}")
 

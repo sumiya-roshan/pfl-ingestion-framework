@@ -57,7 +57,11 @@ dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Ba
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("trigger_type",        "SCHEDULED",      "Trigger Type: SCHEDULED | MANUAL | EVENT")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
-dbutils.widgets.text("max_workers",         "4",      "Max Parallel workers")
+dbutils.widgets.text("max_workers",         "4",              "Max Parallel workers")
+# Populated automatically by Databricks when configured as {{job.run_id}} in job settings.
+# This is the Job Run ID (parent), shared by all tasks in the same job execution.
+# The Silver monitor reads the same widget value to filter the audit table.
+dbutils.widgets.text("job_run_id",          "",               "Job Run ID — set to {{job.run_id}} in job config")
 
 # COMMAND ----------
 
@@ -118,24 +122,17 @@ def get_databricks_job_context():
 
 job_context = get_databricks_job_context()
 
-# ── job_run_id: the parent run ID shared by ALL tasks in this job execution ──
-# rootRunId() is the umbrella run ID created when you click "Run Now" on the
-# Databricks Job. Every task in that run (main.py, monitor.py) gets the same
-# rootRunId. The Silver monitor uses this to filter the audit table for rows
-# written by THIS run only — no time windows or guessing needed.
-try:
-    job_run_id = str(
-        dbutils.notebook.entry_point.getDbutils().notebook().getContext()
-        .rootRunId().get()
-    )
-except Exception:
-    # Fallback for interactive runs where rootRunId isn't available
-    job_run_id = "MANUAL"
+# ── job_run_id: parent Job Run ID injected by Databricks dynamic value substitution ──
+# In the Databricks job config, set widget job_run_id = {{job.run_id}} for both tasks.
+# Databricks automatically fills this with the Job Run ID (e.g. 1029651081398982)
+# at runtime — the same value for all tasks in the same job execution.
+# The Silver monitor reads this same widget value to filter the audit table.
+job_run_id = dbutils.widgets.get("job_run_id") or "MANUAL"
 
-print(f"job_run_id (rootRunId) : {job_run_id}")
+print(f"job_run_id : {job_run_id}")
 
-job_context["job_run_id"]    = job_run_id
-job_context["trigger_type"]  = trigger_type
+job_context["job_run_id"]   = job_run_id
+job_context["trigger_type"] = trigger_type
 
 # COMMAND ----------
 
