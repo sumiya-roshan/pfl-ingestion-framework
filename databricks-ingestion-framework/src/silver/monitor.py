@@ -83,6 +83,8 @@ timeout_minutes          = int(dbutils.widgets.get("timeout_minutes")       or "
 # Same {{job.run_id}} value that main.py writes to the audit table as job_run_id.
 # Used in check_bronze_done() to filter only rows from THIS job execution.
 root_run_id              = dbutils.widgets.get("job_run_id") or None
+if not root_run_id:
+    dbutils.notebook.exit("Error: job_run_id widget is required and cannot be empty.")
 
 # COMMAND ----------
 

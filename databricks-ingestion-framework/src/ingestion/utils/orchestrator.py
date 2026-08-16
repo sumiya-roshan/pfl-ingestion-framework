@@ -74,7 +74,7 @@ class IngestionOrchestrator:
         config_master_id: Optional[int]    = None,
         landing_volume_path: Optional[str] = None,
         trigger_id: Optional[str]          = None,
-        trigger_type: str                  = "MANUAL",
+        trigger_type: Optional[str]        = None,
         business_date: Optional[date]      = None,
         job_context: Optional[dict]        = None,
     ) -> dict:
@@ -151,6 +151,9 @@ class IngestionOrchestrator:
                     f"[{run_id}] Landing write → {landing_path} ({rows_read} rows, format={fmt})"
                 )
 
+            import time
+            write_start_time = time.time()
+
             # ── Bronze Delta write ─────────────────────────────────────────────
             target_table = self.bronze_writer.write(
                 df,
@@ -163,17 +166,56 @@ class IngestionOrchestrator:
                 partition_column      = ingest_obj.partition_column,
             )
             rows_copied = rows_read
+            copy_duration_sec = round(time.time() - write_start_time, 2)
+
             self.logger.info(
                 f"[{run_id}] Bronze write → {target_table} ({rows_read} rows, mode={ingest_obj.write_mode})"
             )
 
+            # Retrieve metrics from Delta table history
+            data_read_bytes = 0
+            data_written_bytes = 0
+            try:
+                history_df = self.spark.sql(f"DESCRIBE HISTORY {target_table} LIMIT 1")
+                history_row = history_df.select("operationMetrics").collect()[0]
+                metrics = history_row["operationMetrics"] if history_row["operationMetrics"] else {}
+                
+                # Extract bytes written
+                bytes_written = (
+                    metrics.get("numOutputBytes") or 
+                    metrics.get("numTargetBytesAdded") or 
+                    metrics.get("numTargetBytesWritten")
+                )
+                if bytes_written:
+                    data_written_bytes = int(bytes_written)
+                
+                # Extract bytes read
+                bytes_read = (
+                    metrics.get("numTargetBytesRead") or 
+                    metrics.get("numSourceBytesRead") or 
+                    metrics.get("numReadBytes")
+                )
+                if bytes_read:
+                    data_read_bytes = int(bytes_read)
+            except Exception as e:
+                self.logger.warning(f"[{run_id}] Could not retrieve Delta execution metrics: {e}")
+
+            # Calculate throughput (MB/sec)
+            throughput_mb_per_sec = None
+            if copy_duration_sec > 0:
+                throughput_mb_per_sec = round((data_written_bytes / (1024.0 * 1024.0)) / copy_duration_sec, 2)
+
             # End audit: update the INPROGRESS record with SUCCESS and end time.
             self.audit.complete_run(
-                audit_run    = audit_run,
-                status       = AUDIT_STATUS_SUCCESS,
-                rows_read    = rows_read,
-                rows_copied  = rows_copied,
-                rows_deleted = rows_deleted,
+                audit_run             = audit_run,
+                status                = AUDIT_STATUS_SUCCESS,
+                rows_read             = rows_read,
+                rows_copied           = rows_copied,
+                rows_deleted          = rows_deleted,
+                data_read_bytes       = data_read_bytes,
+                data_written_bytes    = data_written_bytes,
+                throughput_mb_per_sec = throughput_mb_per_sec,
+                copy_duration_sec     = copy_duration_sec,
             )
             self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
             return {

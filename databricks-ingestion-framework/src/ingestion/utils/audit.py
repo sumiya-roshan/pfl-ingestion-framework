@@ -36,7 +36,10 @@ class AuditLogger:
         ctx = job_context or {}
         start_time = datetime.utcnow()
         table_id = int(task.config_id)
-        job_run_id = self._required_string(ctx.get("job_run_id"), "MANUAL")
+        job_run_id = ctx.get("job_run_id")
+        if not job_run_id:
+            raise ValueError("job_run_id must be provided in job_context and not be empty")
+        job_run_id = str(job_run_id)
 
         row = [(
             int(config_master_id) if config_master_id is not None else table_id,
@@ -81,6 +84,10 @@ class AuditLogger:
         rows_read: int = 0,
         rows_copied: int = 0,
         rows_deleted: int = 0,
+        data_read_bytes: int = 0,
+        data_written_bytes: int = 0,
+        throughput_mb_per_sec: Optional[float] = None,
+        copy_duration_sec: Optional[float] = None,
         error_message: Optional[str] = None,
     ) -> None:
         """Set end time and final SUCCESS or FAILED status for an audit row."""
@@ -98,6 +105,10 @@ class AuditLogger:
                     rows_read               = {int(rows_read or 0)},
                     rows_copied             = {int(rows_copied or 0)},
                     rows_deleted            = {int(rows_deleted or 0)},
+                    data_read_bytes         = {int(data_read_bytes or 0)},
+                    data_written_bytes      = {int(data_written_bytes or 0)},
+                    throughput_mb_per_sec   = {self._sql_numeric(throughput_mb_per_sec)},
+                    copy_duration_sec       = {self._sql_numeric(copy_duration_sec)},
                     error_message           = {self._sql_literal(error_message)}
                 WHERE job_run_id = {self._sql_literal(audit_run['job_run_id'])}
                   AND table_id = {int(audit_run['table_id'])}
@@ -115,6 +126,10 @@ class AuditLogger:
     @staticmethod
     def _sql_literal(value: Any) -> str:
         return "NULL" if value is None else "'" + str(value).replace("'", "''") + "'"
+
+    @staticmethod
+    def _sql_numeric(value: Any) -> str:
+        return "NULL" if value is None else str(value)
 
     @staticmethod
     def _schema() -> StructType:

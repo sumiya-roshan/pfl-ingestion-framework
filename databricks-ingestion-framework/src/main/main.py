@@ -52,16 +52,13 @@ from ingestion.utils.config_manager import IngestionTaskConfig
 dbutils.widgets.text("config_master_id",    "",               "Config Master ID (int — routes to correct child config table)")
 dbutils.widgets.text("source_system_id",    "",               "Source System ID (int — fetches credentials + source_name)")
 dbutils.widgets.text("target_catalog",      "",               "Target Catalog (e.g. main, hive_metastore)")
-dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (blank = auto-detect from job)")
+dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (required)")
+dbutils.widgets.text("job_run_id",          "",               "Job Run ID (required) — set to {{job.run_id}} in job config")
+dbutils.widgets.text("trigger_type",        "",               "Trigger Type (required) — SCHEDULED | MANUAL | EVENT")
 dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Base Path (blank = skip landing write)")
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
-dbutils.widgets.text("trigger_type",        "SCHEDULED",      "Trigger Type: SCHEDULED | MANUAL | EVENT")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
 dbutils.widgets.text("max_workers",         "4",              "Max Parallel workers")
-# Populated automatically by Databricks when configured as {{job.run_id}} in job settings.
-# This is the Job Run ID (parent), shared by all tasks in the same job execution.
-# The Silver monitor reads the same widget value to filter the audit table.
-dbutils.widgets.text("job_run_id",          "",               "Job Run ID — set to {{job.run_id}} in job config")
 
 # COMMAND ----------
 
@@ -75,10 +72,19 @@ config_master_id     = int(config_master_id_raw)
 source_system_id     = int(source_system_id_raw)
 
 target_catalog       = dbutils.widgets.get("target_catalog")       or "hive_metastore"
-pipeline_name_widget = dbutils.widgets.get("pipeline_name")        or None
+pipeline_name        = dbutils.widgets.get("pipeline_name")        or None
+job_run_id           = dbutils.widgets.get("job_run_id")           or None
+trigger_type         = dbutils.widgets.get("trigger_type")         or None
+
+if not pipeline_name:
+    dbutils.notebook.exit("Error: pipeline_name widget is required and cannot be empty.")
+if not job_run_id:
+    dbutils.notebook.exit("Error: job_run_id widget is required and cannot be empty.")
+if not trigger_type:
+    dbutils.notebook.exit("Error: trigger_type widget is required and cannot be empty.")
+
 landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
-trigger_type         = dbutils.widgets.get("trigger_type")         or "SCHEDULED"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
 max_workers          = int(dbutils.widgets.get("max_workers")      or "4")
 
@@ -122,14 +128,9 @@ def get_databricks_job_context():
 
 job_context = get_databricks_job_context()
 
-# ── job_run_id: parent Job Run ID injected by Databricks dynamic value substitution ──
-# In the Databricks job config, set widget job_run_id = {{job.run_id}} for both tasks.
-# Databricks automatically fills this with the Job Run ID (e.g. 1029651081398982)
-# at runtime — the same value for all tasks in the same job execution.
-# The Silver monitor reads this same widget value to filter the audit table.
-job_run_id = dbutils.widgets.get("job_run_id") or "MANUAL"
-
-print(f"job_run_id : {job_run_id}")
+# ── job_run_id and trigger_type from widget values ──
+print(f"job_run_id   : {job_run_id}")
+print(f"trigger_type : {trigger_type}")
 
 job_context["job_run_id"]   = job_run_id
 job_context["trigger_type"] = trigger_type
@@ -138,24 +139,11 @@ job_context["trigger_type"] = trigger_type
 
 # MAGIC %md
 # MAGIC ### Resolve pipeline name
-# MAGIC Priority: **widget value** → auto-detected Databricks Job name → `'manual_run'`
+# MAGIC Always read from the widget value.
 
 # COMMAND ----------
 
-if pipeline_name_widget:
-    pipeline_name = pipeline_name_widget
-    print(f"pipeline_name from widget: '{pipeline_name}'")
-else:
-    try:
-        pipeline_name = (
-            dbutils.notebook.entry_point
-            .getDbutils().notebook().getContext()
-            .jobName().get()
-        )
-        print(f"pipeline_name from job context: '{pipeline_name}'")
-    except Exception:
-        pipeline_name = "manual_run"
-        print(f"pipeline_name fallback: '{pipeline_name}'")
+print(f"pipeline_name from widget: '{pipeline_name}'")
 
 # COMMAND ----------
 
