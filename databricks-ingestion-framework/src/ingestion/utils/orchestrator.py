@@ -20,6 +20,7 @@ from typing import Optional
 from .config_manager import (
     AUDIT_STATUS_FAILED,
     AUDIT_STATUS_SUCCESS,
+    ConfigManager,
     IngestionTaskConfig,
     SourceSystemConfig,
 )
@@ -60,6 +61,7 @@ class IngestionOrchestrator:
         self.environment   = environment
 
         self.audit         = AuditLogger(spark, audit_table=audit_table, department_id=department_id)
+        self.config_manager = ConfigManager(spark)
         self.secrets       = SecretResolver(dbutils)
         self.s3_writer     = S3RawWriter()
         self.bronze_writer = BronzeWriter(spark)
@@ -98,8 +100,9 @@ class IngestionOrchestrator:
 
         Returns
         -------
-        dict with keys: config_id, run_id, status, rows_read, error
         """
+        from datetime import datetime
+        run_start_time = datetime.utcnow()
         ingest_obj = task
 
         # pipeline_name and delta_layer come from config table, with fallbacks
@@ -217,6 +220,20 @@ class IngestionOrchestrator:
                 throughput_mb_per_sec = throughput_mb_per_sec,
                 copy_duration_sec     = copy_duration_sec,
             )
+
+            if config_master_id is not None:
+                try:
+                    self.config_manager.update_sink_metadata(
+                        config_master_id=config_master_id,
+                        ingest_obj=ingest_obj,
+                        sink_batch_started_date=run_start_time,
+                        rownum=rows_copied,
+                        data_size=data_written_bytes,
+                    )
+                    self.logger.info(f"[{run_id}] Sink metadata updated for config_id={ingest_obj.config_id}")
+                except Exception as sink_exc:
+                    self.logger.warning(f"[{run_id}] Could not update sink metadata: {sink_exc}")
+
             self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
             return {
                 "config_id": ingest_obj.config_id,
