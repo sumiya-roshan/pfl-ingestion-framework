@@ -80,7 +80,8 @@ class IngestionTaskConfig:
     data_read_size: Optional[int]
     file_format: Optional[str]
     write_mode: str
-
+    priority: int
+    batch_id: int
     s3_source_bucket_name: Optional[str]
     s3_external_path: Optional[str]
     s3_column_delimiter: Optional[str]
@@ -208,6 +209,8 @@ class ConfigManager:
             data_read_size      = r.get("data_size") or r.get("data_read_size"),
             file_format         = r.get("file_format"),
             write_mode          = r.get("write_mode") or ("merge" if pk_cols else default_write_mode),
+            priority            = r.get("priority") or 0,
+            batch_id            = r.get("batch_id"),
             schema_evolution_mode = r.get("schema_evolution_mode"),
             partition_column    = r.get("partition_column"),
             source_filter       = r.get("source_filter"),
@@ -272,7 +275,7 @@ class ConfigManager:
         # We assume the child table uses 'Is_Active = 1' and 'Source_Name' based on the schemas provided.
         child_rows = (
             self.spark.table(child_table_fqn)
-            .filter(f"source_Name = '{source_name}' AND is_active = 1")
+            .filter(f"source_Name = '{source_name}' AND is_active = 1").orderBy("priority")
             .collect()
         )
 
