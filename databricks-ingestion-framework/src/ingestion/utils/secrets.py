@@ -110,7 +110,6 @@ import json
 import os
 from typing import Optional, Tuple
 
-
 class SecretResolver:
 
     def __init__(self, dbutils=None):
@@ -125,9 +124,37 @@ class SecretResolver:
     # ── Low-level: fetch a single raw secret value ────────────────────────────
 
     def get(self, scope: str, key: str) -> str:
-        """Return the raw string value of a Databricks secret."""
+        """
+        Return the raw string value of a secret.
+        
+        If scope is 'aws' or 'aws-secrets-manager', retrieves from AWS Secrets Manager.
+        Otherwise, retrieves from Databricks Secret Scopes.
+        """
+        is_aws = scope.lower() in ("aws", "aws-secrets-manager", "aws_secrets_manager")
+
+        if is_aws:
+            # Check for local environment variable fallback first (helps local testing)
+            env_key = f"{scope}__{key}".upper().replace("-", "_")
+            if env_key in os.environ:
+                return os.environ[env_key]
+            
+            try:
+                import boto3
+                client = boto3.client("secretsmanager")
+                response = client.get_secret_value(SecretId=key)
+                if "SecretString" in response:
+                    return response["SecretString"]
+                else:
+                    import base64
+                    return base64.b64decode(response["SecretBinary"]).decode("utf-8")
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to fetch secret '{key}' from AWS Secrets Manager. Error: {e}"
+                )
+
         if self._dbutils is not None:
             return self._dbutils.secrets.get(scope=scope, key=key)
+            
         env_key = f"{scope}__{key}".upper().replace("-", "_")
         value: Optional[str] = os.environ.get(env_key)
         if value is None:
