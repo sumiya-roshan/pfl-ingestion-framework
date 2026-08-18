@@ -322,13 +322,13 @@ for result in sorted(lookup_results, key=lambda x: x["config_id"]):
     error    = (result.get("error") or "")[:35]
 
     if count == -1:
-        status    = "⚠️  ERROR"
+        status    = "ERROR"
         count_str = "ERROR"
     elif result["included"]:
-        status    = "✅ INCLUDED"
+        status    = "INCLUDED"
         count_str = str(count)
     else:
-        status    = "⏭️  SKIPPED"
+        status    = "SKIPPED"
         count_str = "0"
 
     print(f"{conf_id:>8}  {obj_name:<30}  {count_str:>10}  {status:<12}  {error}")
@@ -336,9 +336,9 @@ for result in sorted(lookup_results, key=lambda x: x["config_id"]):
 print(f"{'='*85}")
 print(
     f"Total: {len(lookup_results)} | "
-    f"✅ Included: {len(active_config_ids)} | "
-    f"⏭️  Skipped: {skipped_count} | "
-    f"⚠️  Errors (fail-safe included): {error_count}"
+    f" Included: {len(active_config_ids)} | "
+    f" Skipped: {skipped_count} | "
+    f" Errors (fail-safe included): {error_count}"
 )
 print(f"{'='*85}\n")
 

@@ -6,6 +6,13 @@ main ingestion pipeline and runs a COUNT query to determine whether data is
 present. Tables with zero rows are excluded from the ingestion run and logged
 to the audit table as SKIPPED.
 
+DRY Design
+----------
+This class instantiates the actual connector classes (JdbcConnector, MongoConnector)
+using the ingestion framework's Connector Factory. It reuses their connection, URI,
+and option resolution methods directly, eliminating duplicate credential, host,
+or database/collection mapping logic.
+
 Query template (pipeline-level)
 --------------------------------
 A single lookup_query_template is configured per pipeline in the
@@ -17,34 +24,10 @@ pipeline at runtime by substituting placeholders:
     {table}              → task.source_object_name
     {source_object_name} → same as {table}
 
-Example templates:
-    NULL                 → auto-generates: SELECT COUNT(*) FROM {schema}.{table}
-    "SELECT COUNT(*) FROM {schema}.{table} WHERE load_date = CURRENT_DATE"
-    "SELECT COUNT(*) FROM {table}"   (no schema prefix)
-
 Threading model
 ---------------
 All lookup queries run concurrently inside a ThreadPoolExecutor (same pattern
 as main.py). The caller controls max_workers.
-
-Supported source types
-----------------------
-- JDBC (RDBMS: POSTGRES, MYSQL, ORACLE, MSSQL, etc.)
-    Runs the resolved query via spark.read.jdbc(...).count().
-    Uses the same JDBC URL + credential resolution as JdbcConnector.
-- MongoDB
-    Uses PyMongo collection.count_documents({}) — no Spark overhead.
-    Falls back to count=1 (included) if PyMongo is unavailable.
-- S3 / SFTP
-    Row-count pre-check is not meaningful for file-based sources.
-    Always returns count=1 (always included).
-
-Fail-safe behaviour
--------------------
-If a lookup query throws ANY exception, the table is treated as having data
-(count=1, included=True) and a warning is logged. Ingestion will attempt the
-table as usual — if the source is genuinely broken, the ingestion task will
-record FAILED in the audit table.
 """
 from __future__ import annotations
 
@@ -52,57 +35,10 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
-# ── Built-in JDBC driver class map (mirrors JdbcConnector) ───────────────────
-_DEFAULT_DRIVER: dict = {
-    "POSTGRES":   "org.postgresql.Driver",
-    "POSTGRESQL": "org.postgresql.Driver",
-    "PG":         "org.postgresql.Driver",
-    "MYSQL":      "com.mysql.cj.jdbc.Driver",
-    "ORACLE":     "oracle.jdbc.OracleDriver",
-    "MSSQL":      "com.microsoft.sqlserver.jdbc.SQLServerDriver",
-    "SQLSERVER":  "com.microsoft.sqlserver.jdbc.SQLServerDriver",
-}
-
-# ── File-based source types — always included, no meaningful COUNT check ──────
-_FILE_BASED_SOURCES = {"S3", "SFTP"}
-
-# ── MongoDB source types ──────────────────────────────────────────────────────
-_MONGO_SOURCES = {"MONGODB", "MONGO"}
-
-
-def _build_jdbc_url(source_sys) -> str:
-    """Mirrors JdbcConnector._resolve_jdbc_url()."""
-    if source_sys.connection_uri:
-        return source_sys.connection_uri
-    st   = source_sys.source_type.upper()
-    host = source_sys.host or ""
-    port = source_sys.port or 0
-    db   = source_sys.database_name or ""
-    if st in ("POSTGRES", "POSTGRESQL", "PG"):
-        return f"jdbc:postgresql://{host}:{port}/{db}"
-    if st == "MYSQL":
-        return f"jdbc:mysql://{host}:{port}/{db}"
-    if st == "ORACLE":
-        return f"jdbc:oracle:thin:@//{host}:{port}/{db}"
-    if st in ("MSSQL", "SQLSERVER"):
-        return f"jdbc:sqlserver://{host}:{port};databaseName={db}"
-    raise ValueError(
-        f"[LookupExecutor] No built-in JDBC URL for source_type='{source_sys.source_type}'. "
-        f"Set connection_uri in config_source_system."
-    )
-
-
-def _resolve_driver(source_sys) -> str:
-    """Mirrors JdbcConnector._resolve_driver()."""
-    if source_sys.driver_class:
-        return source_sys.driver_class
-    driver = _DEFAULT_DRIVER.get(source_sys.source_type.upper())
-    if driver is None:
-        raise ValueError(
-            f"[LookupExecutor] No built-in JDBC driver for source_type='{source_sys.source_type}'. "
-            f"Set driver_class in config_source_system."
-        )
-    return driver
+# Import the existing connectors and factory
+from ingestion.connectors.factory import get_connector
+from ingestion.connectors.jdbc_connector import JdbcConnector
+from ingestion.connectors.mongo_connector import MongoConnector
 
 
 class LookupExecutor:
@@ -110,8 +46,8 @@ class LookupExecutor:
     Runs COUNT queries against a source system for a list of ingestion tasks
     and returns a result dict per task indicating whether data is present.
 
-    A single lookup_query_template is resolved at the pipeline level and then
-    applied per-table by substituting {schema} and {table} placeholders.
+    Instantiates the connector class for each task using get_connector() and
+    utilizes their internal helpers to fetch connection parameters.
 
     Parameters
     ----------
@@ -204,26 +140,27 @@ class LookupExecutor:
         Dispatches to JDBC, MongoDB, or file-based strategy.
         Always returns a result dict — never raises (fail-safe).
         """
-        source_type  = source_sys.source_type.upper()
         config_id    = task.config_id
         object_name  = task.source_object_name
 
         # Resolve the per-table query from the pipeline-level template
         resolved_query = self._resolve_query_for_task(task)
 
-        self.logger.info(
-            f"[LookupExecutor] config_id={config_id} ({object_name}) — "
-            f"source_type={source_type}  query={resolved_query!r}"
-        )
-
         try:
-            if source_type in _FILE_BASED_SOURCES:
-                count = self._lookup_file_based(source_sys, task)
-            elif source_type in _MONGO_SOURCES:
-                count = self._lookup_mongo(source_sys, task)
+            # Instantiate the actual connector using the factory
+            connector = get_connector(self.spark, source_sys, task, self.secrets)
+
+            if isinstance(connector, JdbcConnector):
+                count = self._lookup_jdbc(connector, resolved_query)
+            elif isinstance(connector, MongoConnector):
+                count = self._lookup_mongo(connector)
             else:
-                # Default: all JDBC-based sources
-                count = self._lookup_jdbc(source_sys, resolved_query)
+                # File-based (S3, SFTP, etc.) — always included
+                self.logger.info(
+                    f"[LookupExecutor] config_id={config_id} ({object_name}) "
+                    f"— non-queryable source ({type(connector).__name__}), always included."
+                )
+                count = 1
 
             included = count > 0
             self.logger.info(
@@ -250,91 +187,52 @@ class LookupExecutor:
 
     # ── Strategy: JDBC ───────────────────────────────────────────────────────
 
-    def _lookup_jdbc(self, source_sys, resolved_query: str) -> int:
+    def _lookup_jdbc(self, connector: JdbcConnector, resolved_query: str) -> int:
         """
         Run the resolved COUNT query via JDBC and return the integer result.
-        Wraps the query as a subquery alias so JDBC driver accepts any SELECT.
+        Reuses the connector's solved connection options (driver, credentials, url).
         """
-        username, password = self.secrets.get_credentials(
-            source_sys.secret_scope,
-            source_sys.secret_key_credentials,
-        )
-        url    = _build_jdbc_url(source_sys)
-        driver = _resolve_driver(source_sys)
-
+        # Call the connector's helper to resolve JDBC configuration parameters
+        options = connector._read_options()
         dbtable = f"({resolved_query}) _lkp_count"
 
         df = (
             self.spark.read.format("jdbc")
-            .option("url",      url)
-            .option("user",     username)
-            .option("password", password)
-            .option("driver",   driver)
+            .options(**options)
             .option("dbtable",  dbtable)
             .load()
         )
         row = df.collect()
         if not row:
             return 0
-        # COUNT(*) → single row, single column. Grab the first value.
         count_value = row[0][0]
         return int(count_value) if count_value is not None else 0
 
     # ── Strategy: MongoDB ────────────────────────────────────────────────────
 
-    def _lookup_mongo(self, source_sys, task) -> int:
+    def _lookup_mongo(self, connector: MongoConnector) -> int:
         """
         Count documents in the MongoDB collection using PyMongo.
-        Falls back to count=1 (included) if pymongo is unavailable.
+        Reuses the connector's solved URI, database, and collection properties.
         """
         try:
             import pymongo  # noqa: PLC0415
         except ImportError:
             self.logger.warning(
                 "[LookupExecutor] pymongo not available — including MongoDB "
-                f"table '{task.source_object_name}' by default."
+                f"table '{connector.ingest_obj.source_object_name}' by default."
             )
             return 1
 
-        username, password = self.secrets.get_credentials(
-            source_sys.secret_scope,
-            source_sys.secret_key_credentials,
-        )
-
-        uri = source_sys.connection_uri
-        if not uri:
-            host = source_sys.host or "localhost"
-            port = source_sys.port or 27017
-            if username and password:
-                uri = f"mongodb://{username}:{password}@{host}:{port}"
-            else:
-                uri = f"mongodb://{host}:{port}"
-
-        replica_set = source_sys.nosql_replica_set
-        if replica_set:
-            sep = "&" if "?" in uri else "?"
-            uri = f"{uri}{sep}replicaSet={replica_set}"
+        uri        = connector._build_connection_uri()
+        database   = connector._resolve_database()
+        collection = connector._resolve_collection()
 
         client = pymongo.MongoClient(uri)
         try:
-            db_name    = source_sys.database_name or source_sys.nosql_collection_name
-            collection = source_sys.nosql_collection_name or task.source_object_name
-            return int(client[db_name][collection].count_documents({}))
+            return int(client[database][collection].count_documents({}))
         finally:
             client.close()
-
-    # ── Strategy: File-based (S3 / SFTP) ────────────────────────────────────
-
-    def _lookup_file_based(self, source_sys, task) -> int:  # noqa: ARG002
-        """
-        File-based sources are always included — no meaningful pre-check.
-        The ingestion task handles missing files gracefully.
-        """
-        self.logger.info(
-            f"[LookupExecutor] config_id={task.config_id} ({task.source_object_name}) "
-            f"— file-based source ({source_sys.source_type}), always included."
-        )
-        return 1
 
     # ── Template resolution ───────────────────────────────────────────────────
 
@@ -357,11 +255,9 @@ class LookupExecutor:
         table  = task.source_object_name or ""
 
         if not self.lookup_query_template:
-            # Auto-generate: include schema prefix only when schema is set
             schema_prefix = f"{schema}." if schema else ""
             return f"SELECT COUNT(*) FROM {schema_prefix}{table}"
 
-        # Replace all supported placeholder variants (case-insensitive)
         resolved = self.lookup_query_template
         for placeholder, value in [
             ("{source_schema}",      schema),
@@ -388,7 +284,7 @@ class LookupExecutor:
             "config_id":          task.config_id,
             "source_object_name": task.source_object_name,
             "resolved_query":     resolved_query or "N/A",
-            "count":              -1,   # -1 = unknown due to error
-            "included":           True, # fail-safe: always include on error
+            "count":              -1,
+            "included":           True,
             "error":              error,
         }
