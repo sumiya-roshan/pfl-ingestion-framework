@@ -194,7 +194,8 @@ class IngestionOrchestrator:
             copy_duration_sec = round(time.time() - write_start_time, 2)
 
             self.logger.info(
-                f"[{run_id}] Bronze write → {target_table} ({rows_read} rows, mode={ingest_obj.write_mode})"
+                f"[{run_id}] Bronze write SKIPPED (TEMP, commented out) → {target_table} "
+                f"({rows_read} rows would have been written, mode={ingest_obj.write_mode})"
             )
 
             # Retrieve metrics from Delta table history
@@ -259,18 +260,6 @@ class IngestionOrchestrator:
                     source_object_name  = ingest_obj.source_object_name,
                     load_type           = ingest_obj.load_type,
                     primary_key_cols    = ingest_obj.primary_key_cols,
-                    # Everything below is only for Silver's own audit row — reuses
-                    # Bronze's already-resolved values so Silver never re-queries
-                    # config_master/ingestion_config or the audit table.
-                    source_name         = source_sys.source_name,
-                    pipeline_name       = pipeline_name,
-                    target_schema       = ingest_obj.target_schema,
-                    target_table        = ingest_obj.target_table,
-                    audit_table         = self.audit.table,
-                    department_id       = self.audit.department_id,
-                    job_run_id          = run_id,
-                    config_master_id    = config_master_id,
-                    frequency           = getattr(ingest_obj, "frequency", None),
                 )
                 with self._silver_lock:
                     self._silver_futures.append(future)
@@ -319,15 +308,6 @@ class IngestionOrchestrator:
         source_object_name: str,
         load_type: str,
         primary_key_cols: str,
-        source_name: str,
-        pipeline_name: str,
-        target_schema: str,
-        target_table: str,
-        audit_table: str,
-        department_id: int,
-        job_run_id: str,
-        config_master_id: Optional[int],
-        frequency: Optional[str],
     ) -> dict:
         """Runs in a Silver worker thread. Never raises — caught and returned as a result dict."""
         thread_name = threading.current_thread().name
@@ -340,15 +320,6 @@ class IngestionOrchestrator:
                 source_object_name  = source_object_name,
                 load_type           = load_type,
                 primary_key_cols    = primary_key_cols,
-                source_name         = source_name,
-                pipeline_name       = pipeline_name,
-                target_schema       = target_schema,
-                target_table        = target_table,
-                audit_table         = audit_table,
-                department_id       = department_id,
-                job_run_id          = job_run_id,
-                config_master_id    = config_master_id,
-                frequency           = frequency,
             )
         except Exception as exc:
             self.logger.error(
