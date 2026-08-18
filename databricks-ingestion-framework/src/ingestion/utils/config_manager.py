@@ -61,6 +61,9 @@ class SourceSystemConfig:
 
     landing_volume_path: Optional[str]
 
+    retry_count: Optional[int]
+    retry_interval: Optional[int]
+
 
 @dataclass
 class IngestionTaskConfig:
@@ -92,6 +95,8 @@ class IngestionTaskConfig:
     schema_evolution_mode: Optional[str]
     partition_column: Optional[str]
     source_filter: Optional[str]
+
+    
 
     @property
     def primary_key_list(self) -> Optional[List[str]]:
@@ -154,6 +159,8 @@ class ConfigManager:
             is_active               = r.get("is_active", 1),
             extra_params            = r.get("extra_params"),
             landing_volume_path     = r.get("landing_volume_path"),
+            retry_count             = r.get("retry_count"),
+            retry_interval          = r.get("retry_interval"),
         )
 
     def _build_ingestion_task(self, r: dict) -> IngestionTaskConfig:

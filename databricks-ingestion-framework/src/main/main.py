@@ -206,26 +206,53 @@ orchestrator = IngestionOrchestrator(
     environment   = environment,
 )
 
+import time
+
 def run_one(task: IngestionTaskConfig) -> dict:
-    """Run a single ingestion task — works for RDBMS, NoSQL, and S3."""
-    return orchestrator.run(
-        source_sys          = source_sys,
-        task                = task,
-        config_master_id    = config_master_id,   # ← routing table ID from widget
-        landing_volume_path = landing_volume_path,
-        trigger_id          = trigger_id,
-        # trigger_type        = trigger_type,
-        job_context         = job_context,
-    )
+    """
+    Run a single ingestion task — works for RDBMS, NoSQL, and S3.
+
+    Retries the task in place (before returning to the ThreadPoolExecutor future)
+    using the source system's own retry_count/retry_interval from config_source_system.
+    Retry state is local to this call, so each table's retry count/interval is
+    independent and a retry's sleep only blocks this table's worker thread —
+    other tables running in parallel are unaffected.
+    """
+    max_retries    = int(source_sys.retry_count or 0)
+    retry_interval = int(source_sys.retry_interval or 0)
+
+    attempt = 0
+    while True:
+        result = orchestrator.run(
+            source_sys          = source_sys,
+            task                = task,
+            config_master_id    = config_master_id,   # ← routing table ID from widget
+            landing_volume_path = landing_volume_path,
+            trigger_id          = trigger_id,
+            # trigger_type        = trigger_type,
+            job_context         = job_context,
+        )
+        if result["status"] == AUDIT_STATUS_SUCCESS or attempt >= max_retries:
+            return result
+
+        attempt += 1
+        print(
+            f"Task {task.source_object_name} (Config ID: {task.config_id}) failed "
+            f"(attempt {attempt}/{max_retries}), retrying in {retry_interval}s: {result.get('error')}"
+        )
+        if retry_interval > 0:
+            time.sleep(retry_interval)
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 results = []
 # max_workers = 4 # Adjust depending on cluster size and DB load
 
-print(f"\nStarting {len(tasks)} tasks with ThreadPoolExecutor (max_workers={max_workers})...")
+tasks_sorted = sorted(tasks, key=lambda t: t.priority)
+
+print(f"\nStarting {len(tasks_sorted)} tasks with ThreadPoolExecutor (max_workers={max_workers})...")
 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-    future_to_task = {executor.submit(run_one, task): task for task in tasks}
+    future_to_task = {executor.submit(run_one, task): task for task in tasks_sorted}
     
     for future in as_completed(future_to_task):
         task = future_to_task[future]
