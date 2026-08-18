@@ -220,7 +220,7 @@ class IngestionOrchestrator:
                 throughput_mb_per_sec = throughput_mb_per_sec,
                 copy_duration_sec     = copy_duration_sec,
             )
-
+# trigger_silver [TO DO]
             if config_master_id is not None:
                 try:
                     self.config_manager.update_sink_metadata(
