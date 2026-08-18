@@ -216,9 +216,13 @@ orchestrator = IngestionOrchestrator(
     silver_max_workers      = silver_max_workers,
 )
 
+import threading
+
 def run_one(task: IngestionTaskConfig) -> dict:
     """Run a single ingestion task — works for RDBMS, NoSQL, and S3."""
-    return orchestrator.run(
+    thread_name = threading.current_thread().name
+    print(f"[BRONZE] {thread_name} picked up config_id={task.config_id} table='{task.source_object_name}'")
+    result = orchestrator.run(
         source_sys          = source_sys,
         task                = task,
         config_master_id    = config_master_id,   # ← routing table ID from widget
@@ -227,16 +231,18 @@ def run_one(task: IngestionTaskConfig) -> dict:
         # trigger_type        = trigger_type,
         job_context         = job_context,
     )
+    print(f"[BRONZE] {thread_name} finished config_id={task.config_id} status={result['status']}")
+    return result
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 results = []
 # max_workers = 4 # Adjust depending on cluster size and DB load
 
-print(f"\nStarting {len(tasks)} tasks with ThreadPoolExecutor (max_workers={max_workers})...")
-with ThreadPoolExecutor(max_workers=max_workers) as executor:
+print(f"\nStarting {len(tasks)} tasks with ThreadPoolExecutor (max_workers={max_workers}, pool='Bronze')...")
+with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="Bronze") as executor:
     future_to_task = {executor.submit(run_one, task): task for task in tasks}
-    
+
     for future in as_completed(future_to_task):
         task = future_to_task[future]
         try:

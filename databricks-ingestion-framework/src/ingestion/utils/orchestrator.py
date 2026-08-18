@@ -80,10 +80,13 @@ class IngestionOrchestrator:
             if silver_notebook_path else None
         )
         self._silver_executor = (
-            ThreadPoolExecutor(max_workers=silver_max_workers) if self.silver_processor else None
+            ThreadPoolExecutor(max_workers=silver_max_workers, thread_name_prefix="Silver")
+            if self.silver_processor else None
         )
         self._silver_futures = []
         self._silver_lock    = threading.Lock()
+        if self.silver_processor:
+            print(f"[SILVER] pool ready — max_workers={silver_max_workers}, notebook='{silver_notebook_path}'")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -241,6 +244,11 @@ class IngestionOrchestrator:
 
             # ── Trigger Silver, in parallel, right after Bronze is confirmed written ──
             if self.silver_processor:
+                print(
+                    f"[SILVER] {threading.current_thread().name} submitting trigger for "
+                    f"config_id={ingest_obj.config_id} bronze_table='{target_table}' "
+                    f"(Bronze thread returns immediately — does not wait for Silver)"
+                )
                 future = self._silver_executor.submit(
                     self._trigger_silver,
                     config_id           = ingest_obj.config_id,
@@ -299,8 +307,10 @@ class IngestionOrchestrator:
         primary_key_cols: str,
     ) -> dict:
         """Runs in a Silver worker thread. Never raises — caught and returned as a result dict."""
+        thread_name = threading.current_thread().name
+        print(f"[SILVER] {thread_name} started for config_id={config_id} bronze_table='{bronze_table}'")
         try:
-            return self.silver_processor.trigger(
+            result = self.silver_processor.trigger(
                 config_id           = config_id,
                 bronze_table        = bronze_table,
                 source_schema       = source_schema,
@@ -320,6 +330,9 @@ class IngestionOrchestrator:
                 "exit_value":   None,
                 "error":        str(exc),
             }
+
+        print(f"[SILVER] {thread_name} finished for config_id={config_id} status={result['status']}")
+        return result
 
     def wait_for_silver(self) -> list:
         """
