@@ -205,15 +205,40 @@ lookup_results = executor.run_all(
 
 # COMMAND ----------
 
-job_context = {
-    "job_run_id":     job_run_id,
-    "job_id":         None,
-    "trigger_type":   None,
-    "trigger_id":     job_run_id,
-    "trigger_name":   None,
-    "notebook_name":  None,
-    "databricks_url": None,
-}
+def get_databricks_job_context():
+    context = (
+        dbutils.notebook.entry_point
+        .getDbutils()
+        .notebook()
+        .getContext()
+    )
+
+    def get_context_value(method_name):
+        try:
+            return getattr(context, method_name)().get()
+        except Exception:
+            return None
+            
+    databricks_url = get_context_value("apiUrl")
+    job_id = dbutils.widgets.get("job_id")
+
+    databricks_url = (
+        f"{databricks_url}/#job/{job_id}"
+        if databricks_url and job_id
+        else None
+    )
+    return {
+        "job_id": get_context_value("jobId"),
+        "job_name": get_context_value("jobName"),
+        "notebook_name": get_context_value("notebookPath"),
+        "databricks_url": databricks_url,
+        "trigger_type": get_context_value("triggerType"),
+        "trigger_id": get_context_value("triggerId"),
+        "trigger_name": get_context_value("triggerName"),
+    }
+
+job_context = get_databricks_job_context()
+job_context["job_run_id"] = job_run_id
 
 active_config_ids = []   # config_ids with count > 0 (passed to main.py)
 skipped_count     = 0

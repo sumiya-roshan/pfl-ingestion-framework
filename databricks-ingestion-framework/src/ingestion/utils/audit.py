@@ -65,8 +65,8 @@ class AuditLogger:
             self._required_string(task.target_table),
             0, 0, 0, 0, 0, 0,
             None, None,
-            ctx.get("notebook_name"),
-            ctx.get("databricks_url"),
+            self._required_string(ctx.get("notebook_name"), "UNKNOWN"),
+            self._required_string(ctx.get("databricks_url"), "UNKNOWN"),
             "INGESTION",
             AUDIT_STATUS_INPROGRESS,
             None,
@@ -177,8 +177,8 @@ class AuditLogger:
             self._required_string(task.target_table),
             0, 0, 0, 0, 0, 0,  # rows_* and byte metrics
             None, None,         # throughput, copy_duration
-            ctx.get("notebook_name"),
-            ctx.get("databricks_url"),
+            self._required_string(ctx.get("notebook_name"), "UNKNOWN"),
+            self._required_string(ctx.get("databricks_url"), "UNKNOWN"),
             "LOOKUP",           # operation_performed
             AUDIT_STATUS_SKIPPED,
             "SOURCE_LOOKUP_ZERO_ROWS",  # error_code
