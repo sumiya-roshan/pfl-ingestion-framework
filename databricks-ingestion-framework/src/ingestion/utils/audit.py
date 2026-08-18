@@ -9,7 +9,7 @@ from pyspark.sql.types import (
     StructField, StructType, TimestampType,
 )
 
-from .config_manager import AUDIT_STATUS_FAILED, AUDIT_STATUS_INPROGRESS, AUDIT_STATUS_SUCCESS
+from .config_manager import AUDIT_STATUS_FAILED, AUDIT_STATUS_INPROGRESS, AUDIT_STATUS_SUCCESS, AUDIT_STATUS_SKIPPED
 
 
 class AuditLogger:
@@ -120,6 +120,73 @@ class AuditLogger:
     def fail_run(self, audit_run: Dict[str, Any],error_code: str, error_message: str) -> None:
         """Mark the active audit record as FAILED."""
         self.complete_run(audit_run, AUDIT_STATUS_FAILED,error_code= error_code, error_message=error_message)
+
+    def log_skipped_row(
+        self,
+        task,
+        source_sys,
+        job_context: Optional[Dict[str, Any]],
+        pipeline_name: str,
+        config_master_id: Optional[int] = None,
+        reason: Optional[str] = None,
+        business_date=None,
+    ) -> None:
+        """
+        Insert a single, complete SKIPPED audit record for a table that was
+        excluded by the source_lookup task because it had 0 rows in the source.
+
+        Unlike start_run + complete_run, this writes the terminal record
+        immediately (start and end timestamps are both now).
+
+        Parameters
+        ----------
+        task             : IngestionTaskConfig for the skipped table
+        source_sys       : SourceSystemConfig
+        job_context      : job/run context dict (same format as start_run)
+        pipeline_name    : pipeline name string
+        config_master_id : config_master routing ID
+        reason           : human-readable reason written to error_message column
+        business_date    : override for business_date (defaults to UTC today)
+        """
+        ctx        = job_context or {}
+        now        = datetime.utcnow()
+        table_id   = int(task.config_id)
+        job_run_id = str(ctx.get("job_run_id") or "MANUAL")
+
+        row = [(
+            int(config_master_id) if config_master_id is not None else table_id,
+            table_id,
+            int(self.department_id),
+            self._required_string(task.effective_delta_layer),
+            self._required_string(source_sys.source_name),
+            self._required_string(pipeline_name),
+            self._required_string(task.load_type),
+            getattr(task, "frequency", None),
+            business_date if business_date is not None else now.date(),
+            self._required_string(ctx.get("job_id"), "MANUAL"),
+            job_run_id,
+            ctx.get("trigger_type"),
+            ctx.get("trigger_id"),
+            ctx.get("trigger_name"),
+            now,           # trigger_time
+            now,           # end_time  (same — skipped immediately)
+            Decimal("0"),  # execution_duration_sec
+            task.source_schema,
+            task.source_object_name,
+            self._required_string(task.target_schema),
+            self._required_string(task.target_table),
+            0, 0, 0, 0, 0, 0,  # rows_* and byte metrics
+            None, None,         # throughput, copy_duration
+            ctx.get("notebook_name"),
+            ctx.get("databricks_url"),
+            "LOOKUP",           # operation_performed
+            AUDIT_STATUS_SKIPPED,
+            "SOURCE_LOOKUP_ZERO_ROWS",  # error_code
+            reason or "Source lookup returned 0 rows — table excluded from ingestion.",
+        )]
+
+        with self._write_lock:
+            self.spark.createDataFrame(row, schema=self._schema()).writeTo(self.table).using("delta").append()
 
     @staticmethod
     def _required_string(value: Any, default: str = "UNKNOWN") -> str:

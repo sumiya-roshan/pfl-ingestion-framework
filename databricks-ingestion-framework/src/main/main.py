@@ -34,6 +34,7 @@ sys.path.append("..")
 from ingestion.utils.config_manager import (
     AUDIT_STATUS_FAILED,
     AUDIT_STATUS_SUCCESS,
+    AUDIT_STATUS_SKIPPED,
     ConfigManager,
     SOURCE_SYSTEM_TABLE,
     CONFIG_MASTER_TABLE,
@@ -173,6 +174,7 @@ config_mgr = ConfigManager(
 source_sys, tasks = config_mgr.get_active_tasks(
     config_master_id = config_master_id,
     source_system_id = source_system_id,
+    pipeline_name    = pipeline_name,
 )
 
 print(f"\nSource filters applied:")
@@ -184,6 +186,47 @@ print(f"\nFound {len(tasks)} ingestion task(s) to run.")
 
 if not tasks:
     dbutils.notebook.exit("No active ingestion tasks found for the given source filters.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Apply Lookup Filter (from source_lookup task)
+# MAGIC
+# MAGIC If the `source_lookup` task ran before this notebook in the job, it publishes
+# MAGIC a comma-separated list of config IDs that have data in the source.
+# MAGIC Tables with 0 rows are excluded here — they already have a SKIPPED audit record.
+# MAGIC
+# MAGIC **Standalone mode:** If `taskValues` is unavailable (notebook run outside a job),
+# MAGIC this block is skipped and all active tasks are processed as before.
+
+# COMMAND ----------
+
+try:
+    active_ids_raw = dbutils.jobs.taskValues.get(
+        taskKey    = "source_lookup",
+        key        = "active_config_ids",
+        default    = None,
+        debugValue = None,
+    )
+    if active_ids_raw and active_ids_raw.strip():
+        active_ids = {int(x) for x in active_ids_raw.split(",") if x.strip()}
+        before_count = len(tasks)
+        tasks = [t for t in tasks if t.config_id in active_ids]
+        print(
+            f"\nLookup filter applied: {before_count} active task(s) → "
+            f"{len(tasks)} task(s) have data in source "
+            f"({before_count - len(tasks)} skipped by lookup)."
+        )
+    else:
+        print("\nNo lookup filter (taskValues 'active_config_ids' is empty or absent) — running all active tasks.")
+except Exception as _lkp_exc:
+    print(f"\ntaskValues unavailable ({_lkp_exc}) — running all active tasks (standalone mode).")
+
+if not tasks:
+    dbutils.notebook.exit(
+        "Lookup filter left 0 tasks to run — all tables had 0 rows in source. "
+        "Check pipeline_lookup_config and SKIPPED audit rows for details."
+    )
 
 # COMMAND ----------
 
