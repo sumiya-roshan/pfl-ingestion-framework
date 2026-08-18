@@ -178,16 +178,18 @@ class IngestionOrchestrator:
             write_start_time = time.time()
 
             # ── Bronze Delta write ─────────────────────────────────────────────
-            target_table = self.bronze_writer.write(
-                df,
-                catalog               = ingest_obj.target_catalog,
-                schema                = ingest_obj.target_schema,
-                table                 = ingest_obj.target_table,
-                write_mode            = ingest_obj.write_mode,
-                merge_keys            = ingest_obj.primary_key_list,
-                schema_evolution_mode = ingest_obj.schema_evolution_mode,
-                partition_column      = ingest_obj.partition_column,
-            )
+            # TEMP: commented out to test Silver in isolation — restore before merging.
+            # target_table = self.bronze_writer.write(
+            #     df,
+            #     catalog               = ingest_obj.target_catalog,
+            #     schema                = ingest_obj.target_schema,
+            #     table                 = ingest_obj.target_table,
+            #     write_mode            = ingest_obj.write_mode,
+            #     merge_keys            = ingest_obj.primary_key_list,
+            #     schema_evolution_mode = ingest_obj.schema_evolution_mode,
+            #     partition_column      = ingest_obj.partition_column,
+            # )
+            target_table = f"{ingest_obj.target_catalog}.{ingest_obj.target_schema}.{ingest_obj.target_table}"
             rows_copied = rows_read
             copy_duration_sec = round(time.time() - write_start_time, 2)
 
