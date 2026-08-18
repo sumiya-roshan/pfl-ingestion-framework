@@ -2,11 +2,12 @@
 SilverProcessor — triggers the Silver transformation notebook for a specific
 table using dbutils.notebook.run().
 
-Called directly from IngestionOrchestrator right after a table's Bronze write
-and audit SUCCESS, on that table's own thread pool. All context the Silver
-notebook needs (Bronze table location, source info, load type, keys) is
-passed in as widget parameters — the notebook does not re-query
-config_master/ingestion_config or the audit table to look it up again.
+Called directly from IngestionOrchestrator right after a table's S3 landing
+write, on that table's own thread pool. Silver reads from the S3 landing path
+(not the Bronze Delta table) and writes into `{target_schema}_silver`. All
+context the Silver notebook needs is passed in as widget parameters — the
+notebook does not re-query config_master/ingestion_config or the audit table
+to look any of it up again.
 
 dbutils is passed in from the calling notebook since it is a notebook-level
 object and cannot be imported as a module.
@@ -37,7 +38,11 @@ class SilverProcessor:
     def trigger(
         self,
         config_id: int,
-        bronze_table: str,
+        landing_path: str,
+        file_format: str,
+        silver_catalog: str,
+        silver_schema: str,
+        silver_table: str,
         source_schema: str,
         source_object_name: str,
         load_type: str,
@@ -48,18 +53,22 @@ class SilverProcessor:
 
         The Silver notebook is expected to accept these widget parameters:
           - config_id           : int    (identifies the ingestion config row)
-          - bronze_table        : str    (fully-qualified Bronze table just written,
-                                          catalog.schema.table)
+          - landing_path        : str    (S3 path the Bronze/landing write just wrote to)
+          - file_format         : str    (parquet | delta | csv | json — how to read landing_path)
+          - silver_catalog      : str
+          - silver_schema       : str    (Bronze's target_schema + '_silver')
+          - silver_table        : str    (same table name as Bronze's target_table)
           - source_schema       : str
           - source_object_name  : str
           - load_type           : str
           - primary_key_cols    : str    (comma-separated, may be empty)
 
-        Returns dict with keys: config_id, bronze_table, status, exit_value, error
+        Returns dict with keys: config_id, target, status, exit_value, error
         """
+        target = f"{silver_catalog}.{silver_schema}.{silver_table}"
         log.info(
             f"[SILVER] Running Silver notebook for config_id={config_id} "
-            f"bronze_table='{bronze_table}'"
+            f"landing_path='{landing_path}' → {target}"
         )
 
         exit_value = self.dbutils.notebook.run(
@@ -67,7 +76,11 @@ class SilverProcessor:
             self.timeout_seconds,
             {
                 "config_id":          str(config_id),
-                "bronze_table":       bronze_table,
+                "landing_path":       landing_path,
+                "file_format":        file_format or "parquet",
+                "silver_catalog":     silver_catalog or "",
+                "silver_schema":      silver_schema or "",
+                "silver_table":       silver_table or "",
                 "source_schema":      source_schema or "",
                 "source_object_name": source_object_name or "",
                 "load_type":          load_type or "",
@@ -76,13 +89,13 @@ class SilverProcessor:
         )
 
         log.info(
-            f"[SILVER] Silver notebook finished for bronze_table='{bronze_table}' "
+            f"[SILVER] Silver notebook finished for target='{target}' "
             f"exit_value='{exit_value}'"
         )
         return {
-            "config_id":    config_id,
-            "bronze_table": bronze_table,
-            "status":       "SUCCESS",
-            "exit_value":   exit_value,
-            "error":        None,
+            "config_id":  config_id,
+            "target":     target,
+            "status":     "SUCCESS",
+            "exit_value": exit_value,
+            "error":      None,
         }

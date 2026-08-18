@@ -160,8 +160,11 @@ class IngestionOrchestrator:
             rows_deleted = 0
 
             # ── Landing / raw write (optional) ────────────────────────────────
+            # landing_path/fmt are also what Silver reads from — kept in scope past
+            # the if-block (stay None/default when landing write is skipped).
+            landing_path = None
+            fmt = ingest_obj.file_format or "parquet"
             if landing_volume_path:
-                fmt = ingest_obj.file_format or "parquet"
                 landing_path = self.s3_writer.write(
                     df,
                     landing_volume_path = landing_volume_path,
@@ -246,16 +249,24 @@ class IngestionOrchestrator:
             self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
 
             # ── Trigger Silver, in parallel, right after Bronze is confirmed written ──
-            if self.silver_processor:
+            # Silver reads from the S3 landing path (not the Bronze Delta table), so
+            # there's nothing to trigger if the landing write was skipped.
+            if self.silver_processor and landing_path:
+                silver_schema = f"{ingest_obj.target_schema}_silver"
                 print(
                     f"[SILVER] {threading.current_thread().name} submitting trigger for "
-                    f"config_id={ingest_obj.config_id} bronze_table='{target_table}' "
+                    f"config_id={ingest_obj.config_id} landing_path='{landing_path}' "
+                    f"→ {ingest_obj.target_catalog}.{silver_schema}.{ingest_obj.target_table} "
                     f"(Bronze thread returns immediately — does not wait for Silver)"
                 )
                 future = self._silver_executor.submit(
                     self._trigger_silver,
                     config_id           = ingest_obj.config_id,
-                    bronze_table        = target_table,
+                    landing_path        = landing_path,
+                    file_format         = fmt,
+                    silver_catalog      = ingest_obj.target_catalog,
+                    silver_schema       = silver_schema,
+                    silver_table        = ingest_obj.target_table,
                     source_schema       = ingest_obj.source_schema,
                     source_object_name  = ingest_obj.source_object_name,
                     load_type           = ingest_obj.load_type,
@@ -263,6 +274,11 @@ class IngestionOrchestrator:
                 )
                 with self._silver_lock:
                     self._silver_futures.append(future)
+            elif self.silver_processor:
+                print(
+                    f"[SILVER] Skipped for config_id={ingest_obj.config_id} — "
+                    f"no landing_volume_path was set, nothing for Silver to read."
+                )
 
             return {
                 "config_id": ingest_obj.config_id,
@@ -303,7 +319,11 @@ class IngestionOrchestrator:
     def _trigger_silver(
         self,
         config_id: int,
-        bronze_table: str,
+        landing_path: str,
+        file_format: str,
+        silver_catalog: str,
+        silver_schema: str,
+        silver_table: str,
         source_schema: str,
         source_object_name: str,
         load_type: str,
@@ -311,11 +331,16 @@ class IngestionOrchestrator:
     ) -> dict:
         """Runs in a Silver worker thread. Never raises — caught and returned as a result dict."""
         thread_name = threading.current_thread().name
-        print(f"[SILVER] {thread_name} started for config_id={config_id} bronze_table='{bronze_table}'")
+        target = f"{silver_catalog}.{silver_schema}.{silver_table}"
+        print(f"[SILVER] {thread_name} started for config_id={config_id} landing_path='{landing_path}' → {target}")
         try:
             result = self.silver_processor.trigger(
                 config_id           = config_id,
-                bronze_table        = bronze_table,
+                landing_path        = landing_path,
+                file_format         = file_format,
+                silver_catalog      = silver_catalog,
+                silver_schema       = silver_schema,
+                silver_table        = silver_table,
                 source_schema       = source_schema,
                 source_object_name  = source_object_name,
                 load_type           = load_type,
@@ -323,12 +348,12 @@ class IngestionOrchestrator:
             )
         except Exception as exc:
             self.logger.error(
-                f"[SILVER] Trigger failed for config_id={config_id} bronze_table='{bronze_table}': {exc}",
+                f"[SILVER] Trigger failed for config_id={config_id} landing_path='{landing_path}': {exc}",
                 exc_info=True,
             )
             return {
                 "config_id":    config_id,
-                "bronze_table": bronze_table,
+                "target":       target,
                 "status":       "FAILED",
                 "exit_value":   None,
                 "error":        str(exc),
