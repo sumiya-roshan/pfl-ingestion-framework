@@ -14,6 +14,8 @@ Key behaviours
                   returns a result dict — it never re-raises. The calling
                   notebook decides whether to raise after collecting all results.
 """
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Optional
 
@@ -30,6 +32,7 @@ from .writers.s3_writer import S3RawWriter
 from .writers.bronze_writer import BronzeWriter
 from .logger import get_logger
 from .secrets import SecretResolver
+from silver.silver_processor import SilverProcessor
 
 
 class IngestionOrchestrator:
@@ -54,8 +57,12 @@ class IngestionOrchestrator:
         pipeline_name: str = "ingestion_framework",
         environment: str   = "dev",
         department_id: int = 0,
+        silver_notebook_path: Optional[str] = None,
+        silver_notebook_timeout: int        = 3600,
+        silver_max_workers: int             = 4,
     ):
         self.spark         = spark
+        self.dbutils       = dbutils
         self.pipeline_name = pipeline_name
         self.environment   = environment
 
@@ -64,6 +71,19 @@ class IngestionOrchestrator:
         self.s3_writer     = S3RawWriter()
         self.bronze_writer = BronzeWriter(spark)
         self.logger        = get_logger(environment=environment)
+
+        # Silver trigger: fires on its own thread pool right after a table's Bronze
+        # audit SUCCESS, decoupled from the Bronze thread pool so one table's Silver
+        # run never blocks another table's Bronze run. Disabled when no path is given.
+        self.silver_processor = (
+            SilverProcessor(dbutils, silver_notebook_path, silver_notebook_timeout)
+            if silver_notebook_path else None
+        )
+        self._silver_executor = (
+            ThreadPoolExecutor(max_workers=silver_max_workers) if self.silver_processor else None
+        )
+        self._silver_futures = []
+        self._silver_lock    = threading.Lock()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -218,6 +238,21 @@ class IngestionOrchestrator:
                 copy_duration_sec     = copy_duration_sec,
             )
             self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
+
+            # ── Trigger Silver, in parallel, right after Bronze is confirmed written ──
+            if self.silver_processor:
+                future = self._silver_executor.submit(
+                    self._trigger_silver,
+                    config_id           = ingest_obj.config_id,
+                    bronze_table        = target_table,
+                    source_schema       = ingest_obj.source_schema,
+                    source_object_name  = ingest_obj.source_object_name,
+                    load_type           = ingest_obj.load_type,
+                    primary_key_cols    = ingest_obj.primary_key_cols,
+                )
+                with self._silver_lock:
+                    self._silver_futures.append(future)
+
             return {
                 "config_id": ingest_obj.config_id,
                 "run_id":   run_id,
@@ -251,3 +286,51 @@ class IngestionOrchestrator:
                 "error_code": error_code,
                 "error":    error_msg,
             }
+
+    # ── Silver trigger ───────────────────────────────────────────────────────
+
+    def _trigger_silver(
+        self,
+        config_id: int,
+        bronze_table: str,
+        source_schema: str,
+        source_object_name: str,
+        load_type: str,
+        primary_key_cols: str,
+    ) -> dict:
+        """Runs in a Silver worker thread. Never raises — caught and returned as a result dict."""
+        try:
+            return self.silver_processor.trigger(
+                config_id           = config_id,
+                bronze_table        = bronze_table,
+                source_schema       = source_schema,
+                source_object_name  = source_object_name,
+                load_type           = load_type,
+                primary_key_cols    = primary_key_cols,
+            )
+        except Exception as exc:
+            self.logger.error(
+                f"[SILVER] Trigger failed for config_id={config_id} bronze_table='{bronze_table}': {exc}",
+                exc_info=True,
+            )
+            return {
+                "config_id":    config_id,
+                "bronze_table": bronze_table,
+                "status":       "FAILED",
+                "exit_value":   None,
+                "error":        str(exc),
+            }
+
+    def wait_for_silver(self) -> list:
+        """
+        Blocks until every Silver trigger submitted so far has finished and
+        returns their result dicts. Safe to call even if Silver triggering is
+        disabled (no silver_notebook_path was configured) — returns [].
+        """
+        if not self._silver_executor:
+            return []
+        with self._silver_lock:
+            futures = list(self._silver_futures)
+        results = [f.result() for f in futures]
+        self._silver_executor.shutdown(wait=True)
+        return results

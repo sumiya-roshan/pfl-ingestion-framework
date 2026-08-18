@@ -59,6 +59,9 @@ dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Ba
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
 dbutils.widgets.text("max_workers",         "4",              "Max Parallel workers")
+dbutils.widgets.text("silver_notebook_path",    "",           "Workspace path to Silver transformation notebook (blank = skip Silver trigger)")
+dbutils.widgets.text("silver_notebook_timeout", "3600",       "Max seconds to wait for each Silver notebook run")
+dbutils.widgets.text("silver_max_workers",      "4",          "Max parallel Silver notebook runs")
 
 # COMMAND ----------
 
@@ -88,6 +91,10 @@ landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
 max_workers          = int(dbutils.widgets.get("max_workers")      or "4")
+
+silver_notebook_path    = dbutils.widgets.get("silver_notebook_path")    or None
+silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
+silver_max_workers      = int(dbutils.widgets.get("silver_max_workers")      or "4")
 
 
 # COMMAND ----------
@@ -201,9 +208,12 @@ job_context["trigger_id"] = trigger_id
 orchestrator = IngestionOrchestrator(
     spark,
     dbutils,
-    audit_table   = audit_table,
-    pipeline_name = pipeline_name,
-    environment   = environment,
+    audit_table             = audit_table,
+    pipeline_name           = pipeline_name,
+    environment             = environment,
+    silver_notebook_path    = silver_notebook_path,
+    silver_notebook_timeout = silver_notebook_timeout,
+    silver_max_workers      = silver_max_workers,
 )
 
 def run_one(task: IngestionTaskConfig) -> dict:
