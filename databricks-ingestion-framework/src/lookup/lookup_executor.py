@@ -172,7 +172,7 @@ class LookupExecutor:
         self.logger.info(
             f"[LookupExecutor] Starting lookup for {len(tasks)} task(s) on source "
             f"'{source_sys.source_name}' (max_workers={max_workers}). "
-            f"Template: {self.lookup_query_template!r or 'auto-generate'}"
+            f"Template: {(self.lookup_query_template or 'auto-generate')!r}"
         )
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:

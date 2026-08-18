@@ -158,7 +158,7 @@ try:
         lookup_query_template = lookup_cfg_rows[0]["lookup_query_template"]  # may be NULL
         print(
             f"\nPipeline lookup template loaded: "
-            f"{lookup_query_template!r or 'NULL (auto-generate per table)'}"
+            f"{(lookup_query_template or 'NULL (auto-generate per table)')!r}"
         )
     else:
         print(
