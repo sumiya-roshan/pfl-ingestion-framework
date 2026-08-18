@@ -261,6 +261,23 @@ with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="Bronze") as
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Wait for in-flight Silver triggers
+# MAGIC
+# MAGIC Each table's Silver trigger runs in the background on its own thread pool
+# MAGIC (see IngestionOrchestrator._trigger_silver) and does not block Bronze. Block
+# MAGIC here until they all finish — otherwise dbutils.notebook.exit() below would
+# MAGIC tear down this command's execution context while Silver notebooks are still
+# MAGIC mid-flight, and Databricks cancels any nested dbutils.notebook.run() calls
+# MAGIC still attached to it (surfaces as UserCanceled on the Silver child runs).
+
+# COMMAND ----------
+
+print(f"\nWaiting for in-flight Silver triggers to finish...")
+silver_results = orchestrator.wait_for_silver()
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ### Results summary
 
 # COMMAND ----------
@@ -278,13 +295,32 @@ succeeded = [r for r in results if r["status"] == AUDIT_STATUS_SUCCESS]
 failed    = [r for r in results if r["status"] == AUDIT_STATUS_FAILED]
 print(f"Total: {len(results)} | ✅ Succeeded: {len(succeeded)} | ❌ Failed: {len(failed)}\n")
 
+if silver_results:
+    print(f"{'='*75}")
+    print(f"{'CONF ID':>8}  {'SILVER STATUS':<14}  TARGET")
+    print(f"{'='*75}")
+    for r in sorted(silver_results, key=lambda x: x["config_id"]):
+        icon = "✅" if r["status"] == "SUCCESS" else "❌"
+        print(f"{r['config_id']:>8}  {icon} {r['status']:<12}  {r.get('target', '')}")
+    print(f"{'='*75}")
+
+silver_failed = [r for r in silver_results if r["status"] == "FAILED"]
+print(
+    f"Silver — Total: {len(silver_results)} | "
+    f"✅ Succeeded: {len(silver_results) - len(silver_failed)} | ❌ Failed: {len(silver_failed)}\n"
+)
+
 # COMMAND ----------
 
-if failed:
-    failed_ids = [r["config_id"] for r in failed]
+if failed or silver_failed:
+    failed_ids       = [r["config_id"] for r in failed]
+    silver_failed_ids = [r["config_id"] for r in silver_failed]
     raise Exception(
-        f"{len(failed)} of {len(results)} ingestion object(s) FAILED. "
-        f"Check the audit table for details. Failed Config IDs: {failed_ids}"
+        f"{len(failed)} of {len(results)} ingestion object(s) FAILED "
+        f"(Config IDs: {failed_ids}); "
+        f"{len(silver_failed)} of {len(silver_results)} Silver trigger(s) FAILED "
+        f"(Config IDs: {silver_failed_ids}). "
+        f"Check the audit table and logs above for details."
     )
 
 dbutils.notebook.exit(f"SUCCESS: {len(succeeded)}/{len(results)} objects ingested.")
