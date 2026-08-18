@@ -31,14 +31,24 @@ class SilverProcessor:
         self.silver_notebook_path  = silver_notebook_path
         self.timeout_seconds       = timeout_seconds
 
-    def trigger(self, config_id: int, table_name: str) -> dict:
+    def trigger(
+        self,
+        config_id: int,
+        table_name: str,
+        config_master_id: int,
+        source_system_id: int,
+        landing_volume_path: str,
+    ) -> dict:
         """
         Runs the Silver notebook synchronously for one table and returns a result dict.
 
         The Silver notebook is expected to accept these widget parameters:
-          - config_id  : int    (identifies the ingestion config row)
-          - table_name : str    (the Bronze target table to process)
-
+          - config_id           : int    (identifies the ingestion config row)
+          - table_name          : str    (the Bronze target table to process)
+          - config_master_id    : int
+          - source_system_id    : int
+          - landing_volume_path : str
+          
         Returns dict with keys: config_id, name, status, error
         """
         log.info(
@@ -49,8 +59,11 @@ class SilverProcessor:
             self.silver_notebook_path,
             self.timeout_seconds,
             {
-                "config_id":  str(config_id),
-                "table_name": table_name,
+                "config_id":           str(config_id),
+                "table_name":          table_name,
+                "config_master_id":    str(config_master_id),
+                "source_system_id":    str(source_system_id),
+                "landing_volume_path": landing_volume_path or "",
             },
         )
 

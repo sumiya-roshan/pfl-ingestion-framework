@@ -87,6 +87,17 @@ class BronzeWriter:
         if not self.spark.catalog.tableExists(full_table_name):
             df.writeTo(full_table_name).using("delta").create()
         else:
+            # Align source schema to match target columns for Delta merge
+            # This prevents DELTA_MERGE_UNRESOLVED_EXPRESSION when target table
+            # has partition columns or extra columns (like ingest_date) not in source.
+            target_cols = self.spark.table(full_table_name).columns
+            for col in target_cols:
+                if col not in df.columns:
+                    if col.lower() == "ingest_date":
+                        df = df.withColumn(col, F.current_date())
+                    else:
+                        df = df.withColumn(col, F.lit(None))
+
             target = DeltaTable.forName(self.spark, full_table_name)
             condition = " AND ".join(
                 [f"target.{k} = source.{k}" for k in merge_keys]

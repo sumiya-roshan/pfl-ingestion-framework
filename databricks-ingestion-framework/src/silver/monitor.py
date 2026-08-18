@@ -13,11 +13,10 @@
 # MAGIC - Exits cleanly when all tables have been sent to Silver (or timeout is reached)
 # MAGIC
 # MAGIC **Databricks Job DAG:**
-# MAGIC ```
-# MAGIC  Task 1: main.py          ──► (Bronze ingestion, parallel tables)
-# MAGIC          ↑ NO dependency
-# MAGIC  Task 2: silver/monitor   ──► polls audit ──► triggers Silver Job per table
-# MAGIC ```
+# MAGIC *  Task 1: main.py          ──► (Bronze ingestion, parallel tables)
+# MAGIC *          ↑ NO dependency
+# MAGIC *  Task 2: silver/monitor   ──► polls audit ──► triggers Silver Job per table
+# MAGIC
 
 # COMMAND ----------
 
@@ -121,32 +120,46 @@ print(f"  job_run_id       : {root_run_id or 'NOT SET — fallback to 60-min loo
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Build in-memory tracking dict
-
-# COMMAND ----------
-
 print(f"  root_run_id (job execution ID): {root_run_id}")
 
 job_start_time = datetime.now(timezone.utc)
 
-# In-memory status table: one entry per table
-#   bronze_done : True when the audit table shows SUCCESS for this run
-#   silver_done : True after Silver Job has been triggered for this table
-tables_status = {
+# Resolve child config table FQN
+try:
+    master_rows = spark.table(CONFIG_MASTER_TABLE).filter(f"config_id = {config_master_id}").collect()
+    if master_rows:
+        m_row = master_rows[0].asDict()
+        child_table_fqn = f"{m_row.get('config_catalog_name')}.{m_row.get('config_schema_name')}.{m_row.get('config_table_name')}"
+    else:
+        child_table_fqn = ""
+except Exception as e:
+    print(f"Warning: Could not resolve child table FQN: {e}")
+    child_table_fqn = ""
+
+print(f"  child_table_fqn  : {child_table_fqn}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Build in-memory tracking dict
+
+# COMMAND ----------
+
+# In-memory status table: one entry per table, mapped by config_id
+pending_tables = {
     task.config_id: {
         "name":        task.source_object_name,
         "config_id":   task.config_id,
         "target_table": task.target_table or task.source_object_name,
-        "bronze_done": False,
-        "silver_done": False,
-        "silver_run_id": None,
     }
     for task in tasks
 }
 
+total_table_count = len(tasks)
+
 print("\nInitial tracking state:")
-for cid, info in tables_status.items():
-    print(f"  config_id={cid} | table='{info['name']}' | bronze_done=False | silver_done=False")
+for cid, info in pending_tables.items():
+    print(f"  config_id={cid} | table='{info['name']}' | status=PENDING")
 
 # COMMAND ----------
 
@@ -204,8 +217,15 @@ def trigger_silver(info: dict) -> dict:
     """
     config_id  = info["config_id"]
     table_name = info["target_table"]
+    landing_path = source_sys.landing_volume_path or dbutils.widgets.get("landing_volume_path") or ""
     try:
-        exit_value = processor.trigger(config_id=config_id, table_name=table_name)
+        exit_value = processor.trigger(
+            config_id=config_id,
+            table_name=table_name,
+            config_master_id=config_master_id,
+            source_system_id=source_system_id,
+            landing_volume_path=landing_path,
+        )
         return {
             "config_id": config_id,
             "name":      info["name"],
@@ -227,77 +247,74 @@ print(f"{'='*70}\n")
 
 with ThreadPoolExecutor(max_workers=silver_max_workers) as executor:
     pending_futures = {}   # future → info dict, for in-flight Silver triggers
+    in_flight_cids = set() # tracks config_ids currently processing
 
     while True:
         elapsed = time.monotonic() - start_time
 
         # ── Timeout guard ────────────────────────────────────────────────────
         if elapsed > timeout_seconds:
-            pending_names = [
-                v["name"] for v in tables_status.values()
-                if not v["silver_done"]
-            ]
             print(
                 f"\n Timeout reached after {timeout_minutes} min. "
-                f"Tables not yet Silver-triggered: {pending_names}"
+                f"Tables not yet Silver-triggered: {list(pending_tables.keys())}"
             )
             break
 
-        # ── Check each table that isn't Silver-done yet ───────────────────
-        for cid, info in tables_status.items():
-            if info["silver_done"]:
-                continue   # already handled
+        # ── Check each table that is still pending and not in-flight ──────────
+        for cid in list(pending_tables.keys()):
+            if cid in in_flight_cids:
+                continue
 
-            # Step 1: Is Bronze complete?
-            if not info["bronze_done"]:
-                if check_bronze_done(cid):
-                    info["bronze_done"] = True
-                    print(
-                        f"  ✅ Bronze done  — config_id={cid} table='{info['name']}' "
-                        f"— submitting Silver trigger..."
-                    )
-                    # Step 2: Submit Silver trigger to thread pool
-                    future = executor.submit(trigger_silver, info)
-                    pending_futures[future] = info
+            # Check if Bronze is complete
+            if check_bronze_done(cid):
+                info = pending_tables[cid]
+                print(
+                    f"  ✅ Bronze done  — config_id={cid} table='{info['name']}' — submitting Silver trigger..."
+                )
+                in_flight_cids.add(cid)
+                future = executor.submit(trigger_silver, info)
+                pending_futures[future] = info
 
         # ── Collect any completed Silver triggers ─────────────────────────
         done_futures = [f for f in list(pending_futures) if f.done()]
         for future in done_futures:
             info = pending_futures.pop(future)
+            cid = info["config_id"]
+            in_flight_cids.discard(cid)
+            
             try:
                 res = future.result()
             except Exception as exc:
                 res = {
-                    "config_id":     info["config_id"],
+                    "config_id":     cid,
                     "name":          info["name"],
                     "status":        "FAILED",
                     "silver_run_id": None,
                     "error":         str(exc),
                 }
-            tables_status[info["config_id"]]["silver_done"] = True
+            
+            # Remove table entry from the active mapping after silver processing is complete
+            if cid in pending_tables:
+                del pending_tables[cid]
+                
             results.append(res)   # ← must append before summary prints
             icon = "✅" if res["status"] == "TRIGGERED" else "❌"
             print(
-                f"  {icon} Silver {'triggered' if res['status'] == 'TRIGGERED' else 'FAILED'}  "
-                f"— config_id={info['config_id']} table='{info['name']}'"
+                f"  {icon} Silver {'triggered' if res['status'] == 'TRIGGERED' else 'FAILED'}  — config_id={cid} table='{info['name']}'"
             )
             if res["status"] == "FAILED" and res.get("error"):
-                print(f"     ↳ Error: {res['error']}")
+                print(f"     Error: {res['error']}")
 
 
-        # ── Exit condition: all tables Silver-done ────────────────────────
-        if all(v["silver_done"] for v in tables_status.values()):
-            print(f"\n All {len(tasks)} tables have been sent to the Silver Job.")
+        # ── Exit condition: all tables processed (mapping dictionary is empty) ──
+        if not pending_tables:
+            print(f"\n All {total_table_count} tables have been sent to the Silver Job.")
             break
 
         # ── Status heartbeat every poll interval ──────────────────────────
-        bronze_done_count = sum(1 for v in tables_status.values() if v["bronze_done"])
-        silver_done_count = sum(1 for v in tables_status.values() if v["silver_done"])
+        finished_count = total_table_count - len(pending_tables)
         print(
-            f"  ⏳ [{int(elapsed)}s elapsed] "
-            f"Bronze done: {bronze_done_count}/{len(tasks)} | "
-            f"Silver Finished: {silver_done_count}/{len(tasks)} | "
-            f"Sleeping {poll_interval_seconds}s..."
+            f"  ⏳ [{int(elapsed)}s elapsed] Silver Finished: {finished_count}/{total_table_count} | Pending/In-Flight: {len(pending_tables)} | Sleeping {poll_interval_seconds}s..."
         )
         time.sleep(poll_interval_seconds)
 
@@ -326,6 +343,5 @@ print(f"Total: {len(results)} |  Triggered: {len(triggered)} |  Failed: {len(fai
 if failed:
     failed_names = [r["name"] for r in failed]
     raise Exception(
-        f"{len(failed)} Silver trigger(s) FAILED: {failed_names}. "
-        f"Check logs above for details."
+        f"{len(failed)} Silver trigger(s) FAILED: {failed_names}. Check logs above for details."
     )

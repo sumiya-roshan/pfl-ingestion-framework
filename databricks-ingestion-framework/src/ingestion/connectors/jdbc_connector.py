@@ -142,21 +142,38 @@ class JdbcConnector(BaseConnector):
     # ── Public extract ────────────────────────────────────────────────────────
 
     def extract(self, watermark_start: Optional[str]) -> Tuple[DataFrame, Optional[str]]:
+        import time
+        retries = 3
+        delay = 5
+        last_exception = None
+
         options  = self._read_options()
         dbtable  = self._build_source_query(watermark_start)
 
-        df = (
-            self.spark.read.format("jdbc")
-            .options(**options)
-            .option("dbtable", dbtable)
-            .load()
+        for attempt in range(retries):
+            try:
+                df = (
+                    self.spark.read.format("jdbc")
+                    .options(**options)
+                    .option("dbtable", dbtable)
+                    .load()
+                )
+
+                max_watermark: Optional[str] = None
+                io = self.ingest_obj
+                if io.load_type == "INCREMENTAL" and io.incremental_column:
+                    # Spark performs the actual database read action here. 
+                    # Wrapping this ensures we catch transient connection dropouts.
+                    max_row = df.agg({io.incremental_column: "max"}).collect()
+                    if max_row and max_row[0][0] is not None:
+                        max_watermark = str(max_row[0][0])
+
+                return df, max_watermark
+            except Exception as exc:
+                last_exception = exc
+                if attempt < retries - 1:
+                    time.sleep(delay)
+
+        raise ConnectionError(
+            f"Failed to execute JDBC extraction after {retries} attempts due to transient error: {last_exception}"
         )
-
-        max_watermark: Optional[str] = None
-        io = self.ingest_obj
-        if io.load_type == "INCREMENTAL" and io.incremental_column:
-            max_row = df.agg({io.incremental_column: "max"}).collect()
-            if max_row and max_row[0][0] is not None:
-                max_watermark = str(max_row[0][0])
-
-        return df, max_watermark
