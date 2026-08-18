@@ -57,11 +57,12 @@ dbutils.widgets.text("config_master_id",             "",                        
 dbutils.widgets.text("source_system_id",              "",                                   "Source System ID")
 dbutils.widgets.text("target_catalog",                "hive_metastore",                     "Target Catalog")
 dbutils.widgets.text("pipeline_name",                 "",                                   "Pipeline Name")
-dbutils.widgets.text("job_run_id",                    "",                                   "Job Run ID — set to {{job.run_id}}")
-dbutils.widgets.text("environment",                   "dev",                                "Environment: dev | uat | prod")
-dbutils.widgets.text("audit_table",                   AUDIT_TABLE,                          "Audit Table (override)")
-dbutils.widgets.text("max_workers",                   "4",                                  "Max parallel lookup workers")
-dbutils.widgets.text("pipeline_lookup_config_table",  PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT, "pipeline_lookup_config FQN")
+dbutils.widgets.text("job_run_id",                 "",                                  "Job Run ID — set to {{job.run_id}}")
+dbutils.widgets.text("job_id",                     "",                                  "Job ID — set to {{job.id}}")
+dbutils.widgets.text("environment",                "dev",                               "Environment: dev | uat | prod")
+dbutils.widgets.text("audit_table",                AUDIT_TABLE,                         "Audit Table (override)")
+dbutils.widgets.text("max_workers",                "4",                                 "Max parallel lookup workers")
+dbutils.widgets.text("pipeline_lookup_config_table", PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT, "pipeline_lookup_config FQN")
 
 # COMMAND ----------
 
@@ -77,7 +78,16 @@ config_master_id  = int(config_master_id_raw)
 source_system_id  = int(source_system_id_raw)
 target_catalog    = dbutils.widgets.get("target_catalog")   or "hive_metastore"
 pipeline_name     = dbutils.widgets.get("pipeline_name")    or None
-job_run_id        = dbutils.widgets.get("job_run_id")       or "MANUAL"
+try:
+    job_run_id    = dbutils.widgets.get("job_run_id")       or "MANUAL"
+except Exception:
+    job_run_id    = "MANUAL"
+
+try:
+    job_id        = dbutils.widgets.get("job_id")           or "MANUAL"
+except Exception:
+    job_id        = "MANUAL"
+
 environment       = dbutils.widgets.get("environment")      or "dev"
 audit_table       = dbutils.widgets.get("audit_table")      or AUDIT_TABLE
 max_workers       = int(dbutils.widgets.get("max_workers")  or "4")
@@ -220,7 +230,10 @@ def get_databricks_job_context():
             return None
             
     databricks_url = get_context_value("apiUrl")
-    job_id = dbutils.widgets.get("job_id")
+    try:
+        job_id = dbutils.widgets.get("job_id")
+    except Exception:
+        job_id = None
 
     databricks_url = (
         f"{databricks_url}/#job/{job_id}"
