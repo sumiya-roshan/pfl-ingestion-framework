@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md
 # MAGIC # Source Lookup — Pre-Ingestion Row-Count Check
 # MAGIC
@@ -142,18 +146,7 @@ except Exception as l_exc:
     print(f"[INFO] Failed to fetch metadata from taskValues ({l_exc}) — falling back to database query.")
 
 if not loaded_from_metadata:
-    config_mgr = ConfigManager(
-        spark,
-        source_system_table = SOURCE_SYSTEM_TABLE,
-        config_master_table = CONFIG_MASTER_TABLE,
-        target_catalog      = target_catalog,
-    )
-
-    source_sys, tasks = config_mgr.get_active_tasks(
-        config_master_id = config_master_id,
-        source_system_id = source_system_id,
-        pipeline_name    = pipeline_name,
-    )
+    raise Exception("Testing Error: Failed to load task configurations from upstream get_tasks metadata!")
 
 print(f"\nResolved source : {source_sys.source_name} ({source_sys.source_type})")
 print(f"Active tasks    : {len(tasks)}")
@@ -408,5 +401,3 @@ dbutils.notebook.exit(
     f"Lookup complete — {len(active_config_ids)}/{len(tasks)} table(s) have data. "
     f"Skipped: {skipped_count}. Errors (fail-safe included): {error_count}."
 )
-
-# COMMAND ----------

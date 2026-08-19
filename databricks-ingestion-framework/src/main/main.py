@@ -193,48 +193,7 @@ except Exception as l_exc:
     print(f"[INFO] Failed to fetch metadata from taskValues ({l_exc}) — falling back to database query.")
 
 if not loaded_from_metadata:
-    print("\nDiscovering ingestion tasks from child config tables (database query)...")
-    config_mgr = ConfigManager(
-        spark,
-        source_system_table = SOURCE_SYSTEM_TABLE,
-        config_master_table = CONFIG_MASTER_TABLE,
-        target_catalog      = target_catalog,
-    )
-
-    source_sys, tasks = config_mgr.get_active_tasks(
-        config_master_id = config_master_id,
-        source_system_id = source_system_id,
-        pipeline_name    = pipeline_name,
-    )
-    
-    print(f"\nSource filters applied:")
-    print(f"  config_master_id : {config_master_id}")
-    print(f"  source_system_id : {source_system_id} -> Resolved to: {source_sys.source_name}")
-    print(f"  source_type      : {source_sys.source_type}")
-    print(f"  target_catalog   : {target_catalog}")
-    print(f"\nFound {len(tasks)} ingestion task(s) to run.")
-
-    # Apply Lookup Filter (from source_lookup task) using config IDs fallback
-    try:
-        active_ids_raw = dbutils.jobs.taskValues.get(
-            taskKey    = lookup_task_name,
-            key        = "active_config_ids",
-            default    = None,
-            debugValue = None,
-        )
-        if active_ids_raw and active_ids_raw.strip():
-            active_ids = {int(x) for x in active_ids_raw.split(",") if x.strip()}
-            before_count = len(tasks)
-            tasks = [t for t in tasks if t.config_id in active_ids]
-            print(
-                f"\nLookup filter applied: {before_count} active task(s) → "
-                f"{len(tasks)} task(s) have data in source "
-                f"({before_count - len(tasks)} skipped by lookup)."
-            )
-        else:
-            print("\nNo lookup filter (taskValues 'active_config_ids' is empty or absent) — running all active tasks.")
-    except Exception as _lkp_exc:
-        print(f"\ntaskValues unavailable ({_lkp_exc}) — running all active tasks (standalone mode).")
+    raise Exception("Testing Error: Failed to load task configurations from upstream get_tasks metadata!")
 
 if not tasks:
     dbutils.notebook.exit(
