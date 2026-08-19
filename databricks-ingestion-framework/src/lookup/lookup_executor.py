@@ -140,50 +140,66 @@ class LookupExecutor:
         Dispatches to JDBC, MongoDB, or file-based strategy.
         Always returns a result dict — never raises (fail-safe).
         """
+        import time
+
         config_id    = task.config_id
         object_name  = task.source_object_name
 
         # Resolve the per-table query from the pipeline-level template
         resolved_query = self._resolve_query_for_task(task)
 
-        try:
-            # Instantiate the actual connector using the factory
-            connector = get_connector(self.spark, source_sys, task, self.secrets)
+        max_retries    = int(getattr(source_sys, "retry_count", 0) or 0)
+        retry_interval = int(getattr(source_sys, "retry_interval", 0) or 0)
 
-            if isinstance(connector, JdbcConnector):
-                count = self._lookup_jdbc(connector, resolved_query)
-            elif isinstance(connector, MongoConnector):
-                count = self._lookup_mongo(connector)
-            else:
-                # File-based (S3, SFTP, etc.) — always included
+        attempt = 0
+        while True:
+            try:
+                # Instantiate the actual connector using the factory
+                connector = get_connector(self.spark, source_sys, task, self.secrets)
+
+                if isinstance(connector, JdbcConnector):
+                    count = self._lookup_jdbc(connector, resolved_query)
+                elif isinstance(connector, MongoConnector):
+                    count = self._lookup_mongo(connector)
+                else:
+                    # File-based (S3, SFTP, etc.) — always included
+                    self.logger.info(
+                        f"[LookupExecutor] config_id={config_id} ({object_name}) "
+                        f"— non-queryable source ({type(connector).__name__}), always included."
+                    )
+                    count = 1
+
+                included = count > 0
                 self.logger.info(
-                    f"[LookupExecutor] config_id={config_id} ({object_name}) "
-                    f"— non-queryable source ({type(connector).__name__}), always included."
+                    f"[LookupExecutor] config_id={config_id} ({object_name}) → "
+                    f"count={count}  included={included}"
                 )
-                count = 1
+                return {
+                    "config_id":          config_id,
+                    "source_object_name": object_name,
+                    "resolved_query":     resolved_query,
+                    "count":              count,
+                    "included":           included,
+                    "error":              None,
+                }
 
-            included = count > 0
-            self.logger.info(
-                f"[LookupExecutor] config_id={config_id} ({object_name}) → "
-                f"count={count}  included={included}"
-            )
-            return {
-                "config_id":          config_id,
-                "source_object_name": object_name,
-                "resolved_query":     resolved_query,
-                "count":              count,
-                "included":           included,
-                "error":              None,
-            }
+            except Exception as exc:
+                if attempt >= max_retries:
+                    self.logger.warning(
+                        f"[LookupExecutor] Lookup FAILED for config_id={config_id} "
+                        f"({object_name}) after {attempt} retries: {exc}. Including table (fail-safe)."
+                    )
+                    return self._make_failsafe_result(
+                        task, resolved_query=resolved_query, error=str(exc)
+                    )
 
-        except Exception as exc:
-            self.logger.warning(
-                f"[LookupExecutor] Lookup FAILED for config_id={config_id} "
-                f"({object_name}): {exc}. Including table (fail-safe)."
-            )
-            return self._make_failsafe_result(
-                task, resolved_query=resolved_query, error=str(exc)
-            )
+                attempt += 1
+                self.logger.warning(
+                    f"[LookupExecutor] Lookup attempt {attempt}/{max_retries} FAILED for config_id={config_id} "
+                    f"({object_name}): {exc}. Retrying in {retry_interval}s..."
+                )
+                if retry_interval > 0:
+                    time.sleep(retry_interval)
 
     # ── Strategy: JDBC ───────────────────────────────────────────────────────
 

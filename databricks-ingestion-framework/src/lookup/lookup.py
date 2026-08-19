@@ -171,26 +171,42 @@ if not tasks:
 # COMMAND ----------
 
 lookup_query_template: str = None   # None → auto-generate per table
+max_workers_raw = None
+max_workers_silver = None
 
 try:
+    cfg_df = spark.table(lookup_cfg_table)
+    columns = cfg_df.columns
+    
+    select_cols = ["lookup_query_template"]
+    has_max_workers_cols = "max_workers_raw" in columns and "max_workers_silver" in columns
+    if has_max_workers_cols:
+        select_cols.extend(["max_workers_raw", "max_workers_silver"])
+
     lookup_cfg_rows = (
-        spark.table(lookup_cfg_table)
-        .filter(
+        cfg_df.filter(
             f"pipeline_name = '{pipeline_name}' "
             f"AND config_master_id = {config_master_id} "
             f"AND is_active = true"
         )
-        .select("lookup_query_template")
+        .select(*select_cols)
         .limit(1)      # one row per pipeline (enforced by UNIQUE constraint)
         .collect()
     )
 
     if lookup_cfg_rows:
-        lookup_query_template = lookup_cfg_rows[0]["lookup_query_template"]  # may be NULL
+        row_dict = lookup_cfg_rows[0].asDict()
+        lookup_query_template = row_dict.get("lookup_query_template")
+        if has_max_workers_cols:
+            max_workers_raw = row_dict.get("max_workers_raw")
+            max_workers_silver = row_dict.get("max_workers_silver")
+        
         print(
             f"\nPipeline lookup template loaded: "
             f"{(lookup_query_template or 'NULL (auto-generate per table)')!r}"
         )
+        if has_max_workers_cols:
+            print(f"Loaded from config: max_workers_raw={max_workers_raw}, max_workers_silver={max_workers_silver}")
     else:
         print(
             f"\n[INFO] No row in {lookup_cfg_table} for pipeline='{pipeline_name}' "
@@ -223,10 +239,14 @@ executor = LookupExecutor(
     lookup_query_template = lookup_query_template,   # None → auto-gen
 )
 
+# Route max_workers to max_workers_raw if configured in DB, else fallback to widget value
+lookup_max_workers = int(max_workers_raw) if max_workers_raw is not None else max_workers
+print(f"Starting lookup checks with {lookup_max_workers} worker threads.")
+
 lookup_results = executor.run_all(
     source_sys  = source_sys,
     tasks       = tasks,
-    max_workers = max_workers,
+    max_workers = lookup_max_workers,
 )
 
 # COMMAND ----------
@@ -376,7 +396,9 @@ print(f"Publishing active_config_ids → '{active_ids_str}'")
 filtered_tasks = [t for t in tasks if t.config_id in active_config_ids]
 filtered_payload = {
     "source_sys": source_sys.to_dict(),
-    "tasks": [t.to_dict() for t in filtered_tasks]
+    "tasks": [t.to_dict() for t in filtered_tasks],
+    "max_workers_raw": max_workers_raw,
+    "max_workers_silver": max_workers_silver
 }
 filtered_payload_str = json.dumps(filtered_payload)
 

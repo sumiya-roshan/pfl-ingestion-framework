@@ -189,6 +189,12 @@ try:
         tasks = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
         loaded_from_metadata = True
         print(f"Loaded filtered tasks metadata from upstream task: {lookup_task_name}")
+
+        # Override max_workers with max_workers_raw from DB lookup config if configured
+        db_max_workers_raw = payload.get("max_workers_raw")
+        if db_max_workers_raw is not None:
+            max_workers = int(db_max_workers_raw)
+            print(f"Using max_workers_raw from database configuration: {max_workers}")
 except Exception as l_exc:
     print(f"[INFO] Failed to fetch metadata from taskValues ({l_exc}) — falling back to database query.")
 
