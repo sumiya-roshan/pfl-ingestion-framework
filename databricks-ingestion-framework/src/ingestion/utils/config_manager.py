@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Reads config_source_system and dynamically routes to child ingestion config tables
 via the config_master table. Returns typed config objects.
@@ -62,6 +63,13 @@ class SourceSystemConfig:
 
     landing_volume_path: Optional[str]
 
+    def to_dict(self) -> dict:
+        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> SourceSystemConfig:
+        return cls(**d)
+
 
 @dataclass
 class IngestionTaskConfig:
@@ -111,6 +119,13 @@ class IngestionTaskConfig:
     @property
     def effective_delta_layer(self) -> str:
         return (self.delta_layer or "BRONZE").upper()
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> IngestionTaskConfig:
+        return cls(**d)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

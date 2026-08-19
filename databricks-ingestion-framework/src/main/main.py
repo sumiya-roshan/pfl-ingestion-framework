@@ -31,17 +31,19 @@ dbutils.library.restartPython()
 import sys
 sys.path.append("..")
 
+import json
 from ingestion.utils.config_manager import (
     AUDIT_STATUS_FAILED,
     AUDIT_STATUS_SUCCESS,
     AUDIT_STATUS_SKIPPED,
     ConfigManager,
+    SourceSystemConfig,
+    IngestionTaskConfig,
     SOURCE_SYSTEM_TABLE,
     CONFIG_MASTER_TABLE,
     AUDIT_TABLE,
 )
 from ingestion.utils.orchestrator import IngestionOrchestrator
-from ingestion.utils.config_manager import IngestionTaskConfig
 
 # COMMAND ----------
 
@@ -60,6 +62,7 @@ dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Ba
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
 dbutils.widgets.text("max_workers",         "4",              "Max Parallel workers")
+dbutils.widgets.text("lookup_task_name",     "source_lookup",  "Upstream Lookup Task Name")
 
 # COMMAND ----------
 
@@ -92,6 +95,7 @@ landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
 max_workers          = int(dbutils.widgets.get("max_workers")      or "4")
+lookup_task_name     = dbutils.widgets.get("lookup_task_name")     or "source_lookup"
 
 
 # COMMAND ----------
@@ -167,66 +171,70 @@ print(f"pipeline_name from widget: '{pipeline_name}'")
 
 # COMMAND ----------
 
-config_mgr = ConfigManager(
-    spark,
-    source_system_table = SOURCE_SYSTEM_TABLE,
-    config_master_table = CONFIG_MASTER_TABLE,
-    target_catalog      = target_catalog,
-)
+# source_sys = None
+tasks = []
+loaded_from_metadata = False
 
-# 1. Fetch source system creds + resolve source_name
-# 2. Look up the correct child config table from config_master
-# 3. Return all active rows for that source_name as IngestionTaskConfig objects
-source_sys, tasks = config_mgr.get_active_tasks(
-    config_master_id = config_master_id,
-    source_system_id = source_system_id,
-    pipeline_name    = pipeline_name,
-)
-
-print(f"\nSource filters applied:")
-print(f"  config_master_id : {config_master_id}")
-print(f"  source_system_id : {source_system_id} -> Resolved to: {source_sys.source_name}")
-print(f"  source_type      : {source_sys.source_type}")
-print(f"  target_catalog   : {target_catalog}")
-print(f"\nFound {len(tasks)} ingestion task(s) to run.")
-
-if not tasks:
-    dbutils.notebook.exit("No active ingestion tasks found for the given source filters.")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Apply Lookup Filter (from source_lookup task)
-# MAGIC
-# MAGIC If the `source_lookup` task ran before this notebook in the job, it publishes
-# MAGIC a comma-separated list of config IDs that have data in the source.
-# MAGIC Tables with 0 rows are excluded here — they already have a SKIPPED audit record.
-# MAGIC
-# MAGIC **Standalone mode:** If `taskValues` is unavailable (notebook run outside a job),
-# MAGIC this block is skipped and all active tasks are processed as before.
-
-# COMMAND ----------
-
+# 1. Try reading the fully filtered task configurations from Task 1 metadata
 try:
-    active_ids_raw = dbutils.jobs.taskValues.get(
-        taskKey    = "source_lookup",
-        key        = "active_config_ids",
+    filtered_tasks_raw = dbutils.jobs.taskValues.get(
+        taskKey    = lookup_task_name,
+        key        = "filtered_tasks_metadata",
         default    = None,
         debugValue = None,
     )
-    if active_ids_raw and active_ids_raw.strip():
-        active_ids = {int(x) for x in active_ids_raw.split(",") if x.strip()}
-        before_count = len(tasks)
-        tasks = [t for t in tasks if t.config_id in active_ids]
-        print(
-            f"\nLookup filter applied: {before_count} active task(s) → "
-            f"{len(tasks)} task(s) have data in source "
-            f"({before_count - len(tasks)} skipped by lookup)."
+    if filtered_tasks_raw and filtered_tasks_raw.strip():
+        payload = json.loads(filtered_tasks_raw)
+        source_sys = SourceSystemConfig.from_dict(payload["source_sys"])
+        tasks = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
+        loaded_from_metadata = True
+        print(f"Loaded filtered tasks metadata from upstream task: {lookup_task_name}")
+except Exception as l_exc:
+    print(f"[INFO] Failed to fetch metadata from taskValues ({l_exc}) — falling back to database query.")
+
+if not loaded_from_metadata:
+    print("\nDiscovering ingestion tasks from child config tables (database query)...")
+    config_mgr = ConfigManager(
+        spark,
+        source_system_table = SOURCE_SYSTEM_TABLE,
+        config_master_table = CONFIG_MASTER_TABLE,
+        target_catalog      = target_catalog,
+    )
+
+    source_sys, tasks = config_mgr.get_active_tasks(
+        config_master_id = config_master_id,
+        source_system_id = source_system_id,
+        pipeline_name    = pipeline_name,
+    )
+    
+    print(f"\nSource filters applied:")
+    print(f"  config_master_id : {config_master_id}")
+    print(f"  source_system_id : {source_system_id} -> Resolved to: {source_sys.source_name}")
+    print(f"  source_type      : {source_sys.source_type}")
+    print(f"  target_catalog   : {target_catalog}")
+    print(f"\nFound {len(tasks)} ingestion task(s) to run.")
+
+    # Apply Lookup Filter (from source_lookup task) using config IDs fallback
+    try:
+        active_ids_raw = dbutils.jobs.taskValues.get(
+            taskKey    = lookup_task_name,
+            key        = "active_config_ids",
+            default    = None,
+            debugValue = None,
         )
-    else:
-        print("\nNo lookup filter (taskValues 'active_config_ids' is empty or absent) — running all active tasks.")
-except Exception as _lkp_exc:
-    print(f"\ntaskValues unavailable ({_lkp_exc}) — running all active tasks (standalone mode).")
+        if active_ids_raw and active_ids_raw.strip():
+            active_ids = {int(x) for x in active_ids_raw.split(",") if x.strip()}
+            before_count = len(tasks)
+            tasks = [t for t in tasks if t.config_id in active_ids]
+            print(
+                f"\nLookup filter applied: {before_count} active task(s) → "
+                f"{len(tasks)} task(s) have data in source "
+                f"({before_count - len(tasks)} skipped by lookup)."
+            )
+        else:
+            print("\nNo lookup filter (taskValues 'active_config_ids' is empty or absent) — running all active tasks.")
+    except Exception as _lkp_exc:
+        print(f"\ntaskValues unavailable ({_lkp_exc}) — running all active tasks (standalone mode).")
 
 if not tasks:
     dbutils.notebook.exit(

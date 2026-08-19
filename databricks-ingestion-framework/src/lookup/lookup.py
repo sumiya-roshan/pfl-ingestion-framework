@@ -32,8 +32,11 @@ dbutils.library.restartPython()
 import sys
 sys.path.append("..")
 
+import json
 from ingestion.utils.config_manager import (
     ConfigManager,
+    SourceSystemConfig,
+    IngestionTaskConfig,
     SOURCE_SYSTEM_TABLE,
     CONFIG_MASTER_TABLE,
     AUDIT_TABLE,
@@ -63,6 +66,7 @@ dbutils.widgets.text("environment",                "dev",                       
 dbutils.widgets.text("audit_table",                AUDIT_TABLE,                         "Audit Table (override)")
 dbutils.widgets.text("max_workers",                "4",                                 "Max parallel lookup workers")
 dbutils.widgets.text("pipeline_lookup_config_table", PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT, "pipeline_lookup_config FQN")
+dbutils.widgets.text("tasks_metadata_task_name",    "get_tasks",                          "Task name for active tasks metadata")
 
 # COMMAND ----------
 
@@ -95,6 +99,7 @@ lookup_cfg_table  = (
     dbutils.widgets.get("pipeline_lookup_config_table")
     or PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT
 )
+tasks_metadata_task_name = dbutils.widgets.get("tasks_metadata_task_name") or "get_tasks"
 
 if not pipeline_name:
     dbutils.notebook.exit("Error: pipeline_name widget is required.")
@@ -106,26 +111,49 @@ print(f"job_run_id       : {job_run_id}")
 print(f"environment      : {environment}")
 print(f"max_workers      : {max_workers}")
 print(f"lookup_cfg_table : {lookup_cfg_table}")
+print(f"metadata_task    : {tasks_metadata_task_name}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Load Active Ingestion Tasks (same as main.py)
+# MAGIC ### Load Active Ingestion Tasks (from Task 0 taskValues or ConfigManager fallback)
 
 # COMMAND ----------
 
-config_mgr = ConfigManager(
-    spark,
-    source_system_table = SOURCE_SYSTEM_TABLE,
-    config_master_table = CONFIG_MASTER_TABLE,
-    target_catalog      = target_catalog,
-)
+source_sys = None
+tasks = []
+loaded_from_metadata = False
 
-source_sys, tasks = config_mgr.get_active_tasks(
-    config_master_id = config_master_id,
-    source_system_id = source_system_id,
-    pipeline_name    = pipeline_name,
-)
+# Try reading from upstream Task 0 metadata
+try:
+    active_tasks_raw = dbutils.jobs.taskValues.get(
+        taskKey    = tasks_metadata_task_name,
+        key        = "active_tasks_metadata",
+        default    = None,
+        debugValue = None,
+    )
+    if active_tasks_raw and active_tasks_raw.strip():
+        payload = json.loads(active_tasks_raw)
+        source_sys = SourceSystemConfig.from_dict(payload["source_sys"])
+        tasks = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
+        loaded_from_metadata = True
+        print(f"Loaded active tasks metadata from upstream task: {tasks_metadata_task_name}")
+except Exception as l_exc:
+    print(f"[INFO] Failed to fetch metadata from taskValues ({l_exc}) — falling back to database query.")
+
+if not loaded_from_metadata:
+    config_mgr = ConfigManager(
+        spark,
+        source_system_table = SOURCE_SYSTEM_TABLE,
+        config_master_table = CONFIG_MASTER_TABLE,
+        target_catalog      = target_catalog,
+    )
+
+    source_sys, tasks = config_mgr.get_active_tasks(
+        config_master_id = config_master_id,
+        source_system_id = source_system_id,
+        pipeline_name    = pipeline_name,
+    )
 
 print(f"\nResolved source : {source_sys.source_name} ({source_sys.source_type})")
 print(f"Active tasks    : {len(tasks)}")
@@ -345,15 +373,23 @@ print(f"{'='*85}\n")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Publish Active Config IDs to Task 2 (main.py) via taskValues
+# MAGIC ### Publish Active Config IDs & Filtered Tasks to Task 2 (main.py) via taskValues
 
 # COMMAND ----------
 
 active_ids_str = ",".join(str(cid) for cid in sorted(active_config_ids))
 print(f"Publishing active_config_ids → '{active_ids_str}'")
 
+filtered_tasks = [t for t in tasks if t.config_id in active_config_ids]
+filtered_payload = {
+    "source_sys": source_sys.to_dict(),
+    "tasks": [t.to_dict() for t in filtered_tasks]
+}
+filtered_payload_str = json.dumps(filtered_payload)
+
 try:
     dbutils.jobs.taskValues.set(key="active_config_ids", value=active_ids_str)
+    dbutils.jobs.taskValues.set(key="filtered_tasks_metadata", value=filtered_payload_str)
     print("taskValues.set() succeeded.")
 except Exception as e:
     # Running outside a job (standalone notebook run) — not an error.

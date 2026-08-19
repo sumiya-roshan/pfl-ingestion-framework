@@ -189,7 +189,8 @@ class LookupExecutor:
 
     def _lookup_jdbc(self, connector: JdbcConnector, resolved_query: str) -> int:
         """
-        Run the resolved COUNT query via JDBC and return the integer result.
+        Run the resolved query via JDBC and return 1 if any row is collected (data exists),
+        or 0 if no row is collected.
         Reuses the connector's solved connection options (driver, credentials, url).
         """
         # Call the connector's helper to resolve JDBC configuration parameters
@@ -205,14 +206,13 @@ class LookupExecutor:
         row = df.collect()
         if not row:
             return 0
-        count_value = row[0][0]
-        return int(count_value) if count_value is not None else 0
+        return 1
 
     # ── Strategy: MongoDB ────────────────────────────────────────────────────
 
     def _lookup_mongo(self, connector: MongoConnector) -> int:
         """
-        Count documents in the MongoDB collection using PyMongo.
+        Check if the MongoDB collection contains any documents using find_one().
         Reuses the connector's solved URI, database, and collection properties.
         """
         try:
@@ -230,7 +230,8 @@ class LookupExecutor:
 
         client = pymongo.MongoClient(uri)
         try:
-            return int(client[database][collection].count_documents({}))
+            doc = client[database][collection].find_one()
+            return 1 if doc is not None else 0
         finally:
             client.close()
 
@@ -239,24 +240,27 @@ class LookupExecutor:
     def _resolve_query_for_task(self, task) -> str:
         """
         Apply the pipeline-level lookup_query_template to a specific task by
-        substituting the {schema} / {table} placeholders.
+        substituting the {schema} / {table} / {key_column} placeholders.
 
         Placeholder support (all case-insensitive):
             {schema}             → task.source_schema  (empty string if NULL)
             {source_schema}      → same
             {table}              → task.source_object_name
             {source_object_name} → same
+            {key_column}         → task.primary_key_cols (or '1' if NULL)
+            {key_columns}        → same
 
         If the template is None, auto-generates:
-            SELECT COUNT(*) FROM {schema_prefix}{table}
+            SELECT {key_cols} FROM {schema_prefix}{table} LIMIT 1
         where schema_prefix is "{schema}." when source_schema is not NULL.
         """
         schema = task.source_schema or ""
         table  = task.source_object_name or ""
+        key_cols = task.primary_key_cols or "1"
 
         if not self.lookup_query_template:
             schema_prefix = f"{schema}." if schema else ""
-            return f"SELECT COUNT(*) FROM {schema_prefix}{table}"
+            return f"SELECT {key_cols} FROM {schema_prefix}{table} LIMIT 1"
 
         resolved = self.lookup_query_template
         for placeholder, value in [
@@ -264,6 +268,8 @@ class LookupExecutor:
             ("{schema}",             schema),
             ("{source_object_name}", table),
             ("{table}",              table),
+            ("{key_column}",         key_cols),
+            ("{key_columns}",        key_cols),
         ]:
             resolved = resolved.replace(placeholder, value)
             resolved = resolved.replace(placeholder.upper(), value)
