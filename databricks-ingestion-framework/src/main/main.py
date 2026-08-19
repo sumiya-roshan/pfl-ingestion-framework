@@ -62,7 +62,6 @@ dbutils.widgets.text("job_run_id",          "",               "Job Run ID (requi
 dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Base Path (blank = skip landing write)")
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
-dbutils.widgets.text("max_workers",         "4",              "Max Parallel workers")
 dbutils.widgets.text("lookup_task_name",     "source_lookup",  "Upstream Lookup Task Name")
 
 # COMMAND ----------
@@ -95,8 +94,8 @@ if not job_run_id:
 landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
-max_workers          = int(dbutils.widgets.get("max_workers")      or "4")
 lookup_task_name     = dbutils.widgets.get("lookup_task_name")     or "source_lookup"
+max_workers          = 4  # Default fallback if not provided in taskValues metadata
 
 
 # COMMAND ----------
@@ -190,6 +189,12 @@ try:
         tasks = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
         loaded_from_metadata = True
         print(f"Loaded filtered tasks metadata from upstream task: {lookup_task_name}")
+
+        # Override max_workers with max_workers_raw from DB lookup config if configured
+        db_max_workers_raw = payload.get("max_workers_raw")
+        if db_max_workers_raw is not None:
+            max_workers = int(db_max_workers_raw)
+            print(f"Using max_workers_raw from database configuration: {max_workers}")
 except Exception as l_exc:
     print(f"[INFO] Failed to fetch metadata from taskValues ({l_exc}) — falling back to database query.")
 

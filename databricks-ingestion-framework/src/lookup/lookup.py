@@ -68,7 +68,6 @@ dbutils.widgets.text("job_run_id",                 "",                          
 dbutils.widgets.text("job_id",                     "",                                  "Job ID — set to {{job.id}}")
 dbutils.widgets.text("environment",                "dev",                               "Environment: dev | uat | prod")
 dbutils.widgets.text("audit_table",                AUDIT_TABLE,                         "Audit Table (override)")
-dbutils.widgets.text("max_workers",                "4",                                 "Max parallel lookup workers")
 dbutils.widgets.text("pipeline_lookup_config_table", PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT, "pipeline_lookup_config FQN")
 dbutils.widgets.text("tasks_metadata_task_name",    "get_tasks",                          "Task name for active tasks metadata")
 
@@ -98,7 +97,6 @@ except Exception:
 
 environment       = dbutils.widgets.get("environment")      or "dev"
 audit_table       = dbutils.widgets.get("audit_table")      or AUDIT_TABLE
-max_workers       = int(dbutils.widgets.get("max_workers")  or "4")
 lookup_cfg_table  = (
     dbutils.widgets.get("pipeline_lookup_config_table")
     or PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT
@@ -113,7 +111,6 @@ print(f"source_system_id : {source_system_id}")
 print(f"pipeline_name    : {pipeline_name}")
 print(f"job_run_id       : {job_run_id}")
 print(f"environment      : {environment}")
-print(f"max_workers      : {max_workers}")
 print(f"lookup_cfg_table : {lookup_cfg_table}")
 print(f"metadata_task    : {tasks_metadata_task_name}")
 
@@ -171,26 +168,40 @@ if not tasks:
 # COMMAND ----------
 
 lookup_query_template: str = None   # None → auto-generate per table
+max_workers_raw = None
 
 try:
+    cfg_df = spark.table(lookup_cfg_table)
+    columns = cfg_df.columns
+    
+    select_cols = ["lookup_query_template"]
+    has_max_workers_cols = "max_workers_raw" in columns
+    if has_max_workers_cols:
+        select_cols.extend(["max_workers_raw"])
+
     lookup_cfg_rows = (
-        spark.table(lookup_cfg_table)
-        .filter(
+        cfg_df.filter(
             f"pipeline_name = '{pipeline_name}' "
             f"AND config_master_id = {config_master_id} "
             f"AND is_active = true"
         )
-        .select("lookup_query_template")
+        .select(*select_cols)
         .limit(1)      # one row per pipeline (enforced by UNIQUE constraint)
         .collect()
     )
 
     if lookup_cfg_rows:
-        lookup_query_template = lookup_cfg_rows[0]["lookup_query_template"]  # may be NULL
+        row_dict = lookup_cfg_rows[0].asDict()
+        lookup_query_template = row_dict.get("lookup_query_template")
+        if has_max_workers_cols:
+            max_workers_raw = row_dict.get("max_workers_raw")
+        
         print(
             f"\nPipeline lookup template loaded: "
             f"{(lookup_query_template or 'NULL (auto-generate per table)')!r}"
         )
+        if has_max_workers_cols:
+            print(f"Loaded from config: max_workers_raw={max_workers_raw}")
     else:
         print(
             f"\n[INFO] No row in {lookup_cfg_table} for pipeline='{pipeline_name}' "
@@ -223,10 +234,14 @@ executor = LookupExecutor(
     lookup_query_template = lookup_query_template,   # None → auto-gen
 )
 
+# Route max_workers to max_workers_raw if configured in DB, else default to 4
+lookup_max_workers = int(max_workers_raw) if max_workers_raw is not None else 4
+print(f"Starting lookup checks with {lookup_max_workers} worker threads.")
+
 lookup_results = executor.run_all(
     source_sys  = source_sys,
     tasks       = tasks,
-    max_workers = max_workers,
+    max_workers = lookup_max_workers,
 )
 
 # COMMAND ----------
@@ -376,7 +391,8 @@ print(f"Publishing active_config_ids → '{active_ids_str}'")
 filtered_tasks = [t for t in tasks if t.config_id in active_config_ids]
 filtered_payload = {
     "source_sys": source_sys.to_dict(),
-    "tasks": [t.to_dict() for t in filtered_tasks]
+    "tasks": [t.to_dict() for t in filtered_tasks],
+    "max_workers_raw": max_workers_raw,
 }
 filtered_payload_str = json.dumps(filtered_payload)
 
