@@ -61,7 +61,6 @@ dbutils.widgets.text("job_run_id",          "",               "Job Run ID (requi
 dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Base Path (blank = skip landing write)")
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
-dbutils.widgets.text("max_workers",         "4",              "Max Parallel workers")
 dbutils.widgets.text("lookup_task_name",     "source_lookup",  "Upstream Lookup Task Name")
 
 # COMMAND ----------
@@ -94,8 +93,8 @@ if not job_run_id:
 landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
-max_workers          = int(dbutils.widgets.get("max_workers")      or "4")
 lookup_task_name     = dbutils.widgets.get("lookup_task_name")     or "source_lookup"
+max_workers          = 4  # Default fallback if not provided in taskValues metadata
 
 
 # COMMAND ----------

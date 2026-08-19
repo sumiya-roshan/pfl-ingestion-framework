@@ -68,7 +68,6 @@ dbutils.widgets.text("job_run_id",                 "",                          
 dbutils.widgets.text("job_id",                     "",                                  "Job ID — set to {{job.id}}")
 dbutils.widgets.text("environment",                "dev",                               "Environment: dev | uat | prod")
 dbutils.widgets.text("audit_table",                AUDIT_TABLE,                         "Audit Table (override)")
-dbutils.widgets.text("max_workers",                "4",                                 "Max parallel lookup workers")
 dbutils.widgets.text("pipeline_lookup_config_table", PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT, "pipeline_lookup_config FQN")
 dbutils.widgets.text("tasks_metadata_task_name",    "get_tasks",                          "Task name for active tasks metadata")
 
@@ -98,7 +97,6 @@ except Exception:
 
 environment       = dbutils.widgets.get("environment")      or "dev"
 audit_table       = dbutils.widgets.get("audit_table")      or AUDIT_TABLE
-max_workers       = int(dbutils.widgets.get("max_workers")  or "4")
 lookup_cfg_table  = (
     dbutils.widgets.get("pipeline_lookup_config_table")
     or PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT
@@ -113,7 +111,6 @@ print(f"source_system_id : {source_system_id}")
 print(f"pipeline_name    : {pipeline_name}")
 print(f"job_run_id       : {job_run_id}")
 print(f"environment      : {environment}")
-print(f"max_workers      : {max_workers}")
 print(f"lookup_cfg_table : {lookup_cfg_table}")
 print(f"metadata_task    : {tasks_metadata_task_name}")
 
@@ -237,8 +234,8 @@ executor = LookupExecutor(
     lookup_query_template = lookup_query_template,   # None → auto-gen
 )
 
-# Route max_workers to max_workers_raw if configured in DB, else fallback to widget value
-lookup_max_workers = int(max_workers_raw) if max_workers_raw is not None else max_workers
+# Route max_workers to max_workers_raw if configured in DB, else default to 4
+lookup_max_workers = int(max_workers_raw) if max_workers_raw is not None else 4
 print(f"Starting lookup checks with {lookup_max_workers} worker threads.")
 
 lookup_results = executor.run_all(
