@@ -72,9 +72,11 @@ class IngestionOrchestrator:
         self.bronze_writer = BronzeWriter(spark)
         self.logger        = get_logger(environment=environment)
 
-        # Silver trigger: fires on its own thread pool right after a table's Bronze
-        # audit SUCCESS, decoupled from the Bronze thread pool so one table's Silver
-        # run never blocks another table's Bronze run. Disabled when no path is given.
+        # Silver trigger: fires on its own thread pool right after a table's S3
+        # landing write completes, decoupled from the Bronze thread pool so one
+        # table's Silver run never blocks another table's Bronze run (or even that
+        # same table's own Bronze Delta write, which starts right after). Disabled
+        # when no path is given.
         self.silver_processor = (
             SilverProcessor(dbutils, silver_notebook_path, silver_notebook_timeout)
             if silver_notebook_path else None
@@ -177,6 +179,33 @@ class IngestionOrchestrator:
                     f"[{run_id}] Landing write → {landing_path} ({rows_read} rows, format={fmt})"
                 )
 
+                # ── Trigger Silver, in parallel, as soon as the S3 write is done ──
+                # Runs on its own thread pool — this table's Bronze Delta write (below)
+                # starts immediately without waiting for Silver to finish.
+                if self.silver_processor:
+                    silver_schema = f"{ingest_obj.target_schema}_silver"
+                    print(
+                        f"[SILVER] {threading.current_thread().name} submitting trigger for "
+                        f"config_id={ingest_obj.config_id} landing_path='{landing_path}' "
+                        f"→ {ingest_obj.target_catalog}.{silver_schema}.{ingest_obj.target_table} "
+                        f"(Bronze thread continues immediately — does not wait for Silver)"
+                    )
+                    future = self._silver_executor.submit(
+                        self._trigger_silver,
+                        config_id           = ingest_obj.config_id,
+                        landing_path        = landing_path,
+                        file_format         = fmt,
+                        silver_catalog      = ingest_obj.target_catalog,
+                        silver_schema       = silver_schema,
+                        silver_table        = ingest_obj.target_table,
+                        source_schema       = ingest_obj.source_schema,
+                        source_object_name  = ingest_obj.source_object_name,
+                        load_type           = ingest_obj.load_type,
+                        primary_key_cols    = ingest_obj.primary_key_cols,
+                    )
+                    with self._silver_lock:
+                        self._silver_futures.append(future)
+
             import time
             write_start_time = time.time()
 
@@ -248,33 +277,7 @@ class IngestionOrchestrator:
             )
             self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
 
-            # ── Trigger Silver, in parallel, right after Bronze is confirmed written ──
-            # Silver reads from the S3 landing path (not the Bronze Delta table), so
-            # there's nothing to trigger if the landing write was skipped.
-            if self.silver_processor and landing_path:
-                silver_schema = f"{ingest_obj.target_schema}_silver"
-                print(
-                    f"[SILVER] {threading.current_thread().name} submitting trigger for "
-                    f"config_id={ingest_obj.config_id} landing_path='{landing_path}' "
-                    f"→ {ingest_obj.target_catalog}.{silver_schema}.{ingest_obj.target_table} "
-                    f"(Bronze thread returns immediately — does not wait for Silver)"
-                )
-                future = self._silver_executor.submit(
-                    self._trigger_silver,
-                    config_id           = ingest_obj.config_id,
-                    landing_path        = landing_path,
-                    file_format         = fmt,
-                    silver_catalog      = ingest_obj.target_catalog,
-                    silver_schema       = silver_schema,
-                    silver_table        = ingest_obj.target_table,
-                    source_schema       = ingest_obj.source_schema,
-                    source_object_name  = ingest_obj.source_object_name,
-                    load_type           = ingest_obj.load_type,
-                    primary_key_cols    = ingest_obj.primary_key_cols,
-                )
-                with self._silver_lock:
-                    self._silver_futures.append(future)
-            elif self.silver_processor:
+            if self.silver_processor and not landing_path:
                 print(
                     f"[SILVER] Skipped for config_id={ingest_obj.config_id} — "
                     f"no landing_volume_path was set, nothing for Silver to read."
