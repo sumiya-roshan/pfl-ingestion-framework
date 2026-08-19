@@ -172,16 +172,15 @@ if not tasks:
 
 lookup_query_template: str = None   # None → auto-generate per table
 max_workers_raw = None
-max_workers_silver = None
 
 try:
     cfg_df = spark.table(lookup_cfg_table)
     columns = cfg_df.columns
     
     select_cols = ["lookup_query_template"]
-    has_max_workers_cols = "max_workers_raw" in columns and "max_workers_silver" in columns
+    has_max_workers_cols = "max_workers_raw" in columns
     if has_max_workers_cols:
-        select_cols.extend(["max_workers_raw", "max_workers_silver"])
+        select_cols.extend(["max_workers_raw"])
 
     lookup_cfg_rows = (
         cfg_df.filter(
@@ -199,14 +198,13 @@ try:
         lookup_query_template = row_dict.get("lookup_query_template")
         if has_max_workers_cols:
             max_workers_raw = row_dict.get("max_workers_raw")
-            max_workers_silver = row_dict.get("max_workers_silver")
         
         print(
             f"\nPipeline lookup template loaded: "
             f"{(lookup_query_template or 'NULL (auto-generate per table)')!r}"
         )
         if has_max_workers_cols:
-            print(f"Loaded from config: max_workers_raw={max_workers_raw}, max_workers_silver={max_workers_silver}")
+            print(f"Loaded from config: max_workers_raw={max_workers_raw}")
     else:
         print(
             f"\n[INFO] No row in {lookup_cfg_table} for pipeline='{pipeline_name}' "
@@ -398,7 +396,6 @@ filtered_payload = {
     "source_sys": source_sys.to_dict(),
     "tasks": [t.to_dict() for t in filtered_tasks],
     "max_workers_raw": max_workers_raw,
-    "max_workers_silver": max_workers_silver
 }
 filtered_payload_str = json.dumps(filtered_payload)
 
