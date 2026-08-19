@@ -65,7 +65,7 @@ class SourceSystemConfig:
 
     retry_count: Optional[int]
     retry_interval: Optional[int]
-      
+
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
 
@@ -109,6 +109,11 @@ class IngestionTaskConfig:
     # Set at runtime by the lookup task from pipeline_lookup_config.lookup_query.
     # None means the LookupExecutor will auto-generate SELECT COUNT(*) FROM ...
     lookup_query: Optional[str] = None
+
+    # Set at runtime by the lookup task from pipeline_lookup_config.query_timeout,
+    # format 'HH:mm:ss' (e.g. '12:00:00'). Applied to the JDBC statement so the
+    # source DB cancels the query itself on expiry — see JdbcConnector._read_options().
+    query_timeout: Optional[str] = None
 
     @property
     def primary_key_list(self) -> Optional[List[str]]:

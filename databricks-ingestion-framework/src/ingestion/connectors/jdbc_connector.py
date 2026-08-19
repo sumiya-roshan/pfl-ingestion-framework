@@ -24,6 +24,28 @@ from pyspark.sql import DataFrame
 
 from .base_connector import BaseConnector
 
+
+def _parse_timeout_to_seconds(value: Optional[str]) -> Optional[int]:
+    """
+    Parses pipeline_lookup_config.query_timeout ('HH:mm:ss', e.g. '12:00:00'),
+    carried per-task as IngestionTaskConfig.query_timeout, into whole seconds
+    for the JDBC 'queryTimeout' option. Returns None for unset/blank/zero
+    values (no timeout applied).
+    """
+    if not value:
+        return None
+    value = str(value).strip()
+    if not value:
+        return None
+    parts = value.split(":")
+    if len(parts) != 3:
+        raise ValueError(
+            f"Invalid query_timeout '{value}': expected 'HH:mm:ss' format."
+        )
+    hours, minutes, seconds = (int(p) for p in parts)
+    total_seconds = hours * 3600 + minutes * 60 + seconds
+    return total_seconds or None
+
 # ── Built-in JDBC driver class map ───────────────────────────────────────────
 # Entries here are used only when config_source_system.driver_class is NULL.
 # To support a new RDBMS without code changes, set driver_class in the config
@@ -99,6 +121,15 @@ class JdbcConnector(BaseConnector):
         # or extend ingestion_config with dedicated columns in a future iteration.
         if self.ingest_obj.data_read_size:
             opts["fetchsize"] = str(self.ingest_obj.data_read_size)
+
+        # Source query timeout (pipeline_lookup_config.query_timeout, 'HH:mm:ss',
+        # carried per-task as ingest_obj.query_timeout). Maps to
+        # java.sql.Statement.setQueryTimeout(): the JDBC driver asks the source
+        # DB to cancel the running statement once exceeded, rather than merely
+        # abandoning the client-side wait.
+        timeout_sec = _parse_timeout_to_seconds(self.ingest_obj.query_timeout)
+        if timeout_sec:
+            opts["queryTimeout"] = str(timeout_sec)
         return opts
 
     def _build_source_query(self, watermark_start: Optional[str]) -> str:

@@ -169,15 +169,19 @@ if not tasks:
 
 lookup_query_template: str = None   # None → auto-generate per table
 max_workers_raw = None
+query_timeout_raw = None   # 'HH:mm:ss' — None → no source query timeout applied
 
 try:
     cfg_df = spark.table(lookup_cfg_table)
     columns = cfg_df.columns
-    
+
     select_cols = ["lookup_query_template"]
     has_max_workers_cols = "max_workers_raw" in columns
     if has_max_workers_cols:
         select_cols.extend(["max_workers_raw"])
+    has_query_timeout_col = "query_timeout" in columns
+    if has_query_timeout_col:
+        select_cols.append("query_timeout")
 
     lookup_cfg_rows = (
         cfg_df.filter(
@@ -195,13 +199,17 @@ try:
         lookup_query_template = row_dict.get("lookup_query_template")
         if has_max_workers_cols:
             max_workers_raw = row_dict.get("max_workers_raw")
-        
+        if has_query_timeout_col:
+            query_timeout_raw = row_dict.get("query_timeout")
+
         print(
             f"\nPipeline lookup template loaded: "
             f"{(lookup_query_template or 'NULL (auto-generate per table)')!r}"
         )
         if has_max_workers_cols:
             print(f"Loaded from config: max_workers_raw={max_workers_raw}")
+        if has_query_timeout_col:
+            print(f"Loaded from config: query_timeout={query_timeout_raw}")
     else:
         print(
             f"\n[INFO] No row in {lookup_cfg_table} for pipeline='{pipeline_name}' "
@@ -389,6 +397,9 @@ active_ids_str = ",".join(str(cid) for cid in sorted(active_config_ids))
 print(f"Publishing active_config_ids → '{active_ids_str}'")
 
 filtered_tasks = [t for t in tasks if t.config_id in active_config_ids]
+for t in filtered_tasks:
+    t.query_timeout = query_timeout_raw
+
 filtered_payload = {
     "source_sys": source_sys.to_dict(),
     "tasks": [t.to_dict() for t in filtered_tasks],
