@@ -31,6 +31,7 @@ from .writers.s3_writer import S3RawWriter
 from .writers.bronze_writer import BronzeWriter
 from .logger import get_logger
 from .secrets import SecretResolver
+from .retry import retry_on_failure
 
 
 class IngestionOrchestrator:
@@ -133,7 +134,13 @@ class IngestionOrchestrator:
             )
 
             connector = get_connector(self.spark, source_sys, ingest_obj, self.secrets)
-            df, watermark_end = connector.extract(watermark_start)
+            df, watermark_end = retry_on_failure(
+                lambda: connector.extract(watermark_start),
+                max_retries    = int(source_sys.retry_count or 0),
+                retry_interval = int(source_sys.retry_interval or 0),
+                logger         = self.logger,
+                description    = f"[{run_id}] extract config_id={ingest_obj.config_id} object='{ingest_obj.source_object_name}'",
+            )
             rows_read = df.count()
 
             rows_copied  = 0
