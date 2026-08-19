@@ -22,6 +22,8 @@ CREATE TABLE migration_x_catalog.pfl_x_schema.config_source_system (
   target_schema            STRING,
   target_table             STRING,
   is_active                BOOLEAN,
+  retry_count               INT,
+  retry_interval             INT,
   created_by               STRING,
   created_ts               TIMESTAMP,
   updated_by               STRING,

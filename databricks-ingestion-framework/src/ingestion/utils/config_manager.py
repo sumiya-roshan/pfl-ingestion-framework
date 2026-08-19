@@ -63,6 +63,9 @@ class SourceSystemConfig:
 
     landing_volume_path: Optional[str]
 
+    retry_count: Optional[int]
+    retry_interval: Optional[int]
+      
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
 
@@ -102,6 +105,7 @@ class IngestionTaskConfig:
     partition_column: Optional[str]
     source_filter: Optional[str]
 
+    
     # Set at runtime by the lookup task from pipeline_lookup_config.lookup_query.
     # None means the LookupExecutor will auto-generate SELECT COUNT(*) FROM ...
     lookup_query: Optional[str] = None
@@ -174,6 +178,8 @@ class ConfigManager:
             is_active               = r.get("is_active", 1),
             extra_params            = r.get("extra_params"),
             landing_volume_path     = r.get("landing_volume_path"),
+            retry_count             = r.get("retry_count"),
+            retry_interval          = r.get("retry_interval"),
         )
 
     def _build_ingestion_task(self, r: dict) -> IngestionTaskConfig:
@@ -310,3 +316,53 @@ class ConfigManager:
             tasks.append(task)
 
         return source_sys, tasks
+
+    def update_sink_metadata(
+        self,
+        config_master_id: int,
+        ingest_obj: "IngestionTaskConfig",
+        sink_batch_started_date,
+        rownum: int,
+        data_size: int,
+    ) -> None:
+        """
+        Updates business_date, raw_last_sink_date, sink_batch_started_date,
+        rownum, and data_size on the child config table row for this task,
+        after a successful ingestion run.
+        """
+        master_rows = (
+            self.spark.table(self.config_master_table)
+            .filter(f"config_id = {config_master_id}")
+            .collect()
+        )
+        if not master_rows:
+            raise ValueError(f"No entry in {self.config_master_table} for config_id={config_master_id}")
+        m_row = master_rows[0].asDict()
+        child_table_fqn = f"{m_row.get('config_catalog_name')}.{m_row.get('config_schema_name')}.{m_row.get('config_table_name')}"
+
+        business_date = sink_batch_started_date.date()
+
+        # deltacolumn_1 = the source's incremental/watermark column, read from
+        # the bronze table just written (not the config table itself).
+        raw_last_sink_date = None
+        if ingest_obj.incremental_column:
+            row = (
+                self.spark.table(ingest_obj.full_target_table)
+                .agg({ingest_obj.incremental_column: "max"})
+                .collect()[0]
+            )
+            raw_last_sink_date = row[0]
+
+        self.spark.sql(f"""
+            UPDATE {child_table_fqn}
+            SET business_date           = {self._sql_literal(business_date)},
+                raw_last_sink_date      = {self._sql_literal(raw_last_sink_date)},
+                sink_batch_started_date = {self._sql_literal(sink_batch_started_date)},
+                rownum                  = {int(rownum or 0)},
+                data_size               = {int(data_size or 0)}
+            WHERE config_id = {int(ingest_obj.config_id)}
+        """)
+
+    @staticmethod
+    def _sql_literal(value) -> str:
+        return "NULL" if value is None else "'" + str(value).replace("'", "''") + "'"

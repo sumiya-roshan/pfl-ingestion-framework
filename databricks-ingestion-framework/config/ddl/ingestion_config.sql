@@ -25,7 +25,6 @@ CREATE TABLE migration_x_catalog.pfl_x_schema.ingestion_config (
   schema_evolution_mode     STRING,
   pipeline_name             STRING,
   pipeline_id               STRING,
-  retry_count               INT,
   created_timestamp         TIMESTAMP,
   updated_timestamp         TIMESTAMP,
   last_updated_by           STRING
