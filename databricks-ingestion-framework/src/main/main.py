@@ -31,16 +31,19 @@ dbutils.library.restartPython()
 import sys
 sys.path.append("..")
 
+import json
 from ingestion.utils.config_manager import (
     AUDIT_STATUS_FAILED,
     AUDIT_STATUS_SUCCESS,
+    AUDIT_STATUS_SKIPPED,
     ConfigManager,
+    SourceSystemConfig,
+    IngestionTaskConfig,
     SOURCE_SYSTEM_TABLE,
     CONFIG_MASTER_TABLE,
     AUDIT_TABLE,
 )
 from ingestion.utils.orchestrator import IngestionOrchestrator
-from ingestion.utils.config_manager import IngestionTaskConfig
 
 # COMMAND ----------
 
@@ -59,6 +62,7 @@ dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Ba
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
 dbutils.widgets.text("max_workers",         "4",              "Max Parallel workers")
+dbutils.widgets.text("lookup_task_name",     "source_lookup",  "Upstream Lookup Task Name")
 
 # COMMAND ----------
 
@@ -73,7 +77,10 @@ source_system_id     = int(source_system_id_raw)
 
 target_catalog       = dbutils.widgets.get("target_catalog")       or "hive_metastore"
 pipeline_name        = dbutils.widgets.get("pipeline_name")        or None
-job_id              = dbutils.widgets.get("job_id")           or None
+try:
+    job_id              = dbutils.widgets.get("job_id")           or None
+except Exception:
+    job_id              = None
 job_run_id           = dbutils.widgets.get("run_id")           or None
 # trigger_type         = dbutils.widgets.get("trigger_type")         or None
 
@@ -88,6 +95,7 @@ landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
 max_workers          = int(dbutils.widgets.get("max_workers")      or "4")
+lookup_task_name     = dbutils.widgets.get("lookup_task_name")     or "source_lookup"
 
 
 # COMMAND ----------
@@ -116,7 +124,10 @@ def get_databricks_job_context():
         except Exception:
             return None
     databricks_url = get_context_value("apiUrl")
-    job_id = dbutils.widgets.get("job_id")
+    try:
+        job_id = dbutils.widgets.get("job_id")
+    except Exception:
+        job_id = None
 
     databricks_url = (
         f"{databricks_url}/#job/{job_id}"
@@ -160,30 +171,35 @@ print(f"pipeline_name from widget: '{pipeline_name}'")
 
 # COMMAND ----------
 
-config_mgr = ConfigManager(
-    spark,
-    source_system_table = SOURCE_SYSTEM_TABLE,
-    config_master_table = CONFIG_MASTER_TABLE,
-    target_catalog      = target_catalog,
-)
+# source_sys = None
+tasks = []
+loaded_from_metadata = False
 
-# 1. Fetch source system creds + resolve source_name
-# 2. Look up the correct child config table from config_master
-# 3. Return all active rows for that source_name as IngestionTaskConfig objects
-source_sys, tasks = config_mgr.get_active_tasks(
-    config_master_id = config_master_id,
-    source_system_id = source_system_id,
-)
+# 1. Try reading the fully filtered task configurations from Task 1 metadata
+try:
+    filtered_tasks_raw = dbutils.jobs.taskValues.get(
+        taskKey    = lookup_task_name,
+        key        = "filtered_tasks_metadata",
+        default    = None,
+        debugValue = None,
+    )
+    if filtered_tasks_raw and filtered_tasks_raw.strip():
+        payload = json.loads(filtered_tasks_raw)
+        source_sys = SourceSystemConfig.from_dict(payload["source_sys"])
+        tasks = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
+        loaded_from_metadata = True
+        print(f"Loaded filtered tasks metadata from upstream task: {lookup_task_name}")
+except Exception as l_exc:
+    print(f"[INFO] Failed to fetch metadata from taskValues ({l_exc}) — falling back to database query.")
 
-print(f"\nSource filters applied:")
-print(f"  config_master_id : {config_master_id}")
-print(f"  source_system_id : {source_system_id} -> Resolved to: {source_sys.source_name}")
-print(f"  source_type      : {source_sys.source_type}")
-print(f"  target_catalog   : {target_catalog}")
-print(f"\nFound {len(tasks)} ingestion task(s) to run.")
+if not loaded_from_metadata:
+    raise Exception("Testing Error: Failed to load task configurations from upstream get_tasks metadata!")
 
 if not tasks:
-    dbutils.notebook.exit("No active ingestion tasks found for the given source filters.")
+    dbutils.notebook.exit(
+        "Lookup filter left 0 tasks to run — all tables had 0 rows in source. "
+        "Check pipeline_lookup_config and SKIPPED audit rows for details."
+    )
 
 # COMMAND ----------
 

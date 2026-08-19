@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Reads config_source_system and dynamically routes to child ingestion config tables
 via the config_master table. Returns typed config objects.
@@ -25,6 +26,7 @@ AUDIT_TABLE         = "migration_x_catalog.pfl_x_schema.tb_audit_log"
 AUDIT_STATUS_INPROGRESS = "INPROGRESS"
 AUDIT_STATUS_SUCCESS    = "SUCCESS"
 AUDIT_STATUS_FAILED     = "FAILED"
+AUDIT_STATUS_SKIPPED    = "SKIPPED"   # Used by source_lookup when a table has 0 rows
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data classes
@@ -63,6 +65,13 @@ class SourceSystemConfig:
 
     retry_count: Optional[int]
     retry_interval: Optional[int]
+      
+    def to_dict(self) -> dict:
+        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> SourceSystemConfig:
+        return cls(**d)
 
 
 @dataclass
@@ -97,6 +106,9 @@ class IngestionTaskConfig:
     source_filter: Optional[str]
 
     
+    # Set at runtime by the lookup task from pipeline_lookup_config.lookup_query.
+    # None means the LookupExecutor will auto-generate SELECT COUNT(*) FROM ...
+    lookup_query: Optional[str] = None
 
     @property
     def primary_key_list(self) -> Optional[List[str]]:
@@ -111,6 +123,13 @@ class IngestionTaskConfig:
     @property
     def effective_delta_layer(self) -> str:
         return (self.delta_layer or "BRONZE").upper()
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> IngestionTaskConfig:
+        return cls(**d)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -247,12 +266,14 @@ class ConfigManager:
     def get_active_tasks(
         self,
         config_master_id: int,
-        source_system_id: int
+        source_system_id: int,
+        pipeline_name: Optional[str] = None
     ) -> Tuple[SourceSystemConfig, List[IngestionTaskConfig]]:
         """
         1. Fetch Source System by source_system_id to get credentials & source_name.
         2. Fetch the specific child config table location from config_master.
-        3. Query the child config table for all active tasks for this source_name.
+        3. Query the child config table for active tasks for this source_name,
+           filtering by pipeline_name if provided.
         """
         
         # 1. Resolve source system
@@ -288,7 +309,11 @@ class ConfigManager:
 
         tasks = []
         for r in child_rows:
-            tasks.append(self._build_ingestion_task(r.asDict()))
+            task = self._build_ingestion_task(r.asDict())
+            # If pipeline_name is specified, only include tasks that match it
+            if pipeline_name and task.pipeline_name != pipeline_name:
+                continue
+            tasks.append(task)
 
         return source_sys, tasks
 
