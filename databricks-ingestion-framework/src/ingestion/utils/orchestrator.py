@@ -20,7 +20,7 @@ Key behaviours
                   simply takes longer when Silver is enabled.
 """
 import threading
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 from .config_manager import (
@@ -31,6 +31,7 @@ from .config_manager import (
 )
 from .watermark import resolve_watermark
 from .audit import AuditLogger
+from .dependency_logger import DependencyLogger
 from ..connectors.factory import get_connector
 from .writers.s3_writer import S3RawWriter
 from .writers.bronze_writer import BronzeWriter
@@ -58,6 +59,7 @@ class IngestionOrchestrator:
         spark,
         dbutils=None,
         audit_table: str   = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master",
+        dependency_table: str = "migration_x_catalog.pfl_x_schema.dependency_master_config",
         pipeline_name: str = "ingestion_framework",
         environment: str   = "dev",
         department_id: int = 0,
@@ -70,6 +72,7 @@ class IngestionOrchestrator:
         self.environment   = environment
 
         self.audit         = AuditLogger(spark, audit_table=audit_table, department_id=department_id)
+        self.dependency    = DependencyLogger(spark, dependency_table=dependency_table)
         self.secrets       = SecretResolver(dbutils)
         self.s3_writer     = S3RawWriter()
         self.bronze_writer = BronzeWriter(spark)
@@ -126,10 +129,27 @@ class IngestionOrchestrator:
         pipeline_name = ingest_obj.pipeline_name or self.pipeline_name
         delta_layer   = ingest_obj.effective_delta_layer   # property: config → fallback 'BRONZE'
 
-        # Start audit: insert the INPROGRESS record before any ingestion work.
         audit_context = dict(job_context or {})
         # audit_context.setdefault("trigger_type", trigger_type)
         audit_context.setdefault("trigger_id", trigger_id)
+
+        # Dependency row: inserted BEFORE the audit row, per requirement.
+        # pipeline_start_time is job-level (same value for every table in this
+        # job_run_id) — set once in main.py and threaded through job_context.
+        job_run_id_value  = audit_context.get("job_run_id")
+        resolved_business_date = business_date or datetime.utcnow().date()
+        dep_run = self.dependency.start_table(
+            config_master_id    = config_master_id if config_master_id is not None else ingest_obj.config_id,
+            source_system_id    = source_sys.source_id,
+            config_id           = ingest_obj.config_id,
+            table_name          = ingest_obj.source_object_name,
+            pipeline_name       = pipeline_name,
+            job_run_id          = job_run_id_value,
+            business_date       = resolved_business_date,
+            pipeline_start_time = audit_context.get("pipeline_start_time") or datetime.utcnow(),
+        )
+
+        # Start audit: insert the INPROGRESS record before any ingestion work.
         audit_run = self.audit.start_run(
             task=ingest_obj,
             source_sys=source_sys,
@@ -174,6 +194,7 @@ class IngestionOrchestrator:
                 self.logger.info(
                     f"[{run_id}] Landing write → {landing_path} ({rows_read} rows, format={fmt})"
                 )
+                self.dependency.mark_source_to_raw_end(dep_run)
 
                 # ── Trigger Silver, coupled — right after the S3 write, on this
                 # same thread. The Bronze Delta write below does not start until
@@ -187,6 +208,7 @@ class IngestionOrchestrator:
                         f"config_id={ingest_obj.config_id} landing_path='{landing_path}' "
                         f"→ {ingest_obj.target_catalog}.{silver_schema}.{ingest_obj.target_table}"
                     )
+                    self.dependency.mark_raw_to_silver_start(dep_run)
                     silver_result = self._trigger_silver(
                         config_id           = ingest_obj.config_id,
                         landing_path        = landing_path,
@@ -199,6 +221,7 @@ class IngestionOrchestrator:
                         load_type           = ingest_obj.load_type,
                         primary_key_cols    = ingest_obj.primary_key_cols,
                     )
+                    self.dependency.mark_raw_to_silver_end(dep_run)
 
             import time
             write_start_time = time.time()

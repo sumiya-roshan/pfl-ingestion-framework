@@ -20,6 +20,7 @@ from typing import Optional, List, Dict, Tuple
 SOURCE_SYSTEM_TABLE = "migration_x_catalog.pfl_x_schema.config_source_system"
 CONFIG_MASTER_TABLE = "migration_x_catalog.pfl_x_schema.config_master"
 AUDIT_TABLE         = "migration_x_catalog.pfl_x_schema.tb_audit_log"
+DEPENDENCY_TABLE    = "migration_x_catalog.pfl_x_schema.dependency_master_config"
 
 # Audit lifecycle values shared by the entry point, orchestrator, and logger.
 AUDIT_STATUS_INPROGRESS = "INPROGRESS"

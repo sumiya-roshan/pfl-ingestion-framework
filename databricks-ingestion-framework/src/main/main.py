@@ -29,6 +29,7 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 import sys
+from datetime import datetime
 sys.path.append("..")
 
 from ingestion.utils.config_manager import (
@@ -38,6 +39,7 @@ from ingestion.utils.config_manager import (
     SOURCE_SYSTEM_TABLE,
     CONFIG_MASTER_TABLE,
     AUDIT_TABLE,
+    DEPENDENCY_TABLE,
 )
 from ingestion.utils.orchestrator import IngestionOrchestrator
 from ingestion.utils.config_manager import IngestionTaskConfig
@@ -58,6 +60,7 @@ dbutils.widgets.text("job_run_id",          "",               "Job Run ID (requi
 dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Base Path (blank = skip landing write)")
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
+dbutils.widgets.text("dependency_table",    DEPENDENCY_TABLE, "Dependency Table (override)")
 dbutils.widgets.text("max_workers",         "4",              "Max Parallel workers")
 dbutils.widgets.text("silver_notebook_path",    "",           "Workspace path to Silver transformation notebook (blank = skip Silver trigger)")
 dbutils.widgets.text("silver_notebook_timeout", "3600",       "Max seconds to wait for each Silver notebook run")
@@ -89,6 +92,7 @@ if not job_run_id:
 landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
+dependency_table     = dbutils.widgets.get("dependency_table")     or DEPENDENCY_TABLE
 max_workers          = int(dbutils.widgets.get("max_workers")      or "4")
 
 silver_notebook_path    = dbutils.widgets.get("silver_notebook_path")    or None
@@ -147,6 +151,13 @@ print(f"job_run_id   : {job_run_id}")
 
 job_context["job_run_id"]   = job_run_id
 # job_context["trigger_type"] = trigger_type
+
+# pipeline_start_time is job-level — captured ONCE here, before the table
+# fan-out below, and threaded through job_context so every table's
+# DependencyLogger row uses the same value (see orchestrator.run()).
+pipeline_start_time = datetime.utcnow()
+job_context["pipeline_start_time"] = pipeline_start_time
+print(f"pipeline_start_time (job-level): {pipeline_start_time}")
 
 # COMMAND ----------
 
@@ -207,6 +218,7 @@ orchestrator = IngestionOrchestrator(
     spark,
     dbutils,
     audit_table             = audit_table,
+    dependency_table        = dependency_table,
     pipeline_name           = pipeline_name,
     environment             = environment,
     silver_notebook_path    = silver_notebook_path,
@@ -254,6 +266,19 @@ with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="Bronze") as
                 "rows_read": 0,
                 "error":    str(exc),
             })
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Close the dependency job
+# MAGIC
+# MAGIC pipeline_end_time isn't known until every table has finished — bulk-stamp
+# MAGIC it (and the derived dependency_resolve_time) onto every dependency_master_config
+# MAGIC row for this job_run_id in one shot, now that the fan-out above is done.
+
+# COMMAND ----------
+
+orchestrator.dependency.complete_job(job_run_id)
 
 # COMMAND ----------
 
