@@ -13,9 +13,13 @@ Key behaviours
 - Fault tolerance: run() catches all exceptions, records FAILED in audit, and
                   returns a result dict — it never re-raises. The calling
                   notebook decides whether to raise after collecting all results.
+- Silver trigger : coupled — runs inline, synchronously, right after the S3
+                  landing write, on the same thread. The Bronze Delta write
+                  below does not start until Silver has finished for that
+                  table. No separate thread pool; each table's run() call
+                  simply takes longer when Silver is enabled.
 """
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Optional
 
@@ -59,7 +63,6 @@ class IngestionOrchestrator:
         department_id: int = 0,
         silver_notebook_path: Optional[str] = None,
         silver_notebook_timeout: int        = 3600,
-        silver_max_workers: int             = 4,
     ):
         self.spark         = spark
         self.dbutils       = dbutils
@@ -72,23 +75,15 @@ class IngestionOrchestrator:
         self.bronze_writer = BronzeWriter(spark)
         self.logger        = get_logger(environment=environment)
 
-        # Silver trigger: fires on its own thread pool right after a table's S3
-        # landing write completes, decoupled from the Bronze thread pool so one
-        # table's Silver run never blocks another table's Bronze run (or even that
-        # same table's own Bronze Delta write, which starts right after). Disabled
-        # when no path is given.
+        # Silver trigger: runs inline, coupled to the landing write — a table's
+        # Bronze Delta write does not start until that table's Silver run has
+        # finished. Disabled when no notebook path is given.
         self.silver_processor = (
             SilverProcessor(dbutils, silver_notebook_path, silver_notebook_timeout)
             if silver_notebook_path else None
         )
-        self._silver_executor = (
-            ThreadPoolExecutor(max_workers=silver_max_workers, thread_name_prefix="Silver")
-            if self.silver_processor else None
-        )
-        self._silver_futures = []
-        self._silver_lock    = threading.Lock()
         if self.silver_processor:
-            print(f"[SILVER] pool ready — max_workers={silver_max_workers}, notebook='{silver_notebook_path}'")
+            print(f"[SILVER] ready (coupled, inline) — notebook='{silver_notebook_path}'")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -162,9 +157,10 @@ class IngestionOrchestrator:
             rows_deleted = 0
 
             # ── Landing / raw write (optional) ────────────────────────────────
-            # landing_path/fmt are also what Silver reads from — kept in scope past
-            # the if-block (stay None/default when landing write is skipped).
-            landing_path = None
+            # landing_path/fmt/silver_result stay in scope past the if-block
+            # (None/default when landing write is skipped).
+            landing_path  = None
+            silver_result = None
             fmt = ingest_obj.file_format or "parquet"
             if landing_volume_path:
                 landing_path = self.s3_writer.write(
@@ -179,19 +175,19 @@ class IngestionOrchestrator:
                     f"[{run_id}] Landing write → {landing_path} ({rows_read} rows, format={fmt})"
                 )
 
-                # ── Trigger Silver, in parallel, as soon as the S3 write is done ──
-                # Runs on its own thread pool — this table's Bronze Delta write (below)
-                # starts immediately without waiting for Silver to finish.
+                # ── Trigger Silver, coupled — right after the S3 write, on this
+                # same thread. The Bronze Delta write below does not start until
+                # this finishes. _trigger_silver() never raises (catches its own
+                # exceptions and returns a FAILED result dict), so this can't
+                # abort the Bronze write on its own.
                 if self.silver_processor:
                     silver_schema = f"{ingest_obj.target_schema}_silver"
                     print(
-                        f"[SILVER] {threading.current_thread().name} submitting trigger for "
+                        f"[SILVER] {threading.current_thread().name} running Silver (coupled) for "
                         f"config_id={ingest_obj.config_id} landing_path='{landing_path}' "
-                        f"→ {ingest_obj.target_catalog}.{silver_schema}.{ingest_obj.target_table} "
-                        f"(Bronze thread continues immediately — does not wait for Silver)"
+                        f"→ {ingest_obj.target_catalog}.{silver_schema}.{ingest_obj.target_table}"
                     )
-                    future = self._silver_executor.submit(
-                        self._trigger_silver,
+                    silver_result = self._trigger_silver(
                         config_id           = ingest_obj.config_id,
                         landing_path        = landing_path,
                         file_format         = fmt,
@@ -203,8 +199,6 @@ class IngestionOrchestrator:
                         load_type           = ingest_obj.load_type,
                         primary_key_cols    = ingest_obj.primary_key_cols,
                     )
-                    with self._silver_lock:
-                        self._silver_futures.append(future)
 
             import time
             write_start_time = time.time()
@@ -290,6 +284,7 @@ class IngestionOrchestrator:
                 "rows_read": rows_read,
                 "error_code": None,
                 "error":    None,
+                "silver_result": silver_result,
             }
 
         except Exception as exc:
@@ -332,7 +327,9 @@ class IngestionOrchestrator:
         load_type: str,
         primary_key_cols: str,
     ) -> dict:
-        """Runs in a Silver worker thread. Never raises — caught and returned as a result dict."""
+        """Runs inline on the calling (Bronze) thread — coupled with the landing
+        write, not a separate pool. Never raises — caught and returned as a
+        result dict, so a Silver failure can't abort the caller's Bronze write."""
         thread_name = threading.current_thread().name
         target = f"{silver_catalog}.{silver_schema}.{silver_table}"
         print(f"[SILVER] {thread_name} started for config_id={config_id} landing_path='{landing_path}' → {target}")
@@ -364,17 +361,3 @@ class IngestionOrchestrator:
 
         print(f"[SILVER] {thread_name} finished for config_id={config_id} status={result['status']}")
         return result
-
-    def wait_for_silver(self) -> list:
-        """
-        Blocks until every Silver trigger submitted so far has finished and
-        returns their result dicts. Safe to call even if Silver triggering is
-        disabled (no silver_notebook_path was configured) — returns [].
-        """
-        if not self._silver_executor:
-            return []
-        with self._silver_lock:
-            futures = list(self._silver_futures)
-        results = [f.result() for f in futures]
-        self._silver_executor.shutdown(wait=True)
-        return results

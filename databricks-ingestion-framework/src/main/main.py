@@ -61,7 +61,6 @@ dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (over
 dbutils.widgets.text("max_workers",         "4",              "Max Parallel workers")
 dbutils.widgets.text("silver_notebook_path",    "",           "Workspace path to Silver transformation notebook (blank = skip Silver trigger)")
 dbutils.widgets.text("silver_notebook_timeout", "3600",       "Max seconds to wait for each Silver notebook run")
-dbutils.widgets.text("silver_max_workers",      "4",          "Max parallel Silver notebook runs")
 
 # COMMAND ----------
 
@@ -94,7 +93,6 @@ max_workers          = int(dbutils.widgets.get("max_workers")      or "4")
 
 silver_notebook_path    = dbutils.widgets.get("silver_notebook_path")    or None
 silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
-silver_max_workers      = int(dbutils.widgets.get("silver_max_workers")      or "4")
 
 
 # COMMAND ----------
@@ -213,7 +211,6 @@ orchestrator = IngestionOrchestrator(
     environment             = environment,
     silver_notebook_path    = silver_notebook_path,
     silver_notebook_timeout = silver_notebook_timeout,
-    silver_max_workers      = silver_max_workers,
 )
 
 import threading
@@ -261,24 +258,14 @@ with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="Bronze") as
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Wait for in-flight Silver triggers
-# MAGIC
-# MAGIC Each table's Silver trigger runs in the background on its own thread pool
-# MAGIC (see IngestionOrchestrator._trigger_silver) and does not block Bronze. Block
-# MAGIC here until they all finish — otherwise dbutils.notebook.exit() below would
-# MAGIC tear down this command's execution context while Silver notebooks are still
-# MAGIC mid-flight, and Databricks cancels any nested dbutils.notebook.run() calls
-# MAGIC still attached to it (surfaces as UserCanceled on the Silver child runs).
-
-# COMMAND ----------
-
-print(f"\nWaiting for in-flight Silver triggers to finish...")
-silver_results = orchestrator.wait_for_silver()
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ### Results summary
+# MAGIC
+# MAGIC Silver now runs coupled — inline, synchronously — inside each table's
+# MAGIC own orchestrator.run() call (see IngestionOrchestrator._trigger_silver),
+# MAGIC right after that table's landing write and before its Bronze Delta
+# MAGIC write. By the time a task's future resolves above, its Silver run (if
+# MAGIC enabled) has already finished, so results already carry it under
+# MAGIC "silver_result" — no separate wait step needed.
 
 # COMMAND ----------
 
@@ -294,6 +281,8 @@ print(f"{'='*75}")
 succeeded = [r for r in results if r["status"] == AUDIT_STATUS_SUCCESS]
 failed    = [r for r in results if r["status"] == AUDIT_STATUS_FAILED]
 print(f"Total: {len(results)} | ✅ Succeeded: {len(succeeded)} | ❌ Failed: {len(failed)}\n")
+
+silver_results = [r["silver_result"] for r in results if r.get("silver_result")]
 
 if silver_results:
     print(f"{'='*75}")
