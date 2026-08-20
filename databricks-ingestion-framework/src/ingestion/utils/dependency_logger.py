@@ -1,18 +1,24 @@
 """
 Tracks per-table, per-run stage timing (Source→Raw, Raw→Silver) plus the
-job-level pipeline_start_time/pipeline_end_time and the SLA-driven
-dependency_resolve_time used by downstream dependents.
+job-level pipeline_start_time/pipeline_end_time.
 
 pipeline_start_time/pipeline_end_time are job-level — the SAME value across
 every table in a given job_run_id (captured once in main.py, at job start
 and job end). source_to_raw_*/raw_to_silver_* are per-table.
 
+dependency_resolve_time is the signal downstream teams poll: NULL means
+this table's Silver isn't done yet for today; once it has a timestamp, the
+table is safe to consume. It's set to the SAME timestamp as
+raw_to_silver_end_time, at the moment that table's Silver run finishes — not
+a job-level value, and not capped/derived from anything else. A table still
+running (or not yet reached) simply stays NULL until then.
+
 A row is inserted per table at that table's start via start_table() — before
 AuditLogger.start_run() is called for that table — then updated per-stage as
-that table progresses. pipeline_end_time and dependency_resolve_time are not
-known until every table in the job has finished, so they're stamped onto
-every row for the job in one bulk UPDATE via complete_job(), called once at
-the very end of main.py.
+that table progresses. pipeline_end_time is job-level and isn't known until
+every table in the job has finished, so it's stamped onto every row for the
+job in one bulk UPDATE via complete_job(), called once at the very end of
+main.py.
 """
 import threading
 from datetime import datetime
@@ -73,28 +79,33 @@ class DependencyLogger:
         self._touch(dep_run, "raw_to_silver_start_time")
 
     def mark_raw_to_silver_end(self, dep_run: Dict[str, Any]) -> None:
-        self._touch(dep_run, "raw_to_silver_end_time")
-
-    def complete_job(self, job_run_id: str) -> None:
         """
-        Bulk-stamps pipeline_end_time and dependency_resolve_time onto every
-        row for this job_run_id at once. Called once, after every table in
-        the job has finished — not per table, since pipeline_end_time isn't
-        known until then.
-
-        dependency_resolve_time = LEAST(pipeline_end_time, pipeline_start_time + 24h)
-        i.e. if the job is still running 24h after it started, the dependency
-        is considered resolved at that boundary rather than the actual
-        (later) completion time.
+        Marks this table's Silver run as finished — and, in the same UPDATE,
+        stamps dependency_resolve_time with that same timestamp. That's the
+        signal downstream teams poll: NULL = not ready yet, a timestamp =
+        today's data for this table is safe to consume.
         """
         with self._write_lock:
             self.spark.sql(f"""
                 UPDATE {self.table}
-                SET pipeline_end_time       = current_timestamp(),
-                    dependency_resolve_time = LEAST(
-                        current_timestamp(),
-                        pipeline_start_time + INTERVAL 24 HOURS
-                    )
+                SET raw_to_silver_end_time  = current_timestamp(),
+                    dependency_resolve_time = current_timestamp()
+                WHERE job_run_id = {self._sql_literal(dep_run['job_run_id'])}
+                  AND config_id  = {int(dep_run['config_id'])}
+            """)
+
+    def complete_job(self, job_run_id: str) -> None:
+        """
+        Bulk-stamps pipeline_end_time onto every row for this job_run_id at
+        once. Called once, after every table in the job has finished — not
+        per table, since pipeline_end_time isn't known until then. Does not
+        touch dependency_resolve_time — that's set per-table, independently,
+        in mark_raw_to_silver_end().
+        """
+        with self._write_lock:
+            self.spark.sql(f"""
+                UPDATE {self.table}
+                SET pipeline_end_time = current_timestamp()
                 WHERE job_run_id = {self._sql_literal(job_run_id)}
             """)
 

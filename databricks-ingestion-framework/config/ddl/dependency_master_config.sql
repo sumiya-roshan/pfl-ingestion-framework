@@ -1,15 +1,14 @@
 -- One row per table per pipeline run, tracking stage-level and pipeline-level
--- timing plus the SLA-driven dependency_resolve_time used by downstream
--- dependents. Row is inserted at pipeline start and updated as each stage
--- (Source→Raw, Raw→Silver, whole pipeline) completes.
+-- timing plus dependency_resolve_time, the signal downstream teams poll.
+-- Row is inserted at pipeline start and updated as each stage (Source→Raw,
+-- Raw→Silver, whole pipeline) completes.
 --
--- dependency_resolve_time rule:
---   next_trigger_time = pipeline_start_time + INTERVAL 24 HOURS
---   dependency_resolve_time = LEAST(pipeline_end_time, next_trigger_time)
--- i.e. if the pipeline is still running 24h after it started, the dependency
--- is considered resolved at that boundary rather than waiting for the
--- actual (later) completion time. pipeline_start_time doubles as the SLA
--- anchor — there is no separate job-level trigger_time column.
+-- dependency_resolve_time: NULL while this table's Silver run hasn't
+-- finished yet (or hasn't started); set to the SAME timestamp as
+-- raw_to_silver_end_time the moment that table's Silver run completes.
+-- Downstream teams query today's business_date row for this table — a
+-- non-NULL dependency_resolve_time means it's safe to consume, NULL means
+-- not ready yet. Per-table, not a job-level or capped value.
 CREATE TABLE IF NOT EXISTS migration_x_catalog.pfl_x_schema.dependency_master_config (
     config_master_id           INT             NOT NULL,
     source_system_id           INT             NOT NULL,
