@@ -14,7 +14,7 @@ Key behaviours
                   returns a result dict — it never re-raises. The calling
                   notebook decides whether to raise after collecting all results.
 """
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 from .config_manager import (
