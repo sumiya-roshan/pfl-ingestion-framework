@@ -98,7 +98,7 @@ class JdbcConnector(BaseConnector):
         # Parallel-read tuning: optionally set via source_filter JSON extras
         # or extend ingestion_config with dedicated columns in a future iteration.
         if self.ingest_obj.data_read_size:
-            opts["fetchsize"] = str(self.ingest_obj.data_read_size)
+            opts["fetchsize"] = str(int(self.ingest_obj.data_read_size))
         return opts
 
     def _build_source_query(self, watermark_start: Optional[str]) -> str:
