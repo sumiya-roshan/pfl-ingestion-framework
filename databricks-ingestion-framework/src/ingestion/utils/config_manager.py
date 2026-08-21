@@ -114,7 +114,10 @@ class IngestionTaskConfig:
     partition_column: Optional[str]
     source_filter: Optional[str]
 
-    
+    # Watermark date for incremental lookup query generation
+    silver_last_sink_date: Optional[str] = None
+    # Secondary delta column (OR condition in lookup WHERE clause)
+    delta_column_2: Optional[str] = None
     # Set at runtime by the lookup task from pipeline_lookup_config.lookup_query.
     # None means the LookupExecutor will auto-generate SELECT COUNT(*) FROM ...
     lookup_query: Optional[str] = None
@@ -218,9 +221,12 @@ class ConfigManager:
             ""
         )
         
+        # incremental_column = Delta_Column_1 in rdbms_ingestion_config.
+        # Key_Column is the PRIMARY KEY, NOT the watermark/delta column.
         inc_col = (
-            r.get("Key_Column") or 
-            r.get("Incremental_Column")
+            r.get("Delta_Column_1") or      # rdbms_ingestion_config
+            r.get("Incremental_Column") or  # NoSQL / generic alias
+            r.get("Key_Column")             # legacy fallback only
         )
         
         pk_cols = (
@@ -258,11 +264,18 @@ class ConfigManager:
             data_read_size      = r.get("data_size") or r.get("data_read_size"),
             file_format         = r.get("file_format"),
             write_mode          = r.get("write_mode") or ("merge" if pk_cols else default_write_mode),
-            priority            = r.get("priority") or 0,
-            batch_id            = r.get("batch_id"),
+            priority            = r.get("Priority") or r.get("priority") or 0,   # capital P in rdbms config
+            batch_id            = r.get("Batch_ID") or r.get("batch_id"),         # capital B+ID in rdbms config
             schema_evolution_mode = r.get("schema_evolution_mode"),
             partition_column    = r.get("partition_column"),
             source_filter       = r.get("source_filter"),
+            # Watermark date for incremental lookup query generation
+            silver_last_sink_date = (
+                str(r.get("Silver_Last_Sink_Date") or r.get("silver_last_sink_date") or "")
+                or None
+            ),
+            # Secondary delta column (OR condition in lookup WHERE clause)
+            delta_column_2      = r.get("Delta_Column_2") or r.get("delta_column_2"),
             # S3-specific fields — present only in s3_config_master rows
             s3_source_bucket_name   = r.get("s3_source_bucket_name") or r.get("source_bucket_name"),
             s3_external_path        = r.get("s3_external_path")       or r.get("external_path"),
