@@ -299,20 +299,29 @@ def get_eligible_rows(batch_start_date: datetime):
         cid  = row["Config_ID"]
         try:
             sink_table = get_sink_table_fqn(cmid)
-            sinked_today = spark.sql(f"""
-                SELECT 1 FROM {sink_table}
+            res = spark.sql(f"""
+                SELECT Pipeline_Name, 
+                       (Day_Execution_Count > 0 AND to_date(Sink_Batch_Started_Date) = '{trigger_date_str}') AS sinked_today
+                FROM {sink_table}
                 WHERE Config_Master_ID = {cmid}
                   AND Config_ID = {cid}
-                  AND Day_Execution_Count > 0
-                  AND to_date(Sink_Batch_Started_Date) = '{trigger_date_str}'
                 LIMIT 1
-            """).count() > 0
+            """).collect()
+            
+            if not res:
+                continue
+                
+            sink_row = res[0]
+            pipeline_name = sink_row["Pipeline_Name"]
+            sinked_today = bool(sink_row["sinked_today"])
+            
+            if not sinked_today:
+                r_dict = row.asDict()
+                r_dict["Pipeline_Name"] = pipeline_name
+                result_rows.append(r_dict)
         except Exception as exc:
             logger.warning(f"[MultiRefresh] Could not check sink table for config_master_id={cmid}: {exc}. Skipping.")
             continue
-
-        if not sinked_today:
-            result_rows.append(row.asDict())
 
     if not result_rows:
         return None
@@ -452,11 +461,11 @@ def trigger_source_jobs(batch_start_date: datetime, job_trigger: JobTrigger) -> 
     batch_start_str = str(batch_start_date)
 
     job_cfg_rows = spark.sql(f"""
-        SELECT DISTINCT j.Config_Master_ID, j.Databricks_Job_Name
+        SELECT DISTINCT j.Databricks_Job_Name, e.Config_Master_ID, e.Pipeline_Name
         FROM {MULTI_REFRESH_JOB_CFG} j
-        INNER JOIN (
-            SELECT DISTINCT Config_Master_ID FROM {ELIGIBLE_TEMP_TABLE}
-        ) e ON j.Config_Master_ID = e.Config_Master_ID
+        INNER JOIN {ELIGIBLE_TEMP_TABLE} e 
+           ON j.Config_Master_ID = e.Config_Master_ID
+          AND j.Databricks_Job_Name = e.Pipeline_Name
         WHERE j.Is_Active = 1
     """).collect()
 
@@ -468,22 +477,27 @@ def trigger_source_jobs(batch_start_date: datetime, job_trigger: JobTrigger) -> 
         return
 
     for row in job_cfg_rows:
-        job_name = row["Databricks_Job_Name"]
-        cmid     = row["Config_Master_ID"]
+        job_name      = row["Databricks_Job_Name"]
+        cmid          = row["Config_Master_ID"]
+        pipeline_name = row.asDict().get("Pipeline_Name")
         try:
+            params = {"batch_start_date": batch_start_str}
+            if pipeline_name:
+                params["pipeline_name"] = pipeline_name
+                
             run_id = job_trigger.run_now_by_name(
                 job_name        = job_name,
-                notebook_params = {"batch_start_date": batch_start_str},
+                notebook_params = params,
             )
             logger.info(
                 f"[MultiRefresh] Triggered job '{job_name}' for Config_Master_ID={cmid} "
-                f"? run_id={run_id}  batch_start_date={batch_start_str}"
+                f"pipeline={pipeline_name} ? run_id={run_id}  batch_start_date={batch_start_str}"
             )
         except Exception as exc:
             # Log and continue - a failed trigger for one source should not block others
             logger.error(
                 f"[MultiRefresh] Failed to trigger job '{job_name}' "
-                f"for Config_Master_ID={cmid}: {exc}"
+                f"for Config_Master_ID={cmid} pipeline={pipeline_name}: {exc}"
             )
 
 
