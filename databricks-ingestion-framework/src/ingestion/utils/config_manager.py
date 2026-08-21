@@ -355,7 +355,7 @@ class ConfigManager:
                 clean_date = str(batch_start_date).replace("T", " ").split(".")[0]
                 print(f"[ConfigManager] Filtering active tasks by {date_col} = '{clean_date}'")
                 filtered_df = filtered_df.filter(
-                    f"date_format({date_col}, 'yyyy-MM-dd HH:mm:ss') = date_format('{clean_date}', 'yyyy-MM-dd HH:mm:ss')"
+                    f"date_format(from_utc_timestamp({date_col}, 'UTC'), 'yyyy-MM-dd HH:mm:ss') = '{clean_date}'"
                 )
             else:
                 print(f"[ConfigManager] Warning: {child_table_fqn} has no sink_batch_started_date column. Skipping filter.")
@@ -408,11 +408,20 @@ class ConfigManager:
             )
             raw_last_sink_date = row[0]
 
+        # Convert sink_batch_started_date to a UTC string literal for timezone-safety
+        sb_val = "NULL"
+        if sink_batch_started_date:
+            sb_str = str(sink_batch_started_date).replace("T", " ")
+            if not sb_str.endswith(" UTC") and not sb_str.endswith("+00:00"):
+                # Clean microsecond part and append UTC timezone
+                sb_str = sb_str.split("+")[0] + " UTC"
+            sb_val = f"'{sb_str}'"
+
         self.spark.sql(f"""
             UPDATE {child_table_fqn}
             SET business_date           = {self._sql_literal(business_date)},
                 raw_last_sink_date      = {self._sql_literal(raw_last_sink_date)},
-                sink_batch_started_date = {self._sql_literal(sink_batch_started_date)},
+                sink_batch_started_date = {sb_val},
                 rownum                  = {int(rownum or 0)},
                 data_size               = {int(data_size or 0)}
             WHERE config_id = {int(ingest_obj.config_id)}
