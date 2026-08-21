@@ -115,7 +115,7 @@ class JobTrigger:
         job_id = self._resolve_job_id(job_name)
         body: dict = {"job_id": job_id}
         if notebook_params:
-            body["notebook_params"] = {k: str(v) for k, v in notebook_params.items()}
+            body["job_parameters"] = {k: str(v) for k, v in notebook_params.items()}
 
         resp = self._api("POST", "/api/2.1/jobs/run-now", body)
         run_id = int(resp.get("run_id", 0))

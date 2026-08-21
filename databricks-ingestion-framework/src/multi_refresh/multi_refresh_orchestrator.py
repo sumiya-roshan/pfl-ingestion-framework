@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md
 # MAGIC # Multi-Refresh Orchestrator
 # MAGIC
@@ -71,10 +75,10 @@ if not secret_scope:
     dbutils.notebook.exit("Error: secret_scope widget is required (needed for REST API PAT token).")
 
 # Fully-qualified table names (admin catalog uses 'config' schema by convention)
-CFG_SCHEMA             = f"{admin_catalog}.config"
+CFG_SCHEMA             = f"{admin_catalog}.pfl_x_schema"
 TEMP_SCHEMA            = f"{admin_catalog}.temp"
 BATCH_RUN_CFG_TABLE    = f"{CFG_SCHEMA}.tb_report_batch_run_config"
-DEP_MASTER_TABLE       = f"{CFG_SCHEMA}.tb_dependency_master_config"
+DEP_MASTER_TABLE       = f"{CFG_SCHEMA}.dependency_master_config"
 MULTI_REFRESH_JOB_CFG  = f"{CFG_SCHEMA}.tb_multi_refresh_job_config"
 ELIGIBLE_TEMP_TABLE    = f"{TEMP_SCHEMA}.tb_eligible_objects"
 
@@ -249,9 +253,10 @@ def get_eligible_rows(batch_start_date: datetime):
     eligible_df = spark.sql(f"""
         SELECT * FROM (
             SELECT
+            a.ID,
                 a.Config_Master_ID,
                 a.Config_ID,
-                CASE WHEN c.Table_Config_ID IS NOT NULL THEN 1 ELSE 0 END AS Current_Status_Flag,
+                CASE WHEN c.config_id IS NOT NULL THEN 1 ELSE 0 END AS Current_Status_Flag,
                 CASE WHEN b.Config_ID IS NOT NULL      THEN 1 ELSE 0 END AS Day_Status_Flag,
                 a.Curent_Refresh_Time,
                 a.Next_Refresh_Time
@@ -270,14 +275,13 @@ def get_eligible_rows(batch_start_date: datetime):
                 -- This subquery is a placeholder; actual check done in Python.
             ) b ON a.Config_Master_ID = b.Config_Master_ID AND a.Config_ID = b.Config_ID
             LEFT JOIN (
-                SELECT DISTINCT Table_Config_Master_ID, Table_Config_ID
+                SELECT DISTINCT config_master_id, config_id
                 FROM {DEP_MASTER_TABLE}
                 WHERE
-                    Dependency_Resolved_Time IS NULL
-                    AND Delta_Layer = 'Silver'
-                    AND Is_Active = 1
-            ) c ON a.Config_Master_ID = c.Table_Config_Master_ID
-               AND a.Config_ID        = c.Table_Config_ID
+                    dependency_resolve_time IS NULL
+                    AND is_active = true
+            ) c ON a.Config_Master_ID = c.config_master_id
+               AND a.Config_ID        = c.config_id
         ) final
         WHERE Current_Status_Flag = 0
     """)
@@ -369,29 +373,25 @@ def apply_merge_updates(batch_start_date: datetime) -> None:
         MERGE INTO {DEP_MASTER_TABLE} t
         USING (
             SELECT
-                b.Task_Config_Master_ID,
-                b.Task_Config_ID,
-                b.Table_Config_Master_ID,
-                b.Table_Config_ID
+                b.config_master_id,
+                b.config_id
             FROM {ELIGIBLE_TEMP_TABLE} a
             JOIN {DEP_MASTER_TABLE} b
-              ON a.Config_Master_ID = b.Table_Config_Master_ID
-             AND a.Config_ID        = b.Table_Config_ID
+              ON a.Config_Master_ID = b.config_master_id
+             AND a.Config_ID        = b.config_id
             WHERE
-                b.Task_Config_Master_ID IN (
+                b.config_master_id IN (
                     SELECT DISTINCT Config_Master_ID FROM {BATCH_RUN_CFG_TABLE}
                 )
-                AND b.Task_Config_ID IN (
+                AND b.config_id IN (
                     SELECT DISTINCT Config_ID FROM {BATCH_RUN_CFG_TABLE}
                 )
         ) s
-        ON  t.Task_Config_Master_ID  = s.Task_Config_Master_ID
-        AND t.Task_Config_ID         = s.Task_Config_ID
-        AND t.Table_Config_Master_ID = s.Table_Config_Master_ID
-        AND t.Table_Config_ID        = s.Table_Config_ID
-        AND coalesce(to_date(t.Dependency_Resolved_Time), '1900-01-01') = current_date()
+        ON  t.config_master_id  = s.config_master_id
+        AND t.config_id         = s.config_id
+        AND coalesce(to_date(t.dependency_resolve_time), '1900-01-01') = current_date()
         WHEN MATCHED THEN UPDATE SET
-            t.Dependency_Resolved_Time = NULL
+            t.dependency_resolve_time = NULL
     """)
 
     # MERGE 3: Set Last_Sink_Date on tb_report_batch_run_config for processed rows
