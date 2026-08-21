@@ -272,13 +272,15 @@ class ConfigManager:
         self,
         config_master_id: int,
         source_system_id: int,
-        pipeline_name: Optional[str] = None
+        pipeline_name: Optional[str] = None,
+        batch_start_date: Optional[str] = None
     ) -> Tuple[SourceSystemConfig, List[IngestionTaskConfig]]:
         """
         1. Fetch Source System by source_system_id to get credentials & source_name.
         2. Fetch the specific child config table location from config_master.
         3. Query the child config table for active tasks for this source_name,
            filtering by pipeline_name if provided.
+        4. If batch_start_date is provided and not '1', filter by sink_batch_started_date.
         """
         
         # 1. Resolve source system
@@ -305,12 +307,29 @@ class ConfigManager:
         child_table_fqn = f"{catalog}.{schema}.{table}"
 
         # 3. Query the child config table
-        # We assume the child table uses 'Is_Active = 1' and 'Source_Name' based on the schemas provided.
-        child_rows = (
-            self.spark.table(child_table_fqn)
-            .filter(f"source_Name = '{source_name}' AND is_active = 1").orderBy("priority")
-            .collect()
-        )
+        child_df = self.spark.table(child_table_fqn)
+        child_cols = [c.lower() for c in child_df.columns]
+
+        # Case-insensitive column resolution
+        src_col = next((c for c in child_df.columns if c.lower() == "source_name"), "Source_Name")
+        active_col = next((c for c in child_df.columns if c.lower() == "is_active"), "Is_Active")
+
+        # Basic filtering by source system and active status
+        filtered_df = child_df.filter(f"{src_col} = '{source_name}' AND {active_col} = 1")
+
+        # Apply multi-refresh batch start date filtering if triggered by orchestrator
+        if batch_start_date and str(batch_start_date).strip() != "1":
+            date_col = next((c for c in child_df.columns if c.lower() == "sink_batch_started_date"), None)
+            if date_col:
+                clean_date = str(batch_start_date).replace("T", " ").split(".")[0]
+                print(f"[ConfigManager] Filtering active tasks by {date_col} = '{clean_date}'")
+                filtered_df = filtered_df.filter(
+                    f"date_format({date_col}, 'yyyy-MM-dd HH:mm:ss') = date_format('{clean_date}', 'yyyy-MM-dd HH:mm:ss')"
+                )
+            else:
+                print(f"[ConfigManager] Warning: {child_table_fqn} has no sink_batch_started_date column. Skipping filter.")
+
+        child_rows = filtered_df.orderBy("priority").collect()
 
         tasks = []
         for r in child_rows:

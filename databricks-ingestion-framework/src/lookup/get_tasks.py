@@ -27,6 +27,7 @@ dbutils.widgets.text("config_master_id",    "",               "Config Master ID"
 dbutils.widgets.text("source_system_id",    "",               "Source System ID")
 dbutils.widgets.text("target_catalog",      "hive_metastore", "Target Catalog")
 dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name")
+dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
 
 # COMMAND ----------
 
@@ -34,6 +35,7 @@ config_master_id_raw = dbutils.widgets.get("config_master_id") or None
 source_system_id_raw = dbutils.widgets.get("source_system_id") or None
 target_catalog       = dbutils.widgets.get("target_catalog")   or "hive_metastore"
 pipeline_name        = dbutils.widgets.get("pipeline_name")    or None
+batch_start_date     = dbutils.widgets.get("batch_start_date") or "1"
 
 if not config_master_id_raw or not source_system_id_raw:
     dbutils.notebook.exit("Error: config_master_id and source_system_id are required.")
@@ -57,6 +59,7 @@ source_sys, tasks = config_mgr.get_active_tasks(
     config_master_id = config_master_id,
     source_system_id = source_system_id,
     pipeline_name    = pipeline_name,
+    batch_start_date = batch_start_date,
 )
 
 print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")

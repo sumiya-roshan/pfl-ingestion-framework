@@ -80,6 +80,7 @@ class IngestionOrchestrator:
         # trigger_type: Optional[str]        = None,
         business_date: Optional[date]      = None,
         job_context: Optional[dict]        = None,
+        sink_batch_started_date: Optional[datetime] = None,
     ) -> dict:
         """
         Execute a single ingestion object end-to-end.
@@ -233,7 +234,7 @@ class IngestionOrchestrator:
                     self.config_manager.update_sink_metadata(
                         config_master_id=config_master_id,
                         ingest_obj=ingest_obj,
-                        sink_batch_started_date=run_start_time,
+                        sink_batch_started_date=sink_batch_started_date or run_start_time,
                         rownum=rows_copied,
                         data_size=data_written_bytes,
                     )

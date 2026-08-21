@@ -63,6 +63,7 @@ dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Ba
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
 dbutils.widgets.text("lookup_task_name",     "source_lookup",  "Upstream Lookup Task Name")
+dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
 
 # COMMAND ----------
 
@@ -95,7 +96,19 @@ landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
 lookup_task_name     = dbutils.widgets.get("lookup_task_name")     or "source_lookup"
+batch_start_date_raw = dbutils.widgets.get("batch_start_date")     or "1"
 max_workers          = 4  # Default fallback if not provided in taskValues metadata
+
+# Parse batch_start_date_raw to datetime object if it is from the orchestrator
+from datetime import datetime
+parsed_batch_start_date = None
+if batch_start_date_raw and str(batch_start_date_raw).strip() != "1":
+    try:
+        clean_dt = str(batch_start_date_raw).replace("T", " ").split(".")[0]
+        parsed_batch_start_date = datetime.strptime(clean_dt, "%Y-%m-%d %H:%M:%S")
+        print(f"Using parsed batch_start_date: {parsed_batch_start_date}")
+    except Exception as parse_err:
+        print(f"[Warning] Failed to parse batch_start_date '{batch_start_date_raw}': {parse_err}")
 
 
 # COMMAND ----------
@@ -245,6 +258,7 @@ def run_one(task: IngestionTaskConfig) -> dict:
         trigger_id          = trigger_id,
         # trigger_type        = trigger_type,
         job_context          = job_context,
+        sink_batch_started_date = parsed_batch_start_date,
     )
 
 
