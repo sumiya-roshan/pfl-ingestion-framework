@@ -307,7 +307,7 @@ def get_eligible_rows(batch_start_date: datetime):
             logger.warning(f"[MultiRefresh] Could not check sink table for config_master_id={cmid}: {exc}. Skipping.")
             continue
 
-        if sinked_today:
+        if not sinked_today:
             result_rows.append(row.asDict())
 
     if not result_rows:
