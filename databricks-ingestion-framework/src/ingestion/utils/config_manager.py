@@ -67,7 +67,16 @@ class SourceSystemConfig:
     retry_interval: Optional[int]
 
     def to_dict(self) -> dict:
-        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+        import decimal
+        res = {}
+        for k, v in self.__dict__.items():
+            if k.startswith('_'):
+                continue
+            if isinstance(v, decimal.Decimal):
+                res[k] = int(v) if v % 1 == 0 else float(v)
+            else:
+                res[k] = v
+        return res
 
     @classmethod
     def from_dict(cls, d: dict) -> SourceSystemConfig:
@@ -130,7 +139,16 @@ class IngestionTaskConfig:
         return (self.delta_layer or "BRONZE").upper()
 
     def to_dict(self) -> dict:
-        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+        import decimal
+        res = {}
+        for k, v in self.__dict__.items():
+            if k.startswith('_'):
+                continue
+            if isinstance(v, decimal.Decimal):
+                res[k] = int(v) if v % 1 == 0 else float(v)
+            else:
+                res[k] = v
+        return res
 
     @classmethod
     def from_dict(cls, d: dict) -> IngestionTaskConfig:
