@@ -227,14 +227,14 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
             FROM (
                 SELECT 
                     ID, Config_Master_ID, Config_ID, Refresh_Time as Curent_Refresh_Time, 
-                    coalesce(lead(Refresh_Time) OVER(partition by Config_Master_ID,Config_ID order by to_timestamp(Refresh_Time)),'23:59') as Next_Refresh_Time
+                    coalesce(lead(Refresh_Time) OVER(partition by Config_Master_ID,Config_ID order by Refresh_Time),'23:59') as Next_Refresh_Time
                 FROM {BATCH_RUN_CFG_TABLE}
             ) t 
             INNER JOIN {ELIGIBLE_TEMP_TABLE} s 
                ON t.Config_Master_ID = s.Config_Master_ID 
               AND t.Config_ID        = s.Config_ID 
-              AND (cast('{trigger_hhmm}' as timestamp) >= cast(t.Curent_Refresh_Time as timestamp) 
-              AND cast('{trigger_hhmm}' as timestamp) < cast(t.Next_Refresh_Time as timestamp))
+              AND ('{trigger_hhmm}' >= t.Curent_Refresh_Time 
+              AND '{trigger_hhmm}' < t.Next_Refresh_Time)
         ) s
         ON t.ID = s.ID
         WHEN MATCHED THEN UPDATE SET t.Last_Sink_Date = '{trigger_time_str}'
@@ -373,7 +373,7 @@ while iteration < max_iterations:
                 coalesce(
                     lead(Refresh_Time) OVER (
                         PARTITION BY Config_Master_ID, Config_ID 
-                        ORDER BY to_timestamp(Refresh_Time)
+                        ORDER BY Refresh_Time
                     ),
                     '23:59'
                 ) as Next_Refresh_Time, 
@@ -382,7 +382,7 @@ while iteration < max_iterations:
             FROM {BATCH_RUN_CFG_TABLE}
         ) a 
         WHERE a.Is_Active = 1
-          AND cast('{trigger_hhmm}' as timestamp) BETWEEN cast(a.Curent_Refresh_Time as timestamp) AND cast(a.Next_Refresh_Time as timestamp) 
+          AND '{trigger_hhmm}' BETWEEN a.Curent_Refresh_Time AND a.Next_Refresh_Time 
           AND to_date(coalesce(a.Last_Sink_Date, '1900-01-01')) != '{trigger_date_str}'
     """)
     multi_refresh_df.createOrReplaceTempView("multi_refresh_eligible_config")
@@ -412,16 +412,16 @@ while iteration < max_iterations:
         WITH CTE AS (
             SELECT max(Refresh_Time) as max_refresh_time
             FROM {BATCH_RUN_CFG_TABLE} 
-            WHERE date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss') < date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss') 
+            WHERE Refresh_Time < '{trigger_hhmm}'
               AND to_date(Last_Sink_Date) != '{trigger_date_str}'
               AND Is_Active = 1
         )
         SELECT CASE WHEN count(1) > 0 THEN 1 ELSE 0 END as wait_second_flag 
         FROM {BATCH_RUN_CFG_TABLE} 
-        WHERE date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss') < date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss') 
+        WHERE Refresh_Time < '{trigger_hhmm}'
           AND to_date(Last_Sink_Date) != '{trigger_date_str}'
-          AND Is_Active = true
-          AND date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss') BETWEEN (SELECT date_format(to_timestamp(max_refresh_time),'yyyy-MM-dd HH:mm:ss') FROM CTE) AND date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss')
+          AND Is_Active = 1 
+          AND Refresh_Time BETWEEN (SELECT max_refresh_time FROM CTE) AND '{trigger_hhmm}'
     """).collect()
     wait_second_flag = wait_second_flag_rows[0][0] if wait_second_flag_rows else 0
 
@@ -430,8 +430,8 @@ while iteration < max_iterations:
         SELECT CASE WHEN to_date(MIN(Last_Sink_Date)) = '{trigger_date_str}' THEN 1 ELSE 0 END as is_completed 
         FROM {BATCH_RUN_CFG_TABLE} 
         WHERE Is_Active = 1 
-          AND to_timestamp(Refresh_Time) IN (
-              SELECT max(to_timestamp(Refresh_Time)) 
+          AND Refresh_Time IN (
+              SELECT max(Refresh_Time) 
               FROM {BATCH_RUN_CFG_TABLE} 
               WHERE Is_Active = 1
           )
@@ -440,10 +440,11 @@ while iteration < max_iterations:
 
     # 3. wait_time (How many seconds until the next schedule window?)
     wait_time_rows = spark.sql(f"""
-        SELECT (unix_timestamp(to_timestamp(MIN(Refresh_Time))) - unix_timestamp(from_utc_timestamp(current_timestamp(),'Asia/Kolkata'))) AS difference_in_seconds 
+        SELECT (unix_timestamp(to_timestamp(concat('{trigger_date_str} ', MIN(Refresh_Time), ':00'))) 
+                - unix_timestamp(from_utc_timestamp(current_timestamp(), 'Asia/Kolkata'))) AS difference_in_seconds 
         FROM {BATCH_RUN_CFG_TABLE} 
-        WHERE date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss.SSS') > date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss.SSS') 
-          AND Is_Active = true
+        WHERE Refresh_Time > '{trigger_hhmm}'
+          AND Is_Active = 1
     """).collect()
     
     wait_time_raw = wait_time_rows[0]['difference_in_seconds'] if wait_time_rows else None
