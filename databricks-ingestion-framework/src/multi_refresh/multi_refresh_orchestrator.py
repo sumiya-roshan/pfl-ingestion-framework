@@ -140,7 +140,7 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
                 a.Config_Master_ID,
                 a.Config_ID,
                 CASE WHEN c.config_id IS NOT NULL THEN 1 ELSE 0 END AS Current_Status_Flag,
-                CASE WHEN b.Config_ID IS NOT NULL      THEN 1 ELSE 0 END AS Day_Status_Flag,
+                CASE WHEN b.Config_ID IS NOT NULL THEN 1 ELSE 0 END AS Day_Status_Flag,
                 a.Curent_Refresh_Time, 
                 a.Next_Refresh_Time,
                 a.ID
@@ -148,8 +148,9 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
             LEFT JOIN (
                 SELECT Config_Master_ID, Config_ID, Pipeline_Name
                 FROM {CFG_SCHEMA}.rdbms_ingestion_config
-                WHERE Day_Execution_Count > 0 
-                  AND to_date(Sink_Batch_Started_Date) = '{trigger_date_str}'
+                WHERE 
+                Day_Execution_Count > 0 AND 
+                  to_date(Sink_Batch_Started_Date) = '{trigger_date_str}'
             ) b ON a.Config_Master_ID = b.Config_Master_ID AND a.Config_ID = b.Config_ID
             LEFT JOIN (
                 SELECT distinct config_master_id, config_id
@@ -158,7 +159,7 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
                   AND Is_Active = true
             ) c ON a.Config_Master_ID = c.config_master_id AND a.Config_ID = c.config_id
         ) final
-        WHERE Current_Status_Flag = 0 AND Day_Status_Flag = 0
+        WHERE Current_Status_Flag = 0 AND Day_Status_Flag = 1
     """)
 
     # 3. Add Pipeline_Name to the eligible rows
