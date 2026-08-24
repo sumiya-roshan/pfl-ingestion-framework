@@ -214,6 +214,7 @@ class IngestionOrchestrator:
                     self.dependency.mark_raw_to_silver_start(dep_run)
                     silver_result = self._trigger_silver(
                         config_id           = ingest_obj.config_id,
+                        source_system_id    = source_sys.source_id,
                         landing_path        = landing_path,
                         file_format         = fmt,
                         silver_catalog      = ingest_obj.target_catalog,
@@ -358,6 +359,7 @@ class IngestionOrchestrator:
     def _trigger_silver(
         self,
         config_id: int,
+        source_system_id: int,
         landing_path: str,
         file_format: str,
         silver_catalog: str,
@@ -377,6 +379,7 @@ class IngestionOrchestrator:
         try:
             result = self.silver_processor.trigger(
                 config_id           = config_id,
+                source_system_id    = source_system_id,
                 landing_path        = landing_path,
                 file_format         = file_format,
                 silver_catalog      = silver_catalog,

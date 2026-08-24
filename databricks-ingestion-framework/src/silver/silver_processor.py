@@ -38,6 +38,7 @@ class SilverProcessor:
     def trigger(
         self,
         config_id: int,
+        source_system_id: int,
         landing_path: str,
         file_format: str,
         silver_catalog: str,
@@ -53,6 +54,9 @@ class SilverProcessor:
 
         The Silver notebook is expected to accept these widget parameters:
           - config_id           : int    (identifies the ingestion config row)
+          - source_system_id    : int    (with config_id, uniquely identifies this table —
+                                           config_id alone isn't unique across different
+                                           child config tables)
           - landing_path        : str    (S3 path the Bronze/landing write just wrote to)
           - file_format         : str    (parquet | delta | csv | json — how to read landing_path)
           - silver_catalog      : str
@@ -76,6 +80,7 @@ class SilverProcessor:
             self.timeout_seconds,
             {
                 "config_id":          str(config_id),
+                "source_system_id":   str(source_system_id),
                 "landing_path":       landing_path,
                 "file_format":        file_format or "parquet",
                 "silver_catalog":     silver_catalog or "",
