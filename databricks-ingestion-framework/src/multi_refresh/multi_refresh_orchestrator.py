@@ -7,18 +7,6 @@
 # MAGIC # Multi-Refresh Orchestrator
 # MAGIC
 # MAGIC Replicates the ADF `PL_Multi_Refresh_Automation` pipeline inside Databricks.
-# MAGIC
-# MAGIC ## How it works
-# MAGIC - Runs as a **long-running Databricks Job** (e.g. triggered at 9 AM, times out at midnight).
-# MAGIC - Each loop iteration:
-# MAGIC   1. Captures `batch_start_date` (current IST time).
-# MAGIC   2. Queries `tb_report_batch_run_config` to find tables whose refresh window is NOW
-# MAGIC      and haven't been sinked today.
-# MAGIC   3. Cross-checks the ingestion sink config + dependency master config.
-# MAGIC   4. Writes eligible rows to a temp table, then fires 3 MERGE statements.
-# MAGIC   5. For each eligible Config_Master_ID, resolves the job name from
-# MAGIC      `tb_multi_refresh_job_config` and triggers that job via REST API (fire & forget).
-# MAGIC   6. Computes `is_completed` and `wait_time`, then either exits or sleeps.
 
 # COMMAND ----------
 
@@ -33,12 +21,12 @@ import json
 import time
 import random
 import logging
-from datetime import datetime
-
+import datetime
+from pyspark.sql import Window
+from pyspark.sql.functions import col, row_number
 import pytz
 
 from multi_refresh.job_trigger import JobTrigger
-from ingestion.utils.secrets import SecretResolver
 from ingestion.utils.logger import get_logger
 
 # COMMAND ----------
@@ -48,57 +36,43 @@ from ingestion.utils.logger import get_logger
 
 # COMMAND ----------
 
-# Admin catalog that holds all config tables
-# (same as pipeline().globalParameters.admin_catalog_name in ADF)
 dbutils.widgets.text("admin_catalog_name",    "",      "Admin Catalog Name (e.g. migration_x_catalog)")
 dbutils.widgets.text("environment",           "dev",   "Environment: dev | uat | prod")
 dbutils.widgets.text("job_run_id",            "",      "Job Run ID - set to {{job.run_id}}")
-# Safety cap: maximum number of loop iterations before forcibly exiting.
-# Set high (e.g. 200) for production; useful for testing (set to 1 or 2).
 dbutils.widgets.text("max_iterations",        "200",   "Safety: max loop iterations before exit")
-# Secret scope that holds the Databricks PAT token for REST API calls
 dbutils.widgets.text("secret_scope",          "",      "Secret scope for Databricks PAT token")
 dbutils.widgets.text("secret_key_pat",        "databricks-pat-token", "Secret key for Databricks PAT token")
 
 # COMMAND ----------
 
-admin_catalog    = dbutils.widgets.get("admin_catalog_name") or None
-environment      = dbutils.widgets.get("environment")        or "dev"
-job_run_id       = dbutils.widgets.get("job_run_id")         or "MANUAL"
-max_iterations   = int(dbutils.widgets.get("max_iterations") or "200")
-secret_scope     = dbutils.widgets.get("secret_scope")       or None
-secret_key_pat   = dbutils.widgets.get("secret_key_pat")     or "databricks-pat-token"
+admin_catalog_name = dbutils.widgets.get("admin_catalog_name") or None
+environment        = dbutils.widgets.get("environment")        or "dev"
+job_run_id         = dbutils.widgets.get("job_run_id")         or "MANUAL"
+max_iterations     = int(dbutils.widgets.get("max_iterations") or "200")
+secret_scope       = dbutils.widgets.get("secret_scope")       or None
+secret_key_pat     = dbutils.widgets.get("secret_key_pat")     or "databricks-pat-token"
 
-if not admin_catalog:
+if not admin_catalog_name:
     dbutils.notebook.exit("Error: admin_catalog_name widget is required.")
 if not secret_scope:
     dbutils.notebook.exit("Error: secret_scope widget is required (needed for REST API PAT token).")
 
-# Fully-qualified table names (admin catalog uses 'config' schema by convention)
-CFG_SCHEMA             = f"{admin_catalog}.pfl_x_schema"
-TEMP_SCHEMA            = f"{admin_catalog}.temp"
-BATCH_RUN_CFG_TABLE    = f"{CFG_SCHEMA}.tb_report_batch_run_config"
-DEP_MASTER_TABLE       = f"{CFG_SCHEMA}.dependency_master_config"
-LOOKUP_CFG_TABLE       = f"{CFG_SCHEMA}.pipeline_lookup_config"
-ELIGIBLE_TEMP_TABLE    = f"{TEMP_SCHEMA}.tb_eligible_objects"
+# Fully-qualified schema configurations
+CFG_SCHEMA           = f"{admin_catalog_name}.pfl_x_schema"
+TEMP_SCHEMA          = f"{admin_catalog_name}.temp"
+BATCH_RUN_CFG_TABLE  = f"{CFG_SCHEMA}.tb_report_batch_run_config"
+DEP_MASTER_TABLE     = f"{CFG_SCHEMA}.dependency_master_config"
+LOOKUP_CFG_TABLE     = f"{CFG_SCHEMA}.pipeline_lookup_config"
+ELIGIBLE_TEMP_TABLE  = f"{TEMP_SCHEMA}.tb_eligible_objects"
 
 IST = pytz.timezone("Asia/Kolkata")
-
 logger = get_logger(environment=environment)
 
-print(f"admin_catalog_name : {admin_catalog}")
+print(f"admin_catalog_name : {admin_catalog_name}")
 print(f"environment        : {environment}")
 print(f"max_iterations     : {max_iterations}")
-print(f"BATCH_RUN_CFG_TABLE: {BATCH_RUN_CFG_TABLE}")
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Resolve Databricks Workspace URL and PAT Token
-
-# COMMAND ----------
-
-# Workspace URL from the notebook context (no widget needed)
+# Workspace URL and PAT token for job triggers
 workspace_url = (
     dbutils.notebook.entry_point
     .getDbutils()
@@ -107,358 +81,232 @@ workspace_url = (
     .apiUrl()
     .get()
 )
-
-# PAT token from Databricks secret scope
 pat_token = dbutils.secrets.get(scope=secret_scope, key=secret_key_pat)
-
-print(f"Workspace URL: {workspace_url}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Multi-Refresh Ingestion Sink Config Table
-# MAGIC
-# MAGIC We resolve the child config table (equivalent to rdbms_ingestion_config)
-# MAGIC dynamically per Config_Master_ID via the config_master routing table.
+job_trigger = JobTrigger(workspace_url=workspace_url, token=pat_token)
 
 # COMMAND ----------
 
-from ingestion.utils.config_manager import CONFIG_MASTER_TABLE
-
-
-def get_sink_table_fqn(config_master_id: int) -> str:
-    """
-    Resolves the sink config table FQN for a given Config_Master_ID
-    by reading the config_master routing table - never hardcoded.
-    """
-    rows = (
-        spark.table(CONFIG_MASTER_TABLE)
-        .filter(f"config_id = {config_master_id}")
-        .collect()
-    )
-    if not rows:
-        raise ValueError(
-            f"No entry in {CONFIG_MASTER_TABLE} for config_id={config_master_id}"
-        )
-    r = rows[0].asDict()
-    return f"{r['config_catalog_name']}.{r['config_schema_name']}.{r['config_table_name']}"
-
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Helper: Run MERGE with Retry on Concurrent Write Conflicts
-
-# COMMAND ----------
-
-def merge_with_retry(sql: str, max_attempts: int = 5) -> None:
-    """
-    Executes a MERGE/UPDATE SQL statement.
-    Retries on Delta concurrent write conflicts (MetadataChangedException,
-    ConcurrentAppendException) with a random back-off - same pattern as the
-    original ADF notebook.
-    """
-    for attempt in range(max_attempts):
+def merge_with_retry(statement: str, max_retries: int = 5) -> None:
+    """Execute a Spark SQL write statement with retries on Delta conflicts."""
+    for attempt in range(1, max_retries + 1):
         try:
-            spark.sql(sql)
+            spark.sql(statement)
             return
-        except Exception as exc:
-            exc_type = str(type(exc))
-            if "MetadataChangedException" in exc_type or "ConcurrentAppendException" in exc_type:
-                sleep_sec = random.uniform(1, 5)
+        except Exception as e:
+            err_msg = str(e)
+            if any(term in err_msg for term in ["MetadataChangedException", "ConcurrentAppendException"]):
+                if attempt == max_retries:
+                    raise
+                sleep_duration = random.uniform(1, 5)
                 logger.warning(
-                    f"[MultiRefresh] Concurrent write conflict on attempt {attempt + 1}. "
-                    f"Retrying in {sleep_sec:.1f}s..."
+                    f"[MultiRefresh] Delta write conflict detected. "
+                    f"Retrying in {sleep_duration:.2f}s (Attempt {attempt}/{max_retries})...."
                 )
-                time.sleep(sleep_sec)
+                time.sleep(sleep_duration)
             else:
                 raise
 
-
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Helper: Eligibility Query (mirrors NB_Object_Multi_Refresh_Check)
+# MAGIC ### RDBMS Source Multi Refresh Processor
 
 # COMMAND ----------
 
-def get_eligible_rows(batch_start_date: datetime):
+def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str, trigger_time_str) -> int:
     """
-    Replicates the ADF notebook eligibility logic:
-      1. Find tb_report_batch_run_config rows where the current IST time
-         falls in the [Curent_Refresh_Time, Next_Refresh_Time) window
-         and Last_Sink_Date is NOT today.
-      2. Cross-check against the ingestion sink config (already sinked today?)
-         and dependency master config (dependency resolved = silver done?).
-    Returns a Spark DataFrame of eligible rows with columns:
-      Config_Master_ID, Config_ID, Curent_Refresh_Time, Next_Refresh_Time
+    Process RDBMS (Config_Master_ID = 1) schedules.
+    Left joins child config + dependency config, saves to temp table, and executes MERGE updates.
+    Returns the number of eligible tables found.
     """
-    trigger_time_str  = batch_start_date.strftime("%Y-%m-%d %H:%M:%S")
-    trigger_hhmm      = batch_start_date.strftime("%H:%M")
-    trigger_date_str  = batch_start_date.strftime("%Y-%m-%d")
-
-    # Step 1: Compute refresh window per (Config_Master_ID, Config_ID)
-    spark.sql(f"""
-        CREATE OR REPLACE TEMP VIEW multi_refresh_eligible_config AS
-        SELECT * FROM (
-            SELECT
-                ID,
-                Object_Name        AS Task_Name,
-                Object_Type,
-                Config_Master_ID,
-                Config_ID,
-                Refresh_Time       AS Curent_Refresh_Time,
-                coalesce(
-                    lead(Refresh_Time) OVER (
-                        PARTITION BY Config_Master_ID, Config_ID
-                        ORDER BY to_timestamp(Refresh_Time)
-                    ),
-                    '23:59'
-                ) AS Next_Refresh_Time,
-                Last_Sink_Date,
-                Is_Active
-            FROM {BATCH_RUN_CFG_TABLE}
-        ) a
-        WHERE
-            a.Is_Active = 1
-            AND cast('{trigger_hhmm}' AS timestamp)
-                BETWEEN cast(a.Curent_Refresh_Time AS timestamp)
-                    AND cast(a.Next_Refresh_Time   AS timestamp)
-            AND to_date(coalesce(a.Last_Sink_Date, '1900-01-01')) != '{trigger_date_str}'
-    """)
-
-    multi_refresh_df = spark.sql("SELECT * FROM multi_refresh_eligible_config")
-    if multi_refresh_df.count() == 0:
-        return None
-
-    # Step 2: For each Config_Master_ID group, keep only the latest refresh time row
-    #         (in case multiple Refresh_Time values are in the same window)
-    from pyspark.sql import Window
-    from pyspark.sql.functions import col, row_number
-
-    win_spec = Window.partitionBy("Config_Master_ID", "Config_ID").orderBy(
-        col("Curent_Refresh_Time").desc()
-    )
+    # 1. Filter schedule rows for Config_Master_ID = 1 and keep the latest schedule time per table
+    win_spec = Window.partitionBy(col('Config_Master_ID'), col('Config_ID')).orderBy(col('Curent_Refresh_Time').desc())
     table_refresh_df = (
         multi_refresh_df
+        .filter("Config_Master_ID = 1")
         .withColumn("row_num", row_number().over(win_spec))
-        .filter(col("row_num") == 1)
-        .drop("row_num")
     )
+    table_refresh_df = table_refresh_df.filter(col("row_num") == 1).drop("row_num")
     table_refresh_df.createOrReplaceTempView("table_refresh_df")
 
-    # Step 3: Cross-check sink config (already sinked today = Day_Status_Flag=1)
-    #         and dependency master (unresolved dependency = Current_Status_Flag=1 means blocked)
-    #         Eligible = Day_Status_Flag=1 AND Current_Status_Flag=0
+    eligible_count = table_refresh_df.count()
+    if eligible_count == 0:
+        return 0
+
+    # 2. Join with child config & dependency master config to filter by Day_Status_Flag and Current_Status_Flag
     eligible_df = spark.sql(f"""
         SELECT * FROM (
-            SELECT
-            a.ID,
+            SELECT 
                 a.Config_Master_ID,
                 a.Config_ID,
-                CASE WHEN c.config_id IS NOT NULL THEN 1 ELSE 0 END AS Current_Status_Flag,
+                CASE WHEN c.Table_Config_ID IS NOT NULL THEN 1 ELSE 0 END AS Current_Status_Flag,
                 CASE WHEN b.Config_ID IS NOT NULL      THEN 1 ELSE 0 END AS Day_Status_Flag,
-                a.Curent_Refresh_Time,
-                a.Next_Refresh_Time
+                a.Curent_Refresh_Time, 
+                a.Next_Refresh_Time,
+                a.ID
             FROM table_refresh_df a
             LEFT JOIN (
-                SELECT Config_Master_ID, Config_ID
-                FROM (
-                    -- Resolve sink table dynamically per Config_Master_ID is complex in pure SQL;
-                    -- we union known config tables routed via config_master (see note below).
-                    -- For the cross-check, we query the rdbms child table via config_master routing.
-                    SELECT DISTINCT s.Config_Master_ID, s.Config_ID
-                    FROM table_refresh_df s
-                ) ids
-                -- We perform the Day_Status_Flag check inside Spark (Python loop below)
-                -- because each Config_Master_ID can point to a different sink table.
-                -- This subquery is a placeholder; actual check done in Python.
+                SELECT Config_Master_ID, Config_ID, Pipeline_Name
+                FROM {CFG_SCHEMA}.rdbms_ingestion_config
+                WHERE Day_Execution_Count > 0 
+                  AND to_date(Sink_Batch_Started_Date) = '{trigger_date_str}'
             ) b ON a.Config_Master_ID = b.Config_Master_ID AND a.Config_ID = b.Config_ID
             LEFT JOIN (
-                SELECT DISTINCT config_master_id, config_id
+                SELECT distinct Table_Config_Master_ID, Table_Config_ID
                 FROM {DEP_MASTER_TABLE}
-                WHERE
-                    dependency_resolve_time IS NULL
-                    AND is_active = true
-            ) c ON a.Config_Master_ID = c.config_master_id
-               AND a.Config_ID        = c.config_id
+                WHERE Dependency_Resolved_Time IS NULL 
+                  AND Delta_Layer = 'Silver' 
+                  AND Is_Active = 1
+            ) c ON a.Config_Master_ID = c.Table_Config_Master_ID AND a.Config_ID = c.Table_Config_ID
         ) final
-        WHERE Current_Status_Flag = 0
+        WHERE Current_Status_Flag = 0 AND Day_Status_Flag = 0
     """)
 
-    # Step 4: Apply Day_Status_Flag check dynamically per Config_Master_ID
-    # (since each Config_Master_ID routes to a different sink table via config_master)
-    from pyspark.sql.functions import lit
-    import pyspark.sql.functions as F
-
+    # 3. Add Pipeline_Name to the eligible rows
     eligible_rows = eligible_df.collect()
     result_rows = []
-
-    for row in eligible_rows:
-        cmid = row["Config_Master_ID"]
-        cid  = row["Config_ID"]
-        try:
-            sink_table = get_sink_table_fqn(cmid)
-            res = spark.sql(f"""
-                SELECT Pipeline_Name, 
-                       (Day_Execution_Count > 0 AND to_date(Sink_Batch_Started_Date) = '{trigger_date_str}') AS sinked_today
-                FROM {sink_table}
-                WHERE Config_Master_ID = {cmid}
-                  AND Config_ID = {cid}
-                LIMIT 1
-            """).collect()
-            
-            if not res:
-                continue
-                
-            sink_row = res[0]
-            pipeline_name = sink_row["Pipeline_Name"]
-            sinked_today = bool(sink_row["sinked_today"])
-            
-            if not sinked_today:
-                r_dict = row.asDict()
-                r_dict["Pipeline_Name"] = pipeline_name
-                result_rows.append(r_dict)
-        except Exception as exc:
-            logger.warning(f"[MultiRefresh] Could not check sink table for config_master_id={cmid}: {exc}. Skipping.")
-            continue
+    for r in eligible_rows:
+        r_dict = r.asDict()
+        res = spark.sql(f"""
+            SELECT Pipeline_Name FROM {CFG_SCHEMA}.rdbms_ingestion_config
+            WHERE Config_Master_ID = {r['Config_Master_ID']} AND Config_ID = {r['Config_ID']}
+            LIMIT 1
+        """).collect()
+        if res:
+            r_dict["Pipeline_Name"] = res[0]["Pipeline_Name"]
+            result_rows.append(r_dict)
 
     if not result_rows:
-        return None
+        return 0
 
-    return spark.createDataFrame(result_rows)
+    eligible_df = spark.createDataFrame(result_rows)
+    eligible_count = eligible_df.count()
+    logger.info(f"[MultiRefresh][RDBMS] {eligible_count} eligible tables found.")
+    
+    # Write to temp table for SQL MERGE operations
+    eligible_df.write.format("delta").mode("overwrite").saveAsTable(ELIGIBLE_TEMP_TABLE)
+    
+    # MERGE 1: Update status to 'In Progress' in child config table
+    merge_with_retry(f"""
+        MERGE INTO {CFG_SCHEMA}.rdbms_ingestion_config t
+        USING {ELIGIBLE_TEMP_TABLE} s
+        ON t.Config_Master_ID = s.Config_Master_ID AND t.Config_ID = s.Config_ID
+        WHEN MATCHED THEN UPDATE SET 
+            t.sink_batch_started_date = '{trigger_time_str} UTC',
+            t.Status                  = 'In Progress'
+    """)
 
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Helper: MERGE State Updates (3 tables)
-
-# COMMAND ----------
-
-def apply_merge_updates(batch_start_date: datetime) -> None:
-    """
-    Fires the 3 MERGE statements after eligibility is determined:
-      1. Ingestion sink config ? mark "In Progress" with sink_batch_started_date
-      2. Dependency master    ? reset Dependency_Resolved_Time = NULL
-      3. Batch run config     ? set Last_Sink_Date = batch_start_date
-    All MERGEs use retry logic for Delta concurrent write conflicts.
-    """
-    trigger_time_str = str(batch_start_date)
-    trigger_hhmm     = batch_start_date.strftime("%H:%M")
-    trigger_date_str = batch_start_date.strftime("%Y-%m-%d")
-
-    # Get unique Config_Master_IDs from eligible objects
-    cmid_rows = spark.sql(
-        f"SELECT DISTINCT Config_Master_ID FROM {ELIGIBLE_TEMP_TABLE}"
-    ).collect()
-
-    for row in cmid_rows:
-        cmid = row["Config_Master_ID"]
-        try:
-            sink_table = get_sink_table_fqn(cmid)
-        except Exception as exc:
-            logger.warning(f"[MultiRefresh] Cannot resolve sink table for config_master_id={cmid}: {exc}")
-            continue
-
-        # MERGE 1: Mark eligible rows as "In Progress" in the ingestion sink config table
-        merge_with_retry(f"""
-            MERGE INTO {sink_table} t
-            USING (
-                SELECT Config_Master_ID, Config_ID
-                FROM {ELIGIBLE_TEMP_TABLE}
-                WHERE Config_Master_ID = {cmid}
-            ) s
-            ON t.Config_Master_ID = s.Config_Master_ID
-           AND t.Config_ID        = s.Config_ID
-            WHEN MATCHED THEN UPDATE SET
-                t.Sink_Batch_Started_Date = '{trigger_time_str}',
-                t.Status                  = 'In Progress'
-        """)
-
-    # MERGE 2: Reset Dependency_Resolved_Time for eligible tables that have
-    #          a dependency entry whose Task source is also in the batch run config
+    # MERGE 2: Reset Dependency_Resolved_Time for downstream dependencies
     merge_with_retry(f"""
         MERGE INTO {DEP_MASTER_TABLE} t
         USING (
             SELECT
-                b.config_master_id,
-                b.config_id
+                Task_Config_Master_ID,
+                Task_Config_ID,
+                Table_Config_Master_ID,
+                Table_Config_ID
             FROM {ELIGIBLE_TEMP_TABLE} a
-            JOIN {DEP_MASTER_TABLE} b
-              ON a.Config_Master_ID = b.config_master_id
-             AND a.Config_ID        = b.config_id
-            WHERE
-                b.config_master_id IN (
-                    SELECT DISTINCT Config_Master_ID FROM {BATCH_RUN_CFG_TABLE}
-                )
-                AND b.config_id IN (
-                    SELECT DISTINCT Config_ID FROM {BATCH_RUN_CFG_TABLE}
-                )
+            JOIN {DEP_MASTER_TABLE} b 
+              ON a.Config_Master_ID = b.Table_Config_Master_ID
+             AND a.Config_ID        = b.Table_Config_ID
+             AND b.Task_Config_Master_ID = 1
+            WHERE EXISTS (
+                SELECT 1 FROM {BATCH_RUN_CFG_TABLE} c
+                WHERE c.Config_Master_ID = b.Task_Config_Master_ID
+                  AND c.Config_ID        = b.Task_Config_ID
+            )
         ) s
-        ON  t.config_master_id  = s.config_master_id
-        AND t.config_id         = s.config_id
-        AND coalesce(to_date(t.dependency_resolve_time), '1900-01-01') = current_date()
-        WHEN MATCHED THEN UPDATE SET
-            t.dependency_resolve_time = NULL
+        ON t.Task_Config_Master_ID = s.Task_Config_Master_ID
+       AND t.Task_Config_ID        = s.Task_Config_ID
+       AND t.Table_Config_Master_ID = s.Table_Config_Master_ID
+       AND t.Table_Config_ID        = s.Table_Config_ID
+       AND coalesce(to_date(t.Dependency_Resolved_Time), '1900-01-01') = current_date()
+        WHEN MATCHED THEN UPDATE SET Dependency_Resolved_Time = null
     """)
 
-    # MERGE 3: Set Last_Sink_Date on tb_report_batch_run_config for processed rows
+    # MERGE 3: Update Last_Sink_Date in schedule table
     merge_with_retry(f"""
         MERGE INTO {BATCH_RUN_CFG_TABLE} t
         USING (
-            SELECT DISTINCT s.ID
+            SELECT DISTINCT s.ID 
             FROM (
-                SELECT
-                    ID,
-                    Config_Master_ID,
-                    Config_ID,
-                    Refresh_Time        AS Curent_Refresh_Time,
-                    coalesce(
-                        lead(Refresh_Time) OVER (
-                            PARTITION BY Config_Master_ID, Config_ID
-                            ORDER BY to_timestamp(Refresh_Time)
-                        ),
-                        '23:59'
-                    ) AS Next_Refresh_Time
+                SELECT 
+                    ID, Config_Master_ID, Config_ID, Refresh_Time as Curent_Refresh_Time, 
+                    coalesce(lead(Refresh_Time) OVER(partition by Config_Master_ID,Config_ID order by to_timestamp(Refresh_Time)),'23:59') as Next_Refresh_Time
                 FROM {BATCH_RUN_CFG_TABLE}
-            ) t
-            INNER JOIN {ELIGIBLE_TEMP_TABLE} s
-               ON t.Config_Master_ID = s.Config_Master_ID
-              AND t.Config_ID        = s.Config_ID
-             AND cast('{trigger_hhmm}' AS timestamp) >= cast(t.Curent_Refresh_Time AS timestamp)
-             AND cast('{trigger_hhmm}' AS timestamp)  < cast(t.Next_Refresh_Time   AS timestamp)
+            ) t 
+            INNER JOIN {ELIGIBLE_TEMP_TABLE} s 
+               ON t.Config_Master_ID = s.Config_Master_ID 
+              AND t.Config_ID        = s.Config_ID 
+              AND (cast('{trigger_hhmm}' as timestamp) >= cast(t.Curent_Refresh_Time as timestamp) 
+              AND cast('{trigger_hhmm}' as timestamp) < cast(t.Next_Refresh_Time as timestamp))
         ) s
         ON t.ID = s.ID
-        WHEN MATCHED THEN UPDATE SET
-            t.Last_Sink_Date = '{trigger_time_str}'
+        WHEN MATCHED THEN UPDATE SET t.Last_Sink_Date = '{trigger_time_str}'
     """)
 
-    logger.info("[MultiRefresh] All 3 MERGE updates applied successfully.")
-
+    return eligible_count
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Helper: Trigger Source Jobs
+# MAGIC ### Email Delivery Multi Refresh Processor
 
 # COMMAND ----------
 
-def trigger_source_jobs(batch_start_date: datetime, job_trigger: JobTrigger) -> None:
+def process_email_delivery_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str, trigger_time_str) -> int:
     """
-    For each eligible Config_Master_ID in the temp table, looks up the
-    corresponding Databricks Job Name from tb_multi_refresh_job_config
-    and triggers it fire-and-forget via the REST API.
-
-    tb_multi_refresh_job_config schema:
-        Config_Master_ID  INT
-        Databricks_Job_Name  STRING   -- must exactly match the Databricks job name
-        Is_Active         INT
-
-    The batch_start_date is passed as a notebook_param so the triggered job
-    uses the multi-refresh trigger time (not real current time) for watermarking.
+    Process Email Delivery (Config_Master_ID = 15) schedules.
     """
-    batch_start_str = str(batch_start_date)
+    win_spec = Window.partitionBy(col('Config_Master_ID'), col('Config_ID')).orderBy(col('Curent_Refresh_Time').desc())
+    email_data_refresh_df = (
+        multi_refresh_df
+        .filter("Config_Master_ID = 15")
+        .withColumn("row_num", row_number().over(win_spec))
+    )
+    email_data_refresh_df = email_data_refresh_df.filter(col("row_num") == 1).drop("row_num")
+    email_data_refresh_df.createOrReplaceTempView("email_data_refresh_df")
+
+    eligible_count = email_data_refresh_df.count()
+    if eligible_count == 0:
+        return 0
+
+    logger.info(f"[MultiRefresh][Email] {eligible_count} eligible tables found.")
+    
+    # Merge INTO Email delivery config table
+    merge_with_retry(f"""
+        MERGE INTO {CFG_SCHEMA}.tb_sourcedb_email_delivery t
+        USING email_data_refresh_df s
+        ON t.Config_ID = s.Config_ID 
+       AND t.Config_Master_ID = s.Config_Master_ID 
+       AND t.Is_Active = 1 
+       AND (t.Status <> 'In-Progress' OR to_date(t.sink_batch_started_on) != '{trigger_date_str}') 
+       AND (t.Frequency = 'Daily' OR (t.Frequency = 'Monthly' and nvl(t.Report_Execution_Day, 0) = cast(date_format('{trigger_time_str}', 'd') as int)))
+        WHEN MATCHED THEN UPDATE SET 
+            t.sink_batch_started_on = null,
+            t.Status = 'In-Progress'
+    """)
+
+    # Update Last_Sink_Date in schedule table
+    spark.sql(f"""
+        UPDATE {BATCH_RUN_CFG_TABLE}
+        SET Last_Sink_Date = '{trigger_time_str}'
+        WHERE ID IN (SELECT DISTINCT ID FROM email_data_refresh_df)
+    """)
+
+    return eligible_count
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Job Trigger and API Dispatcher
+
+# COMMAND ----------
+
+def trigger_eligible_jobs(trigger_time_str: str) -> None:
+    """Queries lookup config joined with eligible tables and triggers Databricks Jobs."""
+    if not spark.catalog.tableExists(ELIGIBLE_TEMP_TABLE):
+        return
 
     job_cfg_rows = spark.sql(f"""
         SELECT DISTINCT j.pipeline_name AS Databricks_Job_Name, e.Config_Master_ID, e.Pipeline_Name
@@ -469,197 +317,162 @@ def trigger_source_jobs(batch_start_date: datetime, job_trigger: JobTrigger) -> 
         WHERE j.is_active = true
     """).collect()
 
-    if not job_cfg_rows:
-        logger.warning(
-            f"[MultiRefresh] No active job mappings found in {LOOKUP_CFG_TABLE} "
-            "for eligible Config_Master_IDs. No jobs triggered."
-        )
-        return
-
     for row in job_cfg_rows:
         job_name      = row["Databricks_Job_Name"]
         cmid          = row["Config_Master_ID"]
-        pipeline_name = row.asDict().get("Pipeline_Name")
+        pipeline_name = row["Pipeline_Name"]
         try:
-            params = {"batch_start_date": batch_start_str}
-            if pipeline_name:
-                params["pipeline_name"] = pipeline_name
-                
             run_id = job_trigger.run_now_by_name(
                 job_name        = job_name,
-                notebook_params = params,
+                notebook_params = {
+                    "batch_start_date": trigger_time_str,
+                    "pipeline_name":    pipeline_name
+                },
             )
             logger.info(
                 f"[MultiRefresh] Triggered job '{job_name}' for Config_Master_ID={cmid} "
-                f"pipeline={pipeline_name} ? run_id={run_id}  batch_start_date={batch_start_str}"
+                f"pipeline={pipeline_name} ? run_id={run_id}  batch_start_date={trigger_time_str}"
             )
         except Exception as exc:
-            # Log and continue - a failed trigger for one source should not block others
             logger.error(
                 f"[MultiRefresh] Failed to trigger job '{job_name}' "
                 f"for Config_Master_ID={cmid} pipeline={pipeline_name}: {exc}"
             )
 
-
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Helper: Completion Check and Wait Time
+# MAGIC ### Main Orchestrator Loop
 
 # COMMAND ----------
-
-def get_completion_status(batch_start_date: datetime):
-    """
-    Returns (is_completed: int, wait_time_seconds: int).
-
-    is_completed = 1 when ALL active rows in tb_report_batch_run_config
-                       have Last_Sink_Date = today (all refreshes done).
-
-    wait_time    = seconds until the next scheduled Refresh_Time.
-                   Returns 1 if there are still incomplete prior-window rows
-                   (wait_second_flag = 1) or if there is no next refresh.
-    """
-    trigger_time_str = str(batch_start_date)
-    trigger_date_str = batch_start_date.strftime("%Y-%m-%d")
-    trigger_hhmm_ts  = batch_start_date.strftime("%Y-%m-%d %H:%M:%S")
-
-    # is_completed: all active rows for the MAX refresh time have been sinked today
-    is_completed = spark.sql(f"""
-        SELECT
-            CASE WHEN to_date(MIN(Last_Sink_Date)) = '{trigger_date_str}' THEN 1 ELSE 0 END
-                AS is_completed
-        FROM {BATCH_RUN_CFG_TABLE}
-        WHERE Is_Active = 1
-          AND to_timestamp(Refresh_Time) IN (
-              SELECT max(to_timestamp(Refresh_Time))
-              FROM {BATCH_RUN_CFG_TABLE}
-              WHERE Is_Active = 1
-          )
-    """).collect()[0]["is_completed"]
-
-    # wait_second_flag: are there still-unprocessed rows in a past window?
-    wait_second_flag = spark.sql(f"""
-        WITH CTE AS (
-            SELECT max(Refresh_Time) AS max_refresh_time
-            FROM {BATCH_RUN_CFG_TABLE}
-            WHERE date_format(to_timestamp(Refresh_Time), 'yyyy-MM-dd HH:mm:ss')
-                    < date_format('{trigger_hhmm_ts}', 'yyyy-MM-dd HH:mm:ss')
-              AND to_date(Last_Sink_Date) != '{trigger_date_str}'
-              AND Is_Active = 1
-        )
-        SELECT
-            CASE WHEN count(1) > 0 THEN 1 ELSE 0 END AS wait_second_flag
-        FROM {BATCH_RUN_CFG_TABLE}
-        WHERE date_format(to_timestamp(Refresh_Time), 'yyyy-MM-dd HH:mm:ss')
-                  < date_format('{trigger_hhmm_ts}', 'yyyy-MM-dd HH:mm:ss')
-          AND to_date(Last_Sink_Date) != '{trigger_date_str}'
-          AND Is_Active = 1
-          AND date_format(to_timestamp(Refresh_Time), 'yyyy-MM-dd HH:mm:ss')
-                BETWEEN (SELECT date_format(to_timestamp(max_refresh_time), 'yyyy-MM-dd HH:mm:ss') FROM CTE)
-                    AND date_format('{trigger_hhmm_ts}', 'yyyy-MM-dd HH:mm:ss')
-    """).collect()[0]["wait_second_flag"]
-
-    # wait_time: seconds until the next Refresh_Time after the current batch_start_date
-    wait_time_row = spark.sql(f"""
-        SELECT
-            (unix_timestamp(to_timestamp(MIN(Refresh_Time)))
-             - unix_timestamp(from_utc_timestamp(current_timestamp(), 'Asia/Kolkata')))
-                AS difference_in_seconds
-        FROM {BATCH_RUN_CFG_TABLE}
-        WHERE date_format(to_timestamp(Refresh_Time), 'yyyy-MM-dd HH:mm:ss')
-                  > date_format('{trigger_hhmm_ts}', 'yyyy-MM-dd HH:mm:ss')
-          AND Is_Active = 1
-    """).collect()[0]["difference_in_seconds"]
-
-    wait_time = 1 if (wait_time_row is None or wait_second_flag == 1) else int(wait_time_row)
-    # Guard against negative wait (clock drift / already past next window)
-    wait_time = max(wait_time, 1)
-
-    return int(is_completed), wait_time
-
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Main Loop
-
-# COMMAND ----------
-
-job_trigger = JobTrigger(workspace_url=workspace_url, token=pat_token)
 
 iteration = 0
 logger.info(f"[MultiRefresh] Orchestrator starting. max_iterations={max_iterations}")
 
 while iteration < max_iterations:
     iteration += 1
-    batch_start_date = datetime.now(IST).replace(tzinfo=None)  # naive IST datetime
+    
+    triggerTime = datetime.datetime.now(IST).replace(tzinfo=None)
+
+    trigger_hhmm = triggerTime.strftime("%H:%M")
+    trigger_date_str = triggerTime.strftime("%Y-%m-%d")
+    trigger_time_str = triggerTime.strftime("%Y-%m-%d %H:%M:%S")
 
     logger.info(
         f"\n{'='*60}\n"
         f"[MultiRefresh] Iteration {iteration}/{max_iterations} | "
-        f"batch_start_date = {batch_start_date}\n"
+        f"triggerTime = {triggerTime} (IST)\n"
         f"{'='*60}"
     )
 
-    # -- Step 1: Find eligible tables ------------------------------------------
-    eligible_df = get_eligible_rows(batch_start_date)
+    # -- Step 1: Query multi-refresh report config IDs (Schedule scan) ----------
+    multi_refresh_df = spark.sql(f"""
+        SELECT * FROM (
+            SELECT 
+                ID,
+                Object_Name as Task_Name, 
+                Object_Type, 
+                Config_Master_ID, 
+                Config_ID, 
+                Refresh_Time as Curent_Refresh_Time, 
+                coalesce(
+                    lead(Refresh_Time) OVER (
+                        PARTITION BY Config_Master_ID, Config_ID 
+                        ORDER BY to_timestamp(Refresh_Time)
+                    ),
+                    '23:59'
+                ) as Next_Refresh_Time, 
+                Last_Sink_Date, 
+                Is_Active 
+            FROM {BATCH_RUN_CFG_TABLE}
+        ) a 
+        WHERE a.Is_Active = 1 
+          AND cast('{trigger_hhmm}' as timestamp) BETWEEN cast(a.Curent_Refresh_Time as timestamp) AND cast(a.Next_Refresh_Time as timestamp) 
+          AND to_date(coalesce(a.Last_Sink_Date, '1900-01-01')) != '{trigger_date_str}'
+    """)
+    multi_refresh_df.createOrReplaceTempView("multi_refresh_eligible_config")
 
-    if eligible_df is None or eligible_df.count() == 0:
-        logger.info("[MultiRefresh] No eligible tables for this iteration.")
+    if multi_refresh_df.count() == 0:
+        logger.info("[MultiRefresh] No eligible schedules for this iteration.")
+        rdbms_count = 0
+        email_count = 0
     else:
-        eligible_count = eligible_df.count()
-        logger.info(f"[MultiRefresh] {eligible_count} eligible rows found.")
+        # -- Step 2 & 3: Run RDBMS & Email Multi Refresh Processors ------------
+        rdbms_count = process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str, trigger_time_str)
+        email_count = process_email_delivery_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str, trigger_time_str)
 
-        # -- Step 2: Write to temp table ---------------------------------------
-        (
-            eligible_df
-            .write
-            .format("delta")
-            .mode("overwrite")
-            .saveAsTable(ELIGIBLE_TEMP_TABLE)
-        )
+        # -- Step 4: Dispatch job triggers if any RDBMS tables were processed --
+        if rdbms_count > 0:
+            trigger_eligible_jobs(trigger_time_str)
 
-        # -- Step 3: Apply MERGE status updates --------------------------------
-        apply_merge_updates(batch_start_date)
-
-        # -- Step 4: Trigger source ingestion jobs (fire & forget) -------------
-        trigger_source_jobs(batch_start_date, job_trigger)
-
-        # -- Cleanup temp table ------------------------------------------------
+        # Cleanup temp table
         try:
             spark.sql(f"DROP TABLE IF EXISTS {ELIGIBLE_TEMP_TABLE}")
         except Exception:
             pass
 
-    # -- Step 5: Check completion and compute wait time ---------------------
-    is_completed, wait_time = get_completion_status(batch_start_date)
+    # -- Step 5: Check completion and wait time -------------------------------
+    # 1. wait_second_flag (Any incomplete runs from past windows?)
+    wait_second_flag_rows = spark.sql(f"""
+        WITH CTE AS (
+            SELECT max(Refresh_Time) as max_refresh_time
+            FROM {BATCH_RUN_CFG_TABLE} 
+            WHERE date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss') < date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss') 
+              AND to_date(Last_Sink_Date) != '{trigger_date_str}'
+              AND Is_Active = 1
+        )
+        SELECT CASE WHEN count(1) > 0 THEN 1 ELSE 0 END as wait_second_flag 
+        FROM {BATCH_RUN_CFG_TABLE} 
+        WHERE date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss') < date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss') 
+          AND to_date(Last_Sink_Date) != '{trigger_date_str}'
+          AND Is_Active = 1 
+          AND date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss') BETWEEN (SELECT date_format(to_timestamp(max_refresh_time),'yyyy-MM-dd HH:mm:ss') FROM CTE) AND date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss')
+    """).collect()
+    wait_second_flag = wait_second_flag_rows[0][0] if wait_second_flag_rows else 0
 
-    logger.info(
-        f"[MultiRefresh] is_completed={is_completed}  wait_time={wait_time}s"
-    )
+    # 2. is_completed (Are all runs for the day completed?)
+    is_completed_rows = spark.sql(f"""
+        SELECT CASE WHEN to_date(MIN(Last_Sink_Date)) = '{trigger_date_str}' THEN 1 ELSE 0 END as is_completed 
+        FROM {BATCH_RUN_CFG_TABLE} 
+        WHERE Is_Active = 1 
+          AND to_timestamp(Refresh_Time) IN (
+              SELECT max(to_timestamp(Refresh_Time)) 
+              FROM {BATCH_RUN_CFG_TABLE} 
+              WHERE Is_Active = 1
+          )
+    """).collect()
+    is_completed = is_completed_rows[0]["is_completed"] if is_completed_rows else 0
+
+    # 3. wait_time (How many seconds until the next schedule window?)
+    wait_time_rows = spark.sql(f"""
+        SELECT (unix_timestamp(to_timestamp(MIN(Refresh_Time))) - unix_timestamp(from_utc_timestamp(current_timestamp(),'Asia/Kolkata'))) AS difference_in_seconds 
+        FROM {BATCH_RUN_CFG_TABLE} 
+        WHERE date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss.SSS') > date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss.SSS') 
+          AND Is_Active = 1
+    """).collect()
+    
+    wait_time_raw = wait_time_rows[0]['difference_in_seconds'] if wait_time_rows else None
+    wait_time = 1 if wait_time_raw is None or wait_second_flag == 1 else int(wait_time_raw)
+    wait_time = max(wait_time, 1)
+
+    logger.info(f"[MultiRefresh] is_completed={is_completed}  wait_time={wait_time}s")
 
     if is_completed == 1:
-        logger.info(
-            "[MultiRefresh] All refreshes completed for today. Exiting orchestrator."
-        )
+        logger.info("[MultiRefresh] All refreshes completed for today. Exiting.")
         dbutils.notebook.exit(
-            f"Multi-refresh complete after {iteration} iterations. "
-            f"All tables processed for {batch_start_date.strftime('%Y-%m-%d')}."
+            f"Multi-refresh complete. All tables processed for {trigger_date_str}."
         )
 
-    # -- Step 6: Also exit if we crossed midnight ---------------------------
-    current_date = datetime.now(IST).date()
-    if current_date > batch_start_date.date():
+    # Exit if we crossed midnight
+    current_date = datetime.datetime.now(IST).date()
+    if current_date > triggerTime.date():
         logger.info("[MultiRefresh] Day boundary crossed. Exiting.")
         dbutils.notebook.exit("Day boundary crossed - orchestrator exiting.")
 
-    logger.info(f"[MultiRefresh] Sleeping {wait_time}s until next refresh window...")
-    time.sleep(wait_time)
+    if max_iterations > 1:
+        logger.info(f"[MultiRefresh] Sleeping {wait_time}s until next refresh window...")
+        time.sleep(wait_time)
 
 # -- Safety exit after max_iterations ------------------------------------------
-logger.warning(
-    f"[MultiRefresh] Reached max_iterations={max_iterations}. Force-exiting."
-)
-dbutils.notebook.exit(
-    f"Multi-refresh orchestrator exited after max_iterations={max_iterations}."
-)
+logger.warning(f"[MultiRefresh] Reached max_iterations={max_iterations}. Force-exiting.")
+dbutils.notebook.exit(f"Multi-refresh orchestrator exited after max_iterations={max_iterations}.")
