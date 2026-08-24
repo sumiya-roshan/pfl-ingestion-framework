@@ -140,7 +140,7 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
                 a.Config_Master_ID,
                 a.Config_ID,
                 CASE WHEN c.config_id IS NOT NULL THEN 1 ELSE 0 END AS Current_Status_Flag,
-                CASE WHEN b.Config_ID IS NOT NULL      THEN 1 ELSE 0 END AS Day_Status_Flag,
+                CASE WHEN b.Config_ID IS NOT NULL THEN 1 ELSE 0 END AS Day_Status_Flag,
                 a.Curent_Refresh_Time, 
                 a.Next_Refresh_Time,
                 a.ID
@@ -148,8 +148,9 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
             LEFT JOIN (
                 SELECT Config_Master_ID, Config_ID, Pipeline_Name
                 FROM {CFG_SCHEMA}.rdbms_ingestion_config
-                WHERE Day_Execution_Count > 0 
-                  AND to_date(Sink_Batch_Started_Date) = '{trigger_date_str}'
+                WHERE 
+                Day_Execution_Count > 0 AND 
+                  to_date(Sink_Batch_Started_Date) = '{trigger_date_str}'
             ) b ON a.Config_Master_ID = b.Config_Master_ID AND a.Config_ID = b.Config_ID
             LEFT JOIN (
                 SELECT distinct config_master_id, config_id
@@ -158,7 +159,7 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
                   AND Is_Active = true
             ) c ON a.Config_Master_ID = c.config_master_id AND a.Config_ID = c.config_id
         ) final
-        WHERE Current_Status_Flag = 0 AND Day_Status_Flag = 0
+        WHERE Current_Status_Flag = 0 AND Day_Status_Flag = 1
     """)
 
     # 3. Add Pipeline_Name to the eligible rows
@@ -420,7 +421,7 @@ while iteration < max_iterations:
         FROM {BATCH_RUN_CFG_TABLE} 
         WHERE date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss') < date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss') 
           AND to_date(Last_Sink_Date) != '{trigger_date_str}'
-          AND Is_Active = true
+          AND Is_Active = 1
           AND date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss') BETWEEN (SELECT date_format(to_timestamp(max_refresh_time),'yyyy-MM-dd HH:mm:ss') FROM CTE) AND date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss')
     """).collect()
     wait_second_flag = wait_second_flag_rows[0][0] if wait_second_flag_rows else 0
@@ -443,7 +444,7 @@ while iteration < max_iterations:
         SELECT (unix_timestamp(to_timestamp(MIN(Refresh_Time))) - unix_timestamp(from_utc_timestamp(current_timestamp(),'Asia/Kolkata'))) AS difference_in_seconds 
         FROM {BATCH_RUN_CFG_TABLE} 
         WHERE date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss.SSS') > date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss.SSS') 
-          AND Is_Active = true
+          AND Is_Active = 1
     """).collect()
     
     wait_time_raw = wait_time_rows[0]['difference_in_seconds'] if wait_time_rows else None
