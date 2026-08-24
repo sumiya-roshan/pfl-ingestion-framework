@@ -26,6 +26,7 @@ from typing import Optional
 from .config_manager import (
     AUDIT_STATUS_FAILED,
     AUDIT_STATUS_SUCCESS,
+    ConfigManager,
     IngestionTaskConfig,
     SourceSystemConfig,
 )
@@ -65,11 +66,13 @@ class IngestionOrchestrator:
         department_id: int = 0,
         silver_notebook_path: Optional[str] = None,
         silver_notebook_timeout: int        = 3600,
+        config_mgr: Optional[ConfigManager] = None,
     ):
         self.spark         = spark
         self.dbutils       = dbutils
         self.pipeline_name = pipeline_name
         self.environment   = environment
+        self.config_mgr    = config_mgr
 
         self.audit         = AuditLogger(spark, audit_table=audit_table, department_id=department_id)
         self.dependency    = DependencyLogger(spark, dependency_table=dependency_table)
@@ -222,6 +225,21 @@ class IngestionOrchestrator:
                         primary_key_cols    = ingest_obj.primary_key_cols,
                     )
                     self.dependency.mark_raw_to_silver_end(dep_run)
+
+                    # Stamp Silver_Last_Sink_Date in the child config table this
+                    # task came from. Best-effort — a bookkeeping failure here
+                    # must not fail the table's actual ingestion.
+                    if self.config_mgr and ingest_obj.child_table_fqn:
+                        try:
+                            self.config_mgr.update_silver_last_sink_date(
+                                child_table_fqn=ingest_obj.child_table_fqn,
+                                config_id=ingest_obj.config_id,
+                            )
+                        except Exception as sink_exc:
+                            self.logger.warning(
+                                f"[{run_id}] Could not update Silver_Last_Sink_Date "
+                                f"for config_id={ingest_obj.config_id}: {sink_exc}"
+                            )
 
             import time
             write_start_time = time.time()

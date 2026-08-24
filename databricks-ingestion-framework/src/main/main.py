@@ -223,6 +223,7 @@ orchestrator = IngestionOrchestrator(
     environment             = environment,
     silver_notebook_path    = silver_notebook_path,
     silver_notebook_timeout = silver_notebook_timeout,
+    config_mgr              = config_mgr,
 )
 
 import threading

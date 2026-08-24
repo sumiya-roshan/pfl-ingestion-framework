@@ -94,6 +94,8 @@ class IngestionTaskConfig:
     partition_column: Optional[str]
     source_filter: Optional[str]
 
+    child_table_fqn: Optional[str] = None   # the config_master-resolved child table this task came from
+
     @property
     def primary_key_list(self) -> Optional[List[str]]:
         if self.primary_key_cols:
@@ -157,7 +159,7 @@ class ConfigManager:
             landing_volume_path     = r.get("landing_volume_path"),
         )
 
-    def _build_ingestion_task(self, r: dict) -> IngestionTaskConfig:
+    def _build_ingestion_task(self, r: dict, child_table_fqn: Optional[str] = None) -> IngestionTaskConfig:
         """
         Dynamically falls back across different column aliases to support 
         both RDBMS and NoSQL schema structures without hardcoding.
@@ -222,6 +224,7 @@ class ConfigManager:
             s3_first_row_header     = r.get("s3_first_row_header")    or r.get("first_row_header"),
             s3_raw_sink_bucket_name = r.get("s3_raw_sink_bucket_name") or r.get("raw_sink_bucket_name"),
             s3_raw_sink_file_path   = r.get("s3_raw_sink_file_path")  or r.get("raw_sink_file_path"),
+            child_table_fqn         = child_table_fqn,
         )
 
     # ── Database Operations ───────────────────────────────────────────────────
@@ -282,6 +285,23 @@ class ConfigManager:
 
         tasks = []
         for r in child_rows:
-            tasks.append(self._build_ingestion_task(r.asDict()))
+            tasks.append(self._build_ingestion_task(r.asDict(), child_table_fqn=child_table_fqn))
 
         return source_sys, tasks
+
+    def update_silver_last_sink_date(self, child_table_fqn: str, config_id: int) -> None:
+        """
+        Stamps Silver_Last_Sink_Date = current_timestamp() on this table's row
+        in its child config table — called right after Silver completes for
+        that table (see IngestionOrchestrator.run()). Column/PK names are
+        resolved case-insensitively since child config tables vary
+        (Config_ID vs config_id, Silver_Last_Sink_Date vs silver_last_sink_date).
+        """
+        columns = self.spark.table(child_table_fqn).columns
+        config_id_col = next((c for c in columns if c.lower() == "config_id"), "Config_ID")
+        sink_date_col = next((c for c in columns if c.lower() == "silver_last_sink_date"), "Silver_Last_Sink_Date")
+        self.spark.sql(f"""
+            UPDATE {child_table_fqn}
+            SET {sink_date_col} = current_timestamp()
+            WHERE {config_id_col} = {int(config_id)}
+        """)
