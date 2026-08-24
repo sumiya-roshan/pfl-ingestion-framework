@@ -79,7 +79,7 @@ CFG_SCHEMA             = f"{admin_catalog}.pfl_x_schema"
 TEMP_SCHEMA            = f"{admin_catalog}.temp"
 BATCH_RUN_CFG_TABLE    = f"{CFG_SCHEMA}.tb_report_batch_run_config"
 DEP_MASTER_TABLE       = f"{CFG_SCHEMA}.dependency_master_config"
-MULTI_REFRESH_JOB_CFG  = f"{CFG_SCHEMA}.tb_multi_refresh_job_config"
+LOOKUP_CFG_TABLE       = f"{CFG_SCHEMA}.pipeline_lookup_config"
 ELIGIBLE_TEMP_TABLE    = f"{TEMP_SCHEMA}.tb_eligible_objects"
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -461,17 +461,17 @@ def trigger_source_jobs(batch_start_date: datetime, job_trigger: JobTrigger) -> 
     batch_start_str = str(batch_start_date)
 
     job_cfg_rows = spark.sql(f"""
-        SELECT DISTINCT j.Databricks_Job_Name, e.Config_Master_ID, e.Pipeline_Name
-        FROM {MULTI_REFRESH_JOB_CFG} j
+        SELECT DISTINCT j.pipeline_name AS Databricks_Job_Name, e.Config_Master_ID, e.Pipeline_Name
+        FROM {LOOKUP_CFG_TABLE} j
         INNER JOIN {ELIGIBLE_TEMP_TABLE} e 
-           ON j.Config_Master_ID = e.Config_Master_ID
-          AND j.Databricks_Job_Name = e.Pipeline_Name
-        WHERE j.Is_Active = 1
+           ON j.config_master_id = e.Config_Master_ID
+          AND j.pipeline_name = e.Pipeline_Name
+        WHERE j.is_active = true
     """).collect()
 
     if not job_cfg_rows:
         logger.warning(
-            "[MultiRefresh] No active job mappings found in tb_multi_refresh_job_config "
+            f"[MultiRefresh] No active job mappings found in {LOOKUP_CFG_TABLE} "
             "for eligible Config_Master_IDs. No jobs triggered."
         )
         return
