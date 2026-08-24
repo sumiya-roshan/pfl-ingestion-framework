@@ -139,7 +139,7 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
             SELECT 
                 a.Config_Master_ID,
                 a.Config_ID,
-                CASE WHEN c.Table_Config_ID IS NOT NULL THEN 1 ELSE 0 END AS Current_Status_Flag,
+                CASE WHEN c.config_id IS NOT NULL THEN 1 ELSE 0 END AS Current_Status_Flag,
                 CASE WHEN b.Config_ID IS NOT NULL      THEN 1 ELSE 0 END AS Day_Status_Flag,
                 a.Curent_Refresh_Time, 
                 a.Next_Refresh_Time,
@@ -152,12 +152,11 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
                   AND to_date(Sink_Batch_Started_Date) = '{trigger_date_str}'
             ) b ON a.Config_Master_ID = b.Config_Master_ID AND a.Config_ID = b.Config_ID
             LEFT JOIN (
-                SELECT distinct Table_Config_Master_ID, Table_Config_ID
+                SELECT distinct config_master_id, config_id
                 FROM {DEP_MASTER_TABLE}
-                WHERE Dependency_Resolved_Time IS NULL 
-                  AND Delta_Layer = 'Silver' 
-                  AND Is_Active = 1
-            ) c ON a.Config_Master_ID = c.Table_Config_Master_ID AND a.Config_ID = c.Table_Config_ID
+                WHERE dependency_resolve_time IS NULL 
+                  AND Is_Active = true
+            ) c ON a.Config_Master_ID = c.config_master_id AND a.Config_ID = c.config_id
         ) final
         WHERE Current_Status_Flag = 0 AND Day_Status_Flag = 0
     """)
@@ -196,32 +195,28 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
             t.Status                  = 'In Progress'
     """)
 
-    # MERGE 2: Reset Dependency_Resolved_Time for downstream dependencies
+    # MERGE 2: Reset dependency_resolve_time for downstream dependencies
     merge_with_retry(f"""
         MERGE INTO {DEP_MASTER_TABLE} t
         USING (
-            SELECT
-                Task_Config_Master_ID,
-                Task_Config_ID,
-                Table_Config_Master_ID,
-                Table_Config_ID
+            SELECT DISTINCT
+                b.config_master_id,
+                b.config_id
             FROM {ELIGIBLE_TEMP_TABLE} a
             JOIN {DEP_MASTER_TABLE} b 
-              ON a.Config_Master_ID = b.Table_Config_Master_ID
-             AND a.Config_ID        = b.Table_Config_ID
-             AND b.Task_Config_Master_ID = 1
+              ON a.Config_Master_ID = b.config_master_id
+             AND a.Config_ID        = b.config_id
+             AND b.config_master_id = 1
             WHERE EXISTS (
                 SELECT 1 FROM {BATCH_RUN_CFG_TABLE} c
-                WHERE c.Config_Master_ID = b.Task_Config_Master_ID
-                  AND c.Config_ID        = b.Task_Config_ID
+                WHERE c.Config_Master_ID = b.config_master_id
+                  AND c.Config_ID        = b.config_id
             )
         ) s
-        ON t.Task_Config_Master_ID = s.Task_Config_Master_ID
-       AND t.Task_Config_ID        = s.Task_Config_ID
-       AND t.Table_Config_Master_ID = s.Table_Config_Master_ID
-       AND t.Table_Config_ID        = s.Table_Config_ID
-       AND coalesce(to_date(t.Dependency_Resolved_Time), '1900-01-01') = current_date()
-        WHEN MATCHED THEN UPDATE SET Dependency_Resolved_Time = null
+        ON t.config_master_id = s.config_master_id
+       AND t.config_id        = s.config_id
+       AND coalesce(to_date(t.dependency_resolve_time), '1900-01-01') = current_date()
+        WHEN MATCHED THEN UPDATE SET dependency_resolve_time = null
     """)
 
     # MERGE 3: Update Last_Sink_Date in schedule table
@@ -386,7 +381,7 @@ while iteration < max_iterations:
                 Is_Active 
             FROM {BATCH_RUN_CFG_TABLE}
         ) a 
-        WHERE a.Is_Active = 1 
+        WHERE a.Is_Active = 1
           AND cast('{trigger_hhmm}' as timestamp) BETWEEN cast(a.Curent_Refresh_Time as timestamp) AND cast(a.Next_Refresh_Time as timestamp) 
           AND to_date(coalesce(a.Last_Sink_Date, '1900-01-01')) != '{trigger_date_str}'
     """)
@@ -425,7 +420,7 @@ while iteration < max_iterations:
         FROM {BATCH_RUN_CFG_TABLE} 
         WHERE date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss') < date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss') 
           AND to_date(Last_Sink_Date) != '{trigger_date_str}'
-          AND Is_Active = 1 
+          AND Is_Active = true
           AND date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss') BETWEEN (SELECT date_format(to_timestamp(max_refresh_time),'yyyy-MM-dd HH:mm:ss') FROM CTE) AND date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss')
     """).collect()
     wait_second_flag = wait_second_flag_rows[0][0] if wait_second_flag_rows else 0
@@ -448,7 +443,7 @@ while iteration < max_iterations:
         SELECT (unix_timestamp(to_timestamp(MIN(Refresh_Time))) - unix_timestamp(from_utc_timestamp(current_timestamp(),'Asia/Kolkata'))) AS difference_in_seconds 
         FROM {BATCH_RUN_CFG_TABLE} 
         WHERE date_format(to_timestamp(Refresh_Time),'yyyy-MM-dd HH:mm:ss.SSS') > date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss.SSS') 
-          AND Is_Active = 1
+          AND Is_Active = true
     """).collect()
     
     wait_time_raw = wait_time_rows[0]['difference_in_seconds'] if wait_time_rows else None
