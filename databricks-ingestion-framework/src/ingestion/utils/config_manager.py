@@ -118,8 +118,9 @@ class IngestionTaskConfig:
     silver_last_sink_date: Optional[str] = None
     # Secondary delta column (OR condition in lookup WHERE clause)
     delta_column_2: Optional[str] = None
-    # Set at runtime by the lookup task from pipeline_lookup_config.lookup_query.
-    # None means the LookupExecutor will auto-generate SELECT COUNT(*) FROM ...
+    # Per-table lookup query template, read from rdbms_ingestion_config.Lookup_Query_Template.
+    # Supports {schema}/{table}/{key_column} placeholders — see LookupExecutor._resolve_query_for_task.
+    # None means the LookupExecutor will auto-generate SELECT {key_cols} FROM {schema}.{table} LIMIT 1
     lookup_query: Optional[str] = None
 
     # Set at runtime by the lookup task from pipeline_lookup_config.query_timeout,
@@ -276,6 +277,8 @@ class ConfigManager:
             ),
             # Secondary delta column (OR condition in lookup WHERE clause)
             delta_column_2      = r.get("Delta_Column_2") or r.get("delta_column_2"),
+            # Per-table lookup/presence-check query template — rdbms_ingestion_config.Lookup_Query_Template
+            lookup_query        = r.get("Lookup_Query_Template") or r.get("lookup_query_template"),
             # S3-specific fields — present only in s3_config_master rows
             s3_source_bucket_name   = r.get("s3_source_bucket_name") or r.get("source_bucket_name"),
             s3_external_path        = r.get("s3_external_path")       or r.get("external_path"),

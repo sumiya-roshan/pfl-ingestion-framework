@@ -9,12 +9,11 @@
     "  REPLACE_WITH_NODE_TYPE : e.g. i3.xlarge (AWS) or Standard_DS3_v2 (Azure)",
     "",
     "How it works:",
-    "  Task 1 — source_lookup: connects to source, runs COUNT queries per table",
-    "    (threaded), filters out 0-row tables, inserts SKIPPED audit rows, and",
-    "    publishes approved config IDs via dbutils.jobs.taskValues.",
-    "  Task 2 — run_source_ingestion: reads taskValues, skips 0-row tables,",
-    "    and runs main ingestion (same as before). Falls back to all active tasks",
-    "    if run standalone (taskValues not available)."
+    "  run_source_ingestion — single task. Loads all active tasks for the source,",
+    "    then for each table (threaded, max_workers): runs a lightweight presence",
+    "    check immediately followed by extraction for that same table. Tables with",
+    "    0 rows in the source get a SKIPPED audit row and extraction is skipped —",
+    "    lookup and extraction are no longer separate job tasks."
   ],
 
   "name": "generic_source_to_bronze_ingestion",
@@ -38,7 +37,7 @@
     {
       "name": "pipeline_name",
       "default": "",
-      "description": "Pipeline name — must match pipeline_lookup_config.pipeline_name for lookup query resolution."
+      "description": "Pipeline name — used to filter active tasks in the child config table (e.g. rdbms_ingestion_config.Pipeline_Name)."
     },
     {
       "name": "job_run_id",
@@ -58,7 +57,7 @@
     {
       "name": "max_workers",
       "default": "4",
-      "description": "Max parallel workers for both lookup and ingestion ThreadPoolExecutors."
+      "description": "Max parallel workers — each worker runs a presence check then extraction for one table."
     }
   ],
 
@@ -82,37 +81,13 @@
   "tasks": [
     {
       "_comment": [
-        "Task 1: source_lookup — runs COUNT queries for all active ingestion tables.",
-        "Tables with 0 rows get a SKIPPED audit record and are excluded from Task 2.",
-        "Approved config IDs are passed to Task 2 via dbutils.jobs.taskValues."
-      ],
-      "task_key": "source_lookup",
-      "job_cluster_key": "ingestion_cluster",
-      "notebook_task": {
-        "notebook_path": "REPLACE_WITH_REPO_PATH/src/lookup/lookup",
-        "base_parameters": {
-          "config_master_id":   "{{job.parameters.config_master_id}}",
-          "source_system_id":   "{{job.parameters.source_system_id}}",
-          "target_catalog":     "{{job.parameters.target_catalog}}",
-          "pipeline_name":      "{{job.parameters.pipeline_name}}",
-          "job_run_id":         "{{job.run_id}}",
-          "environment":        "{{job.parameters.environment}}",
-          "max_workers":        "{{job.parameters.max_workers}}"
-        }
-      },
-      "timeout_seconds": 3600,
-      "max_retries": 0
-    },
-    {
-      "_comment": [
-        "Task 2: run_source_ingestion — main ingestion notebook.",
-        "Depends on source_lookup; reads taskValues to get the filtered config ID list.",
-        "Falls back to all active tasks if run standalone (outside a job)."
+        "run_source_ingestion — main ingestion notebook.",
+        "For each active table: runs the presence check then, if data exists,",
+        "extraction — both inside IngestionOrchestrator.run(), in the same worker",
+        "thread. Tables with 0 rows get a SKIPPED audit record; extraction is",
+        "never invoked for them."
       ],
       "task_key": "run_source_ingestion",
-      "depends_on": [
-        { "task_key": "source_lookup" }
-      ],
       "job_cluster_key": "ingestion_cluster",
       "notebook_task": {
         "notebook_path": "REPLACE_WITH_REPO_PATH/src/main/main",

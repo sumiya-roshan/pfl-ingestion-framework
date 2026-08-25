@@ -31,14 +31,12 @@ dbutils.library.restartPython()
 import sys
 sys.path.append("..")
 
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ingestion.utils.config_manager import (
     AUDIT_STATUS_FAILED,
     AUDIT_STATUS_SUCCESS,
     AUDIT_STATUS_SKIPPED,
     ConfigManager,
-    SourceSystemConfig,
     IngestionTaskConfig,
     SOURCE_SYSTEM_TABLE,
     CONFIG_MASTER_TABLE,
@@ -62,8 +60,8 @@ dbutils.widgets.text("job_run_id",          "",               "Job Run ID (requi
 dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Base Path (blank = skip landing write)")
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
-dbutils.widgets.text("lookup_task_name",     "source_lookup",  "Upstream Lookup Task Name")
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
+dbutils.widgets.text("max_workers",         "4",              "Max parallel workers (lookup + extraction per task)")
 
 # COMMAND ----------
 
@@ -95,9 +93,8 @@ if not job_run_id:
 landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
-lookup_task_name     = dbutils.widgets.get("lookup_task_name")     or "source_lookup"
 batch_start_date_raw = dbutils.widgets.get("batch_start_date")     or "1"
-max_workers          = 4  # Default fallback if not provided in taskValues metadata
+max_workers          = int(dbutils.widgets.get("max_workers") or "4")
 
 # Parse batch_start_date_raw to datetime object if it is from the orchestrator
 from datetime import datetime
@@ -181,44 +178,34 @@ print(f"pipeline_name from widget: '{pipeline_name}'")
 
 # MAGIC %md
 # MAGIC ### Discover ingestion tasks for this source
+# MAGIC
+# MAGIC Lookup (presence check) and extraction are coupled per table inside
+# MAGIC `IngestionOrchestrator.run()` — there is no separate lookup-only phase.
+# MAGIC Every active task is loaded here and handed straight to the thread pool below;
+# MAGIC tables with 0 rows in the source are detected and skipped individually as
+# MAGIC their turn comes up, right before extraction would have started.
 
 # COMMAND ----------
 
-# source_sys = None
-tasks = []
-loaded_from_metadata = False
+config_mgr = ConfigManager(
+    spark,
+    source_system_table = SOURCE_SYSTEM_TABLE,
+    config_master_table = CONFIG_MASTER_TABLE,
+    target_catalog      = target_catalog,
+)
 
-# 1. Try reading the fully filtered task configurations from Task 1 metadata
-try:
-    filtered_tasks_raw = dbutils.jobs.taskValues.get(
-        taskKey    = lookup_task_name,
-        key        = "filtered_tasks_metadata",
-        default    = None,
-        debugValue = None,
-    )
-    if filtered_tasks_raw and filtered_tasks_raw.strip():
-        payload = json.loads(filtered_tasks_raw)
-        source_sys = SourceSystemConfig.from_dict(payload["source_sys"])
-        tasks = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
-        loaded_from_metadata = True
-        print(f"Loaded filtered tasks metadata from upstream task: {lookup_task_name}")
+source_sys, tasks = config_mgr.get_active_tasks(
+    config_master_id = config_master_id,
+    source_system_id = source_system_id,
+    pipeline_name    = pipeline_name,
+    batch_start_date = batch_start_date_raw,
+)
 
-        # Override max_workers with max_workers_raw from DB lookup config if configured
-        db_max_workers_raw = payload.get("max_workers_raw")
-        if db_max_workers_raw is not None:
-            max_workers = int(db_max_workers_raw)
-            print(f"Using max_workers_raw from database configuration: {max_workers}")
-except Exception as l_exc:
-    print(f"[INFO] Failed to fetch metadata from taskValues ({l_exc}) — falling back to database query.")
-
-if not loaded_from_metadata:
-    raise Exception("Testing Error: Failed to load task configurations from upstream get_tasks metadata!")
+print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
+print(f"Active tasks    : {len(tasks)}")
 
 if not tasks:
-    dbutils.notebook.exit(
-        "Lookup filter left 0 tasks to run — all tables had 0 rows in source. "
-        "Check pipeline_lookup_config and SKIPPED audit rows for details."
-    )
+    dbutils.notebook.exit("No active ingestion tasks found for this pipeline.")
 
 # COMMAND ----------
 
@@ -293,18 +280,27 @@ with ThreadPoolExecutor(max_workers=max_workers) as executor:
 
 # COMMAND ----------
 
+STATUS_ICONS = {
+    AUDIT_STATUS_SUCCESS: "✅",
+    AUDIT_STATUS_SKIPPED: "⏭️",
+}
+
 print(f"\n{'='*75}")
 print(f"{'CONF ID':>8}  {'STATUS':<10}  {'ROWS':>8}  ERROR")
 print(f"{'='*75}")
 for r in sorted(results, key=lambda x: x["config_id"]):
-    icon   = "✅" if r["status"] == AUDIT_STATUS_SUCCESS else "❌"
+    icon   = STATUS_ICONS.get(r["status"], "❌")
     error  = (r.get("error") or "")[:50]
     print(f"{r['config_id']:>8}  {icon} {r['status']:<8}  {r.get('rows_read', 0):>8}  {error}")
 print(f"{'='*75}")
 
 succeeded = [r for r in results if r["status"] == AUDIT_STATUS_SUCCESS]
+skipped   = [r for r in results if r["status"] == AUDIT_STATUS_SKIPPED]
 failed    = [r for r in results if r["status"] == AUDIT_STATUS_FAILED]
-print(f"Total: {len(results)} | ✅ Succeeded: {len(succeeded)} | ❌ Failed: {len(failed)}\n")
+print(
+    f"Total: {len(results)} | ✅ Succeeded: {len(succeeded)} | "
+    f"⏭️ Skipped (0 rows): {len(skipped)} | ❌ Failed: {len(failed)}\n"
+)
 
 # COMMAND ----------
 
@@ -315,7 +311,10 @@ if failed:
         f"Check the audit table for details. Failed Config IDs: {failed_ids}"
     )
 
-dbutils.notebook.exit(f"SUCCESS: {len(succeeded)}/{len(results)} objects ingested.")
+dbutils.notebook.exit(
+    f"SUCCESS: {len(succeeded)}/{len(results)} objects ingested "
+    f"({len(skipped)} skipped — 0 rows in source)."
+)
 
 # COMMAND ----------
 

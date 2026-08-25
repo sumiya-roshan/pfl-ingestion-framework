@@ -20,6 +20,7 @@ from typing import Optional
 from .config_manager import (
     AUDIT_STATUS_FAILED,
     AUDIT_STATUS_SUCCESS,
+    AUDIT_STATUS_SKIPPED,
     ConfigManager,
     IngestionTaskConfig,
     SourceSystemConfig,
@@ -32,6 +33,7 @@ from .writers.bronze_writer import BronzeWriter
 from .logger import get_logger
 from .secrets import SecretResolver
 from .retry import retry_on_failure
+from lookup.lookup_executor import LookupExecutor
 
 
 class IngestionOrchestrator:
@@ -67,6 +69,7 @@ class IngestionOrchestrator:
         self.s3_writer     = S3RawWriter()
         self.bronze_writer = BronzeWriter(spark)
         self.logger        = get_logger(environment=environment)
+        self.lookup_executor = LookupExecutor(spark, self.secrets, self.logger)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -110,6 +113,41 @@ class IngestionOrchestrator:
         # pipeline_name and delta_layer come from config table, with fallbacks
         pipeline_name = ingest_obj.pipeline_name or self.pipeline_name
         delta_layer   = ingest_obj.effective_delta_layer   # property: config → fallback 'BRONZE'
+
+        # ── Presence check — runs immediately before extraction, per table ─────
+        # Zero rows in the source → skip extraction entirely and log SKIPPED.
+        # Lookup errors are fail-safe (count=-1, included=True) and fall through
+        # to normal extraction below.
+        lookup_result = self.lookup_executor.check_presence(source_sys, ingest_obj)
+        if lookup_result["count"] == 0:
+            self.logger.info(
+                f"[Lookup] config_id={ingest_obj.config_id} ({ingest_obj.source_object_name}) "
+                f"— 0 rows in source. Skipping extraction."
+            )
+            skip_context = dict(job_context or {})
+            skip_context.setdefault("trigger_id", trigger_id)
+            try:
+                self.audit.log_skipped_row(
+                    task              = ingest_obj,
+                    source_sys        = source_sys,
+                    job_context       = skip_context,
+                    pipeline_name     = pipeline_name,
+                    config_master_id  = config_master_id,
+                    reason            = f"Source lookup returned 0 rows. Query: {lookup_result['resolved_query']}",
+                    business_date     = business_date,
+                )
+            except Exception as audit_exc:
+                self.logger.error(
+                    f"config_id={ingest_obj.config_id} — failed to write SKIPPED audit row: {audit_exc}"
+                )
+            return {
+                "config_id": ingest_obj.config_id,
+                "run_id":   None,
+                "status":   AUDIT_STATUS_SKIPPED,
+                "rows_read": 0,
+                "error_code": None,
+                "error":    None,
+            }
 
         # Start audit: insert the INPROGRESS record before any ingestion work.
         audit_context = dict(job_context or {})

@@ -1,10 +1,11 @@
 """
-LookupExecutor — Source row-count pre-check before ingestion.
+LookupExecutor — Source row-presence pre-check, run inline per table
+immediately before extraction (see IngestionOrchestrator.run()).
 
-Connects to each source table using the same connector infrastructure as the
-main ingestion pipeline and runs a COUNT query to determine whether data is
-present. Tables with zero rows are excluded from the ingestion run and logged
-to the audit table as SKIPPED.
+Connects to a source table using the same connector infrastructure as the
+main ingestion pipeline and runs a lightweight probe query to determine
+whether data is present. Tables with zero rows are excluded from ingestion
+and logged to the audit table as SKIPPED — without ever calling extract().
 
 DRY Design
 ----------
@@ -13,27 +14,34 @@ using the ingestion framework's Connector Factory. It reuses their connection, U
 and option resolution methods directly, eliminating duplicate credential, host,
 or database/collection mapping logic.
 
-Query template (pipeline-level)
---------------------------------
-A single lookup_query_template is configured per pipeline in the
-pipeline_lookup_config table. The template is applied to every table in that
-pipeline at runtime by substituting placeholders:
+Query template resolution order (per table)
+--------------------------------------------
+    1. task.lookup_query        → per-table template from
+                                   rdbms_ingestion_config.Lookup_Query_Template
+    2. self.lookup_query_template → pipeline-level fallback template
+                                   (legacy, from pipeline_lookup_config)
+    3. auto-generated           → SELECT {key_cols} FROM {schema}.{table} LIMIT 1
+
+Placeholders substituted into whichever template applies:
 
     {schema}             → task.source_schema  (or empty string if NULL)
     {source_schema}      → same as {schema}
     {table}              → task.source_object_name
     {source_object_name} → same as {table}
+    {key_column}          → task.primary_key_cols (or '1' if NULL)
+    {key_columns}         → same as {key_column}
 
 Threading model
 ---------------
-All lookup queries run concurrently inside a ThreadPoolExecutor (same pattern
-as main.py). The caller controls max_workers.
+IngestionOrchestrator.run() calls check_presence() for one task at a time,
+immediately followed by extraction for that same task if data is present.
+Concurrency across tables comes from the caller's own ThreadPoolExecutor
+(main.py) running run() for multiple tasks in parallel — there is no
+separate lookup-only fan-out phase.
 """
 from __future__ import annotations
 
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional
+from typing import Dict, Optional
 
 # Import the existing connectors and factory
 from ingestion.connectors.factory import get_connector
@@ -43,19 +51,20 @@ from ingestion.connectors.mongo_connector import MongoConnector
 
 class LookupExecutor:
     """
-    Runs COUNT queries against a source system for a list of ingestion tasks
-    and returns a result dict per task indicating whether data is present.
+    Runs a presence-check query against a source system for one ingestion
+    task at a time and returns a result dict indicating whether data exists.
 
-    Instantiates the connector class for each task using get_connector() and
-    utilizes their internal helpers to fetch connection parameters.
+    Instantiates the connector class for the task using get_connector() and
+    utilizes its internal helpers to fetch connection parameters.
 
     Parameters
     ----------
     spark                 : active SparkSession
     secrets               : SecretResolver instance
     logger                : logging.Logger (from ingestion.utils.logger.get_logger)
-    lookup_query_template : pipeline-level COUNT template from pipeline_lookup_config.
-                            If None, auto-generates SELECT COUNT(*) FROM {schema}.{table}
+    lookup_query_template : pipeline-level fallback template, used only when a task
+                            has no per-table task.lookup_query set. If both are None,
+                            auto-generates SELECT {key_cols} FROM {schema}.{table} LIMIT 1
     """
 
     def __init__(
@@ -69,68 +78,16 @@ class LookupExecutor:
         self.secrets               = secrets
         self.logger                = logger
         self.lookup_query_template = lookup_query_template  # may be None → auto-gen
-        self._lock                 = threading.Lock()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def run_all(
-        self,
-        source_sys,
-        tasks: List[Any],
-        max_workers: int = 4,
-    ) -> List[Dict]:
+    def check_presence(self, source_sys, task) -> Dict:
         """
-        Run lookup queries for all tasks concurrently.
-
-        The pipeline-level lookup_query_template is applied to each task by
-        substituting {schema} / {table} placeholders with the task's actual
-        source_schema and source_object_name values.
-
-        Parameters
-        ----------
-        source_sys  : SourceSystemConfig
-        tasks       : list of IngestionTaskConfig
-        max_workers : thread pool size
-
-        Returns
-        -------
-        list of dicts, one per task:
-            {
-                "config_id":          int,
-                "source_object_name": str,
-                "resolved_query":     str,   # the actual query that ran
-                "count":              int,   # 0 = no data, >0 = has data, -1 = error
-                "included":           bool,
-                "error":              str | None,
-            }
+        Run the presence check for a single task and return immediately —
+        the public entry point used by IngestionOrchestrator.run() to gate
+        extraction. Thin wrapper around _lookup_one(); never raises.
         """
-        results = []
-        self.logger.info(
-            f"[LookupExecutor] Starting lookup for {len(tasks)} task(s) on source "
-            f"'{source_sys.source_name}' (max_workers={max_workers}). "
-            f"Template: {(self.lookup_query_template or 'auto-generate')!r}"
-        )
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_task = {
-                executor.submit(self._lookup_one, source_sys, task): task
-                for task in tasks
-            }
-            for future in as_completed(future_to_task):
-                task = future_to_task[future]
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    # Outer safety net — _lookup_one is already fail-safe.
-                    self.logger.warning(
-                        f"[LookupExecutor] Unexpected executor error for "
-                        f"config_id={task.config_id} ({task.source_object_name}): {exc}. "
-                        f"Including table (fail-safe)."
-                    )
-                    result = self._make_failsafe_result(task, error=str(exc))
-                results.append(result)
-
-        return results
+        return self._lookup_one(source_sys, task)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -255,7 +212,9 @@ class LookupExecutor:
 
     def _resolve_query_for_task(self, task) -> str:
         """
-        Apply the pipeline-level lookup_query_template to a specific task by
+        Resolve the probe query for a specific task, preferring the per-table
+        template (task.lookup_query, from rdbms_ingestion_config.Lookup_Query_Template)
+        over the pipeline-level fallback (self.lookup_query_template), by
         substituting the {schema} / {table} / {key_column} placeholders.
 
         Placeholder support (all case-insensitive):
@@ -266,7 +225,7 @@ class LookupExecutor:
             {key_column}         → task.primary_key_cols (or '1' if NULL)
             {key_columns}        → same
 
-        If the template is None, auto-generates:
+        If neither template is set, auto-generates:
             SELECT {key_cols} FROM {schema_prefix}{table} LIMIT 1
         where schema_prefix is "{schema}." when source_schema is not NULL.
         """
@@ -274,11 +233,13 @@ class LookupExecutor:
         table  = task.source_object_name or ""
         key_cols = task.primary_key_cols or "1"
 
-        if not self.lookup_query_template:
+        template = getattr(task, "lookup_query", None) or self.lookup_query_template
+
+        if not template:
             schema_prefix = f"{schema}." if schema else ""
             return f"SELECT {key_cols} FROM {schema_prefix}{table} LIMIT 1"
 
-        resolved = self.lookup_query_template
+        resolved = template
         for placeholder, value in [
             ("{source_schema}",      schema),
             ("{schema}",             schema),
