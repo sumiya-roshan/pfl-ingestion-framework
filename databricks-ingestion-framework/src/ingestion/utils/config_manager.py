@@ -209,6 +209,18 @@ class ConfigManager:
             retry_interval          = r.get("retry_interval"),
         )
 
+    @staticmethod
+    def _to_int(value) -> Optional[int]:
+        """
+        Coerces a config-table numeric value to int. Decimal-typed columns
+        (e.g. data_size DECIMAL(10,2)) come back from Spark as Python Decimal
+        ('3866.00'), which str()'s to a non-integer literal and breaks JDBC
+        options like fetchsize that require a plain integer string.
+        """
+        if value is None:
+            return None
+        return int(float(value))
+
     def _build_ingestion_task(self, r: dict) -> IngestionTaskConfig:
         """
         Dynamically falls back across different column aliases to support 
@@ -262,11 +274,11 @@ class ConfigManager:
             target_table        = target_table,
             pipeline_name       = r.get("Pipeline_Name") or r.get("pipeline_name"),
             delta_layer         = r.get("Delta_Layer") or r.get("delta_layer"),
-            data_read_size      = r.get("data_size") or r.get("data_read_size"),
+            data_read_size      = self._to_int(r.get("data_size") or r.get("data_read_size")),
             file_format         = r.get("file_format"),
             write_mode          = r.get("write_mode") or ("merge" if pk_cols else default_write_mode),
-            priority            = r.get("Priority") or r.get("priority") or 0,   # capital P in rdbms config
-            batch_id            = r.get("Batch_ID") or r.get("batch_id"),         # capital B+ID in rdbms config
+            priority            = self._to_int(r.get("Priority") or r.get("priority")) or 0,   # capital P in rdbms config
+            batch_id            = self._to_int(r.get("Batch_ID") or r.get("batch_id")),         # capital B+ID in rdbms config
             schema_evolution_mode = r.get("schema_evolution_mode"),
             partition_column    = r.get("partition_column"),
             source_filter       = r.get("source_filter"),
