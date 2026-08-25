@@ -83,26 +83,14 @@ class LookupExecutor:
 
     def check_presence(self, source_sys, task) -> Dict:
         """
-        Run the presence check for a single task and return immediately —
-        the public entry point used by IngestionOrchestrator.run() to gate
-        extraction. Thin wrapper around _lookup_one(); never raises.
+        Run a presence check for one ingestion task — the entry point used by
+        IngestionOrchestrator.run() to gate extraction. Dispatches to the JDBC,
+        MongoDB, or file-based strategy. Retries on the source system's
+        retry_count/retry_interval. Always returns a result dict — never raises
+        (a lookup error is fail-safe: the table is included, not excluded).
         """
-        return self._lookup_one(source_sys, task)
-
-    # ── Internal helpers ──────────────────────────────────────────────────────
-
-    def _lookup_one(self, source_sys, task) -> Dict:
-        """
-        Run a single COUNT lookup for one ingestion task.
-        Dispatches to JDBC, MongoDB, or file-based strategy.
-        Always returns a result dict — never raises (fail-safe).
-        """
-        import time
-
-        config_id    = task.config_id
-        object_name  = task.source_object_name
-
-        # Resolve the per-table query from the pipeline-level template
+        config_id      = task.config_id
+        object_name    = task.source_object_name
         resolved_query = self._resolve_query_for_task(task)
 
         max_retries    = int(getattr(source_sys, "retry_count", 0) or 0)
@@ -111,7 +99,6 @@ class LookupExecutor:
         attempt = 0
         while True:
             try:
-                # Instantiate the actual connector using the factory
                 connector = get_connector(self.spark, source_sys, task, self.secrets)
 
                 if isinstance(connector, JdbcConnector):
@@ -146,9 +133,14 @@ class LookupExecutor:
                         f"[LookupExecutor] Lookup FAILED for config_id={config_id} "
                         f"({object_name}) after {attempt} retries: {exc}. Including table (fail-safe)."
                     )
-                    return self._make_failsafe_result(
-                        task, resolved_query=resolved_query, error=str(exc)
-                    )
+                    return {
+                        "config_id":          config_id,
+                        "source_object_name": object_name,
+                        "resolved_query":     resolved_query,
+                        "count":              -1,
+                        "included":           True,
+                        "error":              str(exc),
+                    }
 
                 attempt += 1
                 self.logger.warning(
@@ -156,6 +148,7 @@ class LookupExecutor:
                     f"({object_name}): {exc}. Retrying in {retry_interval}s..."
                 )
                 if retry_interval > 0:
+                    import time
                     time.sleep(retry_interval)
 
     # ── Strategy: JDBC ───────────────────────────────────────────────────────
@@ -253,21 +246,3 @@ class LookupExecutor:
             resolved = resolved.replace(placeholder.lower(), value)
 
         return resolved
-
-    # ── Fallback result ───────────────────────────────────────────────────────
-
-    @staticmethod
-    def _make_failsafe_result(
-        task,
-        resolved_query: Optional[str] = None,
-        error: Optional[str] = None,
-    ) -> Dict:
-        """Return a fail-safe result dict (included=True) for a task that errored."""
-        return {
-            "config_id":          task.config_id,
-            "source_object_name": task.source_object_name,
-            "resolved_query":     resolved_query or "N/A",
-            "count":              -1,
-            "included":           True,
-            "error":              error,
-        }

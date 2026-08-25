@@ -27,10 +27,9 @@ from .base_connector import BaseConnector
 
 def _parse_timeout_to_seconds(value: Optional[str]) -> Optional[int]:
     """
-    Parses pipeline_lookup_config.query_timeout ('HH:mm:ss', e.g. '12:00:00'),
-    carried per-task as IngestionTaskConfig.query_timeout, into whole seconds
-    for the JDBC 'queryTimeout' option. Returns None for unset/blank/zero
-    values (no timeout applied).
+    Parses config_source_system.query_timeout ('HH:mm:ss', e.g. '12:00:00')
+    into whole seconds for the JDBC 'queryTimeout' option. Returns None for
+    unset/blank/zero values (no timeout applied).
     """
     if not value:
         return None
@@ -122,12 +121,11 @@ class JdbcConnector(BaseConnector):
         if self.ingest_obj.data_read_size:
             opts["fetchsize"] = str(self.ingest_obj.data_read_size)
 
-        # Source query timeout (pipeline_lookup_config.query_timeout, 'HH:mm:ss',
-        # carried per-task as ingest_obj.query_timeout). Maps to
-        # java.sql.Statement.setQueryTimeout(): the JDBC driver asks the source
-        # DB to cancel the running statement once exceeded, rather than merely
-        # abandoning the client-side wait.
-        timeout_sec = _parse_timeout_to_seconds(self.ingest_obj.query_timeout)
+        # Source query timeout (config_source_system.query_timeout, 'HH:mm:ss').
+        # Maps to java.sql.Statement.setQueryTimeout(): the JDBC driver asks the
+        # source DB to cancel the running statement once exceeded, rather than
+        # merely abandoning the client-side wait.
+        timeout_sec = _parse_timeout_to_seconds(ss.query_timeout)
         if timeout_sec:
             opts["queryTimeout"] = str(timeout_sec)
         return opts

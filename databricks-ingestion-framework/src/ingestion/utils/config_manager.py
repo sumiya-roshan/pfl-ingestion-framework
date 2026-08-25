@@ -66,6 +66,11 @@ class SourceSystemConfig:
     retry_count: Optional[int]
     retry_interval: Optional[int]
 
+    # Source query timeout, format 'HH:mm:ss' (e.g. '12:00:00'). Applied to the
+    # JDBC statement so the source DB cancels the query itself on expiry — see
+    # JdbcConnector._read_options(). None → no timeout applied.
+    query_timeout: Optional[str] = None
+
     def to_dict(self) -> dict:
         import decimal
         res = {}
@@ -122,11 +127,6 @@ class IngestionTaskConfig:
     # Supports {schema}/{table}/{key_column} placeholders — see LookupExecutor._resolve_query_for_task.
     # None means the LookupExecutor will auto-generate SELECT {key_cols} FROM {schema}.{table} LIMIT 1
     lookup_query: Optional[str] = None
-
-    # Set at runtime by the lookup task from pipeline_lookup_config.query_timeout,
-    # format 'HH:mm:ss' (e.g. '12:00:00'). Applied to the JDBC statement so the
-    # source DB cancels the query itself on expiry — see JdbcConnector._read_options().
-    query_timeout: Optional[str] = None
 
     @property
     def primary_key_list(self) -> Optional[List[str]]:
@@ -207,6 +207,7 @@ class ConfigManager:
             landing_volume_path     = r.get("landing_volume_path"),
             retry_count             = r.get("retry_count"),
             retry_interval          = r.get("retry_interval"),
+            query_timeout           = r.get("query_timeout"),
         )
 
     @staticmethod
@@ -396,9 +397,15 @@ class ConfigManager:
         data_size: int,
     ) -> None:
         """
-        Updates business_date, raw_last_sink_date, sink_batch_started_date,
-        rownum, and data_size on the child config table row for this task,
-        after a successful ingestion run.
+        Updates status, business_date, raw_last_sink_date, sink_batch_started_date,
+        rownum, and data_size on the child config table row for this task.
+
+        Only called from the SUCCESS path in IngestionOrchestrator.run(), so
+        status is written as AUDIT_STATUS_SUCCESS unconditionally.
+
+        silver_last_sink_date is intentionally left untouched here — it belongs
+        to the (separately coupled) Silver pipeline; see the
+        `# trigger_silver [TO DO]` note in orchestrator.py.
         """
         master_rows = (
             self.spark.table(self.config_master_table)
@@ -434,7 +441,8 @@ class ConfigManager:
 
         self.spark.sql(f"""
             UPDATE {child_table_fqn}
-            SET business_date           = {self._sql_literal(business_date)},
+            SET status                  = {self._sql_literal(AUDIT_STATUS_SUCCESS)},
+                business_date           = {self._sql_literal(business_date)},
                 raw_last_sink_date      = {self._sql_literal(raw_last_sink_date)},
                 sink_batch_started_date = {sb_val},
                 rownum                  = {int(rownum or 0)},
