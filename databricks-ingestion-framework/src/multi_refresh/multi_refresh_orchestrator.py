@@ -62,7 +62,8 @@ CFG_SCHEMA           = f"{admin_catalog_name}.pfl_x_schema"
 TEMP_SCHEMA          = f"{admin_catalog_name}.temp"
 BATCH_RUN_CFG_TABLE  = f"{CFG_SCHEMA}.tb_report_batch_run_config"
 DEP_MASTER_TABLE     = f"{CFG_SCHEMA}.dependency_master_config"
-LOOKUP_CFG_TABLE     = f"{CFG_SCHEMA}.pipeline_lookup_config"
+RDBMS_CFG_TABLE      = f"{CFG_SCHEMA}.rdbms_ingestion_config"
+CONFIG_MASTER_TABLE  = f"{CFG_SCHEMA}.config_master"
 ELIGIBLE_TEMP_TABLE  = f"{TEMP_SCHEMA}.tb_eligible_objects"
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -147,7 +148,7 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
             FROM table_refresh_df a
             LEFT JOIN (
                 SELECT Config_Master_ID, Config_ID, Pipeline_Name
-                FROM {CFG_SCHEMA}.rdbms_ingestion_config
+                FROM {RDBMS_CFG_TABLE}
                 WHERE 
                 Day_Execution_Count > 0 AND 
                   to_date(Sink_Batch_Started_Date) = '{trigger_date_str}'
@@ -168,7 +169,7 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
     for r in eligible_rows:
         r_dict = r.asDict()
         res = spark.sql(f"""
-            SELECT Pipeline_Name FROM {CFG_SCHEMA}.rdbms_ingestion_config
+            SELECT Pipeline_Name FROM {RDBMS_CFG_TABLE}
             WHERE Config_Master_ID = {r['Config_Master_ID']} AND Config_ID = {r['Config_ID']}
             LIMIT 1
         """).collect()
@@ -188,7 +189,7 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
     
     # MERGE 1: Update status to 'In Progress' in child config table
     merge_with_retry(f"""
-        MERGE INTO {CFG_SCHEMA}.rdbms_ingestion_config t
+        MERGE INTO {RDBMS_CFG_TABLE} t
         USING {ELIGIBLE_TEMP_TABLE} s
         ON t.Config_Master_ID = s.Config_Master_ID AND t.Config_ID = s.Config_ID
         WHEN MATCHED THEN UPDATE SET 
@@ -299,19 +300,90 @@ def process_email_delivery_multi_refresh(multi_refresh_df, trigger_hhmm, trigger
 
 # COMMAND ----------
 
+def _resolve_child_table_fqn(config_master_id: int) -> str:
+    """
+    Resolves the child ingestion-config table for a given Config_Master_ID via
+    config_master — same routing ConfigManager.get_active_tasks() uses, so this
+    works generically for RDBMS, NoSQL, S3, or any future source type without
+    hardcoding a table name here.
+    """
+    master_rows = (
+        spark.table(CONFIG_MASTER_TABLE)
+        .filter(f"config_id = {int(config_master_id)}")
+        .collect()
+    )
+    if not master_rows:
+        raise ValueError(f"No entry in {CONFIG_MASTER_TABLE} for config_id={config_master_id}")
+    m_row = master_rows[0].asDict()
+    return f"{m_row.get('config_catalog_name')}.{m_row.get('config_schema_name')}.{m_row.get('config_table_name')}"
+
+
+def _active_pipeline_names(child_table_fqn: str) -> set:
+    """
+    Returns the set of distinct Pipeline_Name values with at least one active
+    row in the given child config table. Resolves the Pipeline_Name/Is_Active
+    column names case-insensitively, since child tables vary in casing
+    (rdbms_ingestion_config uses Pipeline_Name/Is_Active; others may not).
+    """
+    df = spark.table(child_table_fqn)
+    pipeline_col = next((c for c in df.columns if c.lower() == "pipeline_name"), None)
+    active_col   = next((c for c in df.columns if c.lower() == "is_active"), None)
+    if not pipeline_col or not active_col:
+        logger.warning(
+            f"[MultiRefresh] {child_table_fqn} has no Pipeline_Name/Is_Active "
+            f"columns — skipping job-trigger lookup for this table."
+        )
+        return set()
+
+    rows = (
+        df.filter(f"{active_col} = true")
+        .select(pipeline_col)
+        .distinct()
+        .collect()
+    )
+    return {r[pipeline_col] for r in rows}
+
+
 def trigger_eligible_jobs(trigger_time_str: str) -> None:
-    """Queries lookup config joined with eligible tables and triggers Databricks Jobs."""
+    """
+    Joins each eligible table's own child ingestion-config table (resolved
+    dynamically per Config_Master_ID via config_master — RDBMS, NoSQL, S3, or
+    any future source type) against tb_eligible_objects and triggers the
+    matching Databricks Job. Pipeline_Name doubles as the Databricks Job name.
+
+    Note: Is_Active here is per-table (one row per table in the child config),
+    not a single pipeline-level kill switch — a pipeline triggers as long as
+    at least one of its eligible tables is still active.
+    """
     if not spark.catalog.tableExists(ELIGIBLE_TEMP_TABLE):
         return
 
-    job_cfg_rows = spark.sql(f"""
-        SELECT DISTINCT j.pipeline_name AS Databricks_Job_Name, e.Config_Master_ID, e.Pipeline_Name
-        FROM {LOOKUP_CFG_TABLE} j
-        INNER JOIN {ELIGIBLE_TEMP_TABLE} e 
-           ON j.config_master_id = e.Config_Master_ID
-          AND j.pipeline_name = e.Pipeline_Name
-        WHERE j.is_active = true
-    """).collect()
+    eligible_df = spark.table(ELIGIBLE_TEMP_TABLE)
+    config_master_ids = [r[0] for r in eligible_df.select("Config_Master_ID").distinct().collect()]
+
+    job_cfg_rows = []
+    for cmid in config_master_ids:
+        try:
+            child_table_fqn = _resolve_child_table_fqn(cmid)
+            active_pipelines = _active_pipeline_names(child_table_fqn)
+        except Exception as exc:
+            logger.error(f"[MultiRefresh] Could not resolve child config table for Config_Master_ID={cmid}: {exc}")
+            continue
+
+        rows = (
+            eligible_df
+            .filter(f"Config_Master_ID = {int(cmid)}")
+            .select("Config_Master_ID", "Pipeline_Name")
+            .distinct()
+            .collect()
+        )
+        for row in rows:
+            if row["Pipeline_Name"] in active_pipelines:
+                job_cfg_rows.append({
+                    "Databricks_Job_Name": row["Pipeline_Name"],
+                    "Config_Master_ID":    row["Config_Master_ID"],
+                    "Pipeline_Name":       row["Pipeline_Name"],
+                })
 
     for row in job_cfg_rows:
         job_name      = row["Databricks_Job_Name"]
