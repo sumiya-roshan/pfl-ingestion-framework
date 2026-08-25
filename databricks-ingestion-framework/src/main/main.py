@@ -207,6 +207,13 @@ print(f"Active tasks    : {len(tasks)}")
 if not tasks:
     dbutils.notebook.exit("No active ingestion tasks found for this pipeline.")
 
+# rdbms_ingestion_config.Max_Workers overrides the widget default when set —
+# same value is expected on every row for a given pipeline (see IngestionTaskConfig.max_workers).
+config_max_workers = tasks[0].max_workers
+if config_max_workers:
+    max_workers = config_max_workers
+    print(f"Using max_workers={max_workers} from rdbms_ingestion_config.Max_Workers")
+
 # COMMAND ----------
 
 # MAGIC %md
