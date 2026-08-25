@@ -14,15 +14,15 @@ using the ingestion framework's Connector Factory. It reuses their connection, U
 and option resolution methods directly, eliminating duplicate credential, host,
 or database/collection mapping logic.
 
-Query template resolution order (per table)
---------------------------------------------
-    1. task.lookup_query        → per-table template from
-                                   rdbms_ingestion_config.Lookup_Query_Template
-    2. self.lookup_query_template → pipeline-level fallback template
-                                   (legacy, from pipeline_lookup_config)
-    3. auto-generated           → SELECT {key_cols} FROM {schema}.{table} LIMIT 1
+Query template
+--------------
+Each task must carry its own probe query in task.lookup_query, sourced from
+rdbms_ingestion_config.Lookup_Query_Template. There is no pipeline-level
+fallback and no auto-generation — a task with no template configured raises
+ValueError (caught by check_presence()'s retry/fail-safe handling like any
+other lookup error).
 
-Placeholders substituted into whichever template applies:
+Placeholders substituted into the template:
 
     {schema}             → task.source_schema  (or empty string if NULL)
     {source_schema}      → same as {schema}
@@ -41,7 +41,7 @@ separate lookup-only fan-out phase.
 """
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict
 
 # Import the existing connectors and factory
 from ingestion.connectors.factory import get_connector
@@ -59,25 +59,15 @@ class LookupExecutor:
 
     Parameters
     ----------
-    spark                 : active SparkSession
-    secrets               : SecretResolver instance
-    logger                : logging.Logger (from ingestion.utils.logger.get_logger)
-    lookup_query_template : pipeline-level fallback template, used only when a task
-                            has no per-table task.lookup_query set. If both are None,
-                            auto-generates SELECT {key_cols} FROM {schema}.{table} LIMIT 1
+    spark   : active SparkSession
+    secrets : SecretResolver instance
+    logger  : logging.Logger (from ingestion.utils.logger.get_logger)
     """
 
-    def __init__(
-        self,
-        spark,
-        secrets,
-        logger,
-        lookup_query_template: Optional[str] = None,
-    ):
-        self.spark                 = spark
-        self.secrets               = secrets
-        self.logger                = logger
-        self.lookup_query_template = lookup_query_template  # may be None → auto-gen
+    def __init__(self, spark, secrets, logger):
+        self.spark   = spark
+        self.secrets = secrets
+        self.logger  = logger
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -91,7 +81,7 @@ class LookupExecutor:
         """
         config_id      = task.config_id
         object_name    = task.source_object_name
-        resolved_query = self._resolve_query_for_task(task)
+        resolved_query = None
 
         max_retries    = int(getattr(source_sys, "retry_count", 0) or 0)
         retry_interval = int(getattr(source_sys, "retry_interval", 0) or 0)
@@ -102,8 +92,10 @@ class LookupExecutor:
                 connector = get_connector(self.spark, source_sys, task, self.secrets)
 
                 if isinstance(connector, JdbcConnector):
+                    resolved_query = self._resolve_query_for_task(task)
                     count = self._lookup_jdbc(connector, resolved_query)
                 elif isinstance(connector, MongoConnector):
+                    # find_one() probes the collection directly — no query template needed.
                     count = self._lookup_mongo(connector)
                 else:
                     # File-based (S3, SFTP, etc.) — always included
@@ -136,7 +128,7 @@ class LookupExecutor:
                     return {
                         "config_id":          config_id,
                         "source_object_name": object_name,
-                        "resolved_query":     resolved_query,
+                        "resolved_query":     resolved_query or "N/A",
                         "count":              -1,
                         "included":           True,
                         "error":              str(exc),
@@ -205,10 +197,9 @@ class LookupExecutor:
 
     def _resolve_query_for_task(self, task) -> str:
         """
-        Resolve the probe query for a specific task, preferring the per-table
-        template (task.lookup_query, from rdbms_ingestion_config.Lookup_Query_Template)
-        over the pipeline-level fallback (self.lookup_query_template), by
-        substituting the {schema} / {table} / {key_column} placeholders.
+        Resolve the probe query for a specific task by substituting the
+        {schema} / {table} / {key_column} placeholders into task.lookup_query
+        (rdbms_ingestion_config.Lookup_Query_Template).
 
         Placeholder support (all case-insensitive):
             {schema}             → task.source_schema  (empty string if NULL)
@@ -218,19 +209,19 @@ class LookupExecutor:
             {key_column}         → task.primary_key_cols (or '1' if NULL)
             {key_columns}        → same
 
-        If neither template is set, auto-generates:
-            SELECT {key_cols} FROM {schema_prefix}{table} LIMIT 1
-        where schema_prefix is "{schema}." when source_schema is not NULL.
+        Raises ValueError if task.lookup_query is not set — there is no
+        pipeline-level fallback and no auto-generation.
         """
+        template = getattr(task, "lookup_query", None)
+        if not template:
+            raise ValueError(
+                f"No Lookup_Query_Template configured for config_id={task.config_id} "
+                f"({task.source_object_name}) in rdbms_ingestion_config."
+            )
+
         schema = task.source_schema or ""
         table  = task.source_object_name or ""
         key_cols = task.primary_key_cols or "1"
-
-        template = getattr(task, "lookup_query", None) or self.lookup_query_template
-
-        if not template:
-            schema_prefix = f"{schema}." if schema else ""
-            return f"SELECT {key_cols} FROM {schema_prefix}{table} LIMIT 1"
 
         resolved = template
         for placeholder, value in [
