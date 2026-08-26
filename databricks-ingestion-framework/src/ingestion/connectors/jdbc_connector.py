@@ -26,10 +26,13 @@ from pyspark.sql import DataFrame
 
 from .base_connector import BaseConnector
 
-# JSON map of config_master_id (str) -> {"lookup_query": "<template>"} for
-# pipelines whose incremental lookup can't be expressed generically (e.g. a
+# JSON map of config_id (str, the per-table row identifier — NOT
+# config_master_id, which is shared by every pipeline of a given source type)
+# -> {"pipeline_name": ..., "table_name": ..., "lookup_query": "<template>"}
+# for tables whose incremental lookup can't be expressed generically (e.g. a
 # join against a header table where the delta columns live on the joined
-# side). See JdbcConnector._special_probe_query().
+# side). pipeline_name/table_name are documentation only — the lookup key is
+# config_id. See JdbcConnector._special_probe_query().
 _SPECIAL_LOOKUP_CONFIG_PATH = (
     Path(__file__).resolve().parents[3] / "config" / "special_lookup_queries.json"
 )
@@ -278,28 +281,27 @@ class JdbcConnector(BaseConnector):
 
     def _special_probe_query(self, select_cols: str) -> Optional[str]:
         """
-        Looks up self.ingest_obj.config_master_id in special_lookup_queries.json.
-        If a matching entry exists, substitutes {key_column}/{lookback_timestamp}
-        into its 'lookup_query' template and returns the finished, wrapped
-        dbtable expression. Returns None when there's no matching entry, so
-        build_probe_query() falls back to the generic logic unchanged.
+        Looks up self.ingest_obj.config_id (the per-table row identifier — NOT
+        config_master_id, which is shared by every pipeline of a given source
+        type) in special_lookup_queries.json. If a matching entry exists,
+        substitutes {key_column}/{lookback_timestamp} into its 'lookup_query'
+        template and returns the finished, wrapped dbtable expression. Returns
+        None when there's no matching entry, so build_probe_query() falls
+        back to the generic logic unchanged.
 
         custom_query is never parsed or modified here — the template is used
         verbatim aside from the two placeholder substitutions.
         """
-        config_master_id = self.ingest_obj.config_master_id
-        if config_master_id is None:
-            return None
-
-        entry = _load_special_lookup_queries().get(str(config_master_id))
+        config_id = self.ingest_obj.config_id
+        entry = _load_special_lookup_queries().get(str(config_id))
         if entry is None:
             return None
 
         template = entry.get("lookup_query")
         if not template:
             raise ValueError(
-                f"special_lookup_queries.json entry for config_master_id="
-                f"{config_master_id} is missing 'lookup_query'."
+                f"special_lookup_queries.json entry for config_id="
+                f"{config_id} is missing 'lookup_query'."
             )
 
         cutoff_str = self._lookback_cutoff() or ""
@@ -315,8 +317,8 @@ class JdbcConnector(BaseConnector):
         of '*' (falls back to '1' if no key column is configured).
 
         FULL load: unfiltered, always generic. INCREMENTAL load: first checks
-        special_lookup_queries.json for a config_master_id-specific template
-        (see _special_probe_query()); if none matches, filters by
+        special_lookup_queries.json for a config_id-specific template (this
+        table only — see _special_probe_query()); if none matches, filters by
         _lookback_predicates() (Delta_Column_1/2 vs. Silver_Last_Sink_Date -
         Lookback_Hours) same as before. Used by LookupExecutor instead of a
         separate Lookup_Query_Template column.
