@@ -130,6 +130,46 @@ class JdbcConnector(BaseConnector):
             opts["queryTimeout"] = str(timeout_sec)
         return opts
 
+    def _base_sql(self) -> str:
+        """
+        Source_Query (custom_query) verbatim, or a plain schema.table SELECT *
+        when no custom query is configured. Never mutated — always wrapped by
+        _wrap_query() so the original text is untouched.
+        """
+        io = self.ingest_obj
+        if io.custom_query:
+            return io.custom_query
+        schema_prefix = f"{io.source_schema}." if io.source_schema else ""
+        return f"SELECT * FROM {schema_prefix}{io.source_object_name}"
+
+    def _wrap_query(
+        self,
+        base_sql: str,
+        predicates: list,
+        select_cols: str = "*",
+        row_limit: Optional[int] = None,
+    ) -> str:
+        """
+        Wraps base_sql as a subquery with a single outer WHERE ANDing all
+        predicates together. Because the predicate always lands on the outer
+        wrapper, any WHERE clause already inside base_sql (schema.table has
+        none, but a custom_query might) stays inside its own subquery and is
+        never touched or duplicated.
+        """
+        where_clause = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+        sql = f"SELECT {select_cols} FROM ({base_sql}) _src_wrapped{where_clause}"
+
+        if row_limit:
+            source_type = self.source_system.source_type.upper()
+            if source_type == "MSSQL":
+                sql = sql.replace("SELECT ", f"SELECT TOP {row_limit} ", 1)
+            elif source_type == "ORACLE":
+                sql += f" FETCH FIRST {row_limit} ROWS ONLY"
+            else:  # POSTGRES, MYSQL
+                sql += f" LIMIT {row_limit}"
+
+        return f"({sql}) _src"
+
     def _build_source_query(self, watermark_start: Optional[str]) -> str:
         """
         Constructs the SQL subquery sent to the JDBC driver as dbtable.
@@ -143,13 +183,6 @@ class JdbcConnector(BaseConnector):
           - source_filter         (additional static predicate from config)
         """
         io = self.ingest_obj
-
-        if io.custom_query:
-            base_sql = io.custom_query
-        else:
-            schema_prefix = f"{io.source_schema}." if io.source_schema else ""
-            base_sql = f"SELECT * FROM {schema_prefix}{io.source_object_name}"
-
         predicates = []
 
         if io.load_type == "INCREMENTAL" and io.incremental_column:
@@ -160,13 +193,58 @@ class JdbcConnector(BaseConnector):
         if io.source_filter:
             predicates.append(f"({io.source_filter})")
 
-        if predicates:
-            where_clause = " AND ".join(predicates)
-            # Wrap as subquery so predicates apply consistently to both
-            # plain tables and custom queries without altering base_sql.
-            base_sql = f"SELECT * FROM ({base_sql}) _src_wrapped WHERE {where_clause}"
+        return self._wrap_query(self._base_sql(), predicates)
 
-        return f"({base_sql}) _src"
+    def _lookback_predicates(self) -> list:
+        """
+        Watermark predicate for the lookup/key-extraction probes:
+        incremental_column (OR delta_column_2) >= Silver_Last_Sink_Date - Lookback_Hours.
+
+        Returns [] for FULL load, or when there's no incremental column or no
+        silver_last_sink_date yet (first run — probe unfiltered).
+        """
+        io = self.ingest_obj
+        if io.load_type != "INCREMENTAL" or not io.incremental_column or not io.silver_last_sink_date:
+            return []
+
+        from datetime import datetime, timedelta
+
+        last_sink_str = str(io.silver_last_sink_date).replace("T", " ").split(".")[0]
+        last_sink = datetime.strptime(last_sink_str, "%Y-%m-%d %H:%M:%S")
+        cutoff = last_sink - timedelta(hours=int(io.lookback_hours or 3))
+        cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
+        predicate = f"{io.incremental_column} >= '{cutoff_str}'"
+        if io.delta_column_2:
+            predicate = f"({predicate} OR {io.delta_column_2} >= '{cutoff_str}')"
+        return [predicate]
+
+    def build_probe_query(self) -> str:
+        """
+        SELECT <key_cols> ... LIMIT 1 (dialect-mapped) — cheap existence check
+        derived from Source_Query, projecting the primary key columns instead
+        of '*' (falls back to '1' if no key column is configured).
+
+        FULL load: unfiltered. INCREMENTAL load: filtered by
+        _lookback_predicates() (Delta_Column_1/2 vs. Silver_Last_Sink_Date -
+        Lookback_Hours). Used by LookupExecutor instead of a separate
+        Lookup_Query_Template column.
+        """
+        io = self.ingest_obj
+        select_cols = ", ".join(io.primary_key_list) if io.primary_key_list else "1"
+        return self._wrap_query(
+            self._base_sql(), self._lookback_predicates(), select_cols=select_cols, row_limit=1
+        )
+
+    def build_key_query(self) -> str:
+        """
+        SELECT <primary_key_cols> ... derived from Source_Query. Independent
+        of load_type — always unfiltered (no incremental/lookback predicate),
+        matching the ADF key-extraction behavior.
+        """
+        io = self.ingest_obj
+        key_cols = ", ".join(io.primary_key_list) if io.primary_key_list else "*"
+        return self._wrap_query(self._base_sql(), [], select_cols=key_cols)
 
     # ── Public extract ────────────────────────────────────────────────────────
 

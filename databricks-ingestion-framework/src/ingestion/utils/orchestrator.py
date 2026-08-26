@@ -118,7 +118,13 @@ class IngestionOrchestrator:
         # Zero rows in the source → skip extraction entirely and log SKIPPED.
         # Lookup errors are fail-safe (count=-1, included=True) and fall through
         # to normal extraction below.
-        lookup_result = self.lookup_executor.check_presence(source_sys, ingest_obj)
+        # Only applies to JDBC/RDBMS sources (config_master_id = 1) — other
+        # source types skip the lookup and are always included.
+        if config_master_id == 1:
+            lookup_result = self.lookup_executor.check_presence(source_sys, ingest_obj)
+        else:
+            lookup_result = {"count": 1, "included": True, "error": None, "resolved_query": None}
+
         if lookup_result["count"] == 0:
             self.logger.info(
                 f"[Lookup] config_id={ingest_obj.config_id} ({ingest_obj.source_object_name}) "

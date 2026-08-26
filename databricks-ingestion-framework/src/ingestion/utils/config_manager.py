@@ -123,6 +123,10 @@ class IngestionTaskConfig:
     silver_last_sink_date: Optional[str] = None
     # Secondary delta column (OR condition in lookup WHERE clause)
     delta_column_2: Optional[str] = None
+    # Hours to look back from silver_last_sink_date when building the
+    # dynamic lookup/key-extraction watermark predicate (default 3 if unset).
+    # See JdbcConnector._lookback_predicates().
+    lookback_hours: Optional[int] = None
     # Per-table lookup/presence-check query template, read from
     # rdbms_ingestion_config.Lookup_Query_Template. Supports {schema}/{table}/
     # {key_column} placeholders — see LookupExecutor._resolve_query_for_task.
@@ -296,6 +300,8 @@ class ConfigManager:
             ),
             # Secondary delta column (OR condition in lookup WHERE clause)
             delta_column_2      = r.get("Delta_Column_2") or r.get("delta_column_2"),
+            # Lookback window (hours) for the dynamic lookup/key-extraction predicate
+            lookback_hours      = self._to_int(r.get("Lookback_Hours") or r.get("lookback_hours")),
             # Per-table lookup/presence-check query template — rdbms_ingestion_config.Lookup_Query_Template
             lookup_query        = r.get("Lookup_Query_Template") or r.get("lookup_query_template"),
             # Pipeline-wide thread pool size — rdbms_ingestion_config.Max_Workers

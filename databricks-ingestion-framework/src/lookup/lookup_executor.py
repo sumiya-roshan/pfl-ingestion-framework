@@ -14,22 +14,13 @@ using the ingestion framework's Connector Factory. It reuses their connection, U
 and option resolution methods directly, eliminating duplicate credential, host,
 or database/collection mapping logic.
 
-Query template
---------------
-Each task must carry its own probe query in task.lookup_query, sourced from
-rdbms_ingestion_config.Lookup_Query_Template. There is no pipeline-level
-fallback and no auto-generation — a task with no template configured raises
-ValueError (caught by check_presence()'s retry/fail-safe handling like any
-other lookup error).
-
-Placeholders substituted into the template:
-
-    {schema}             → task.source_schema  (or empty string if NULL)
-    {source_schema}      → same as {schema}
-    {table}              → task.source_object_name
-    {source_object_name} → same as {table}
-    {key_column}          → task.primary_key_cols (or '1' if NULL)
-    {key_columns}         → same as {key_column}
+Query source
+------------
+The probe query is generated dynamically from Source_Query (the same query
+used for extraction) via JdbcConnector.build_probe_query() — there is no
+separate Lookup_Query_Template column. FULL load probes "SELECT 1 ... LIMIT 1"
+unfiltered; INCREMENTAL load adds a Silver_Last_Sink_Date/Lookback_Hours
+watermark predicate. See JdbcConnector._wrap_query / _lookback_predicates.
 
 Threading model
 ---------------
@@ -92,7 +83,7 @@ class LookupExecutor:
                 connector = get_connector(self.spark, source_sys, task, self.secrets)
 
                 if isinstance(connector, JdbcConnector):
-                    resolved_query = self._resolve_query_for_task(task)
+                    resolved_query = connector.build_probe_query()
                     count = self._lookup_jdbc(connector, resolved_query)
                 elif isinstance(connector, MongoConnector):
                     # find_one() probes the collection directly — no query template needed.
@@ -151,9 +142,11 @@ class LookupExecutor:
         or 0 if no row is collected.
         Reuses the connector's solved connection options (driver, credentials, url).
         """
-        # Call the connector's helper to resolve JDBC configuration parameters
+        # Call the connector's helper to resolve JDBC configuration parameters.
+        # resolved_query is already a fully wrapped "(...) _src" expression
+        # (see JdbcConnector.build_probe_query) — use it directly as dbtable.
         options = connector._read_options()
-        dbtable = f"({resolved_query}) _lkp_count"
+        dbtable = resolved_query
 
         df = (
             self.spark.read.format("jdbc")
@@ -193,47 +186,3 @@ class LookupExecutor:
         finally:
             client.close()
 
-    # ── Template resolution ───────────────────────────────────────────────────
-
-    def _resolve_query_for_task(self, task) -> str:
-        """
-        Resolve the probe query for a specific task by substituting the
-        {schema} / {table} / {key_column} placeholders into task.lookup_query
-        (rdbms_ingestion_config.Lookup_Query_Template).
-
-        Placeholder support (all case-insensitive):
-            {schema}             → task.source_schema  (empty string if NULL)
-            {source_schema}      → same
-            {table}              → task.source_object_name
-            {source_object_name} → same
-            {key_column}         → task.primary_key_cols (or '1' if NULL)
-            {key_columns}        → same
-
-        Raises ValueError if task.lookup_query is not set — there is no
-        pipeline-level fallback and no auto-generation.
-        """
-        template = getattr(task, "lookup_query", None)
-        if not template:
-            raise ValueError(
-                f"No Lookup_Query_Template configured for config_id={task.config_id} "
-                f"({task.source_object_name}) in rdbms_ingestion_config."
-            )
-
-        schema = task.source_schema or ""
-        table  = task.source_object_name or ""
-        key_cols = task.primary_key_cols or "1"
-
-        resolved = template
-        for placeholder, value in [
-            ("{source_schema}",      schema),
-            ("{schema}",             schema),
-            ("{source_object_name}", table),
-            ("{table}",              table),
-            ("{key_column}",         key_cols),
-            ("{key_columns}",        key_cols),
-        ]:
-            resolved = resolved.replace(placeholder, value)
-            resolved = resolved.replace(placeholder.upper(), value)
-            resolved = resolved.replace(placeholder.lower(), value)
-
-        return resolved
