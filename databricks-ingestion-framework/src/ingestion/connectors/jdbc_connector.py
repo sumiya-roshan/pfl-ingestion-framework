@@ -18,11 +18,51 @@ Incremental extraction
   subquery wrapper so it works both with custom_query and schema.table reads.
 - source_filter from ingestion_config is ANDed into the same subquery.
 """
+import json
+from pathlib import Path
 from typing import Optional, Tuple
 
 from pyspark.sql import DataFrame
 
 from .base_connector import BaseConnector
+
+# JSON map of config_master_id (str) -> {"lookup_query": "<template>"} for
+# pipelines whose incremental lookup can't be expressed generically (e.g. a
+# join against a header table where the delta columns live on the joined
+# side). See JdbcConnector._special_probe_query().
+_SPECIAL_LOOKUP_CONFIG_PATH = (
+    Path(__file__).resolve().parents[3] / "config" / "special_lookup_queries.json"
+)
+
+# Loaded lazily on first use and kept for the life of the process — set
+# _special_lookup_queries_cache back to None (e.g. in a test) to force a re-read.
+_special_lookup_queries_cache: Optional[dict] = None
+
+
+def _load_special_lookup_queries() -> dict:
+    """
+    Loads _SPECIAL_LOOKUP_CONFIG_PATH once per process. Missing file → {}
+    (every pipeline falls back to the generic build_probe_query() logic).
+    Malformed JSON raises a clear configuration error rather than silently
+    falling back, since a typo there should not go unnoticed.
+    """
+    global _special_lookup_queries_cache
+    if _special_lookup_queries_cache is not None:
+        return _special_lookup_queries_cache
+
+    if not _SPECIAL_LOOKUP_CONFIG_PATH.exists():
+        _special_lookup_queries_cache = {}
+        return _special_lookup_queries_cache
+
+    try:
+        with open(_SPECIAL_LOOKUP_CONFIG_PATH, "r") as f:
+            _special_lookup_queries_cache = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid JSON in special lookup config '{_SPECIAL_LOOKUP_CONFIG_PATH}': {exc}"
+        ) from exc
+
+    return _special_lookup_queries_cache
 
 
 def _parse_timeout_to_seconds(value: Optional[str]) -> Optional[int]:
@@ -179,7 +219,8 @@ class JdbcConnector(BaseConnector):
           2. source_schema.source_object_name  (standard table reference)
 
         Then injects:
-          - incremental predicate (load_type = INCREMENTAL)
+          - incremental predicate (load_type = INCREMENTAL): Delta_Column_1 > watermark,
+            ORed with Delta_Column_2 > watermark when configured
           - source_filter         (additional static predicate from config)
         """
         io = self.ingest_obj
@@ -188,36 +229,84 @@ class JdbcConnector(BaseConnector):
         if io.load_type == "INCREMENTAL" and io.incremental_column:
             wm = watermark_start if watermark_start is not None else io.incremental_end_value
             if wm is not None:
-                predicates.append(f"{io.incremental_column} > '{wm}'")
+                predicate = f"{io.incremental_column} > '{wm}'"
+                if io.delta_column_2:
+                    predicate = f"({predicate} OR {io.delta_column_2} > '{wm}')"
+                predicates.append(predicate)
 
         if io.source_filter:
             predicates.append(f"({io.source_filter})")
 
         return self._wrap_query(self._base_sql(), predicates)
 
-    def _lookback_predicates(self) -> list:
+    def _lookback_cutoff(self) -> Optional[str]:
         """
-        Watermark predicate for the lookup/key-extraction probes:
-        incremental_column (OR delta_column_2) >= Silver_Last_Sink_Date - Lookback_Hours.
-
-        Returns [] for FULL load, or when there's no incremental column or no
-        silver_last_sink_date yet (first run — probe unfiltered).
+        Silver_Last_Sink_Date - Lookback_Hours, formatted 'YYYY-MM-DD HH:MM:SS'.
+        Returns None for FULL load or when silver_last_sink_date isn't set yet
+        (first run). Shared by _lookback_predicates() and the special-case
+        template substitution in _special_probe_query() — both must derive
+        the cutoff the same way.
         """
         io = self.ingest_obj
-        if io.load_type != "INCREMENTAL" or not io.incremental_column or not io.silver_last_sink_date:
-            return []
+        if io.load_type != "INCREMENTAL" or not io.silver_last_sink_date:
+            return None
 
         from datetime import datetime, timedelta
 
         last_sink_str = str(io.silver_last_sink_date).replace("T", " ").split(".")[0]
         last_sink = datetime.strptime(last_sink_str, "%Y-%m-%d %H:%M:%S")
         cutoff = last_sink - timedelta(hours=int(io.lookback_hours or 3))
-        cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+        return cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _lookback_predicates(self) -> list:
+        """
+        Watermark predicate for the generic lookup probe:
+        incremental_column (OR delta_column_2) >= Silver_Last_Sink_Date - Lookback_Hours.
+
+        Returns [] for FULL load, or when there's no incremental column or no
+        cutoff yet (first run — probe unfiltered).
+        """
+        io = self.ingest_obj
+        cutoff_str = self._lookback_cutoff()
+        if not io.incremental_column or cutoff_str is None:
+            return []
 
         predicate = f"{io.incremental_column} >= '{cutoff_str}'"
         if io.delta_column_2:
             predicate = f"({predicate} OR {io.delta_column_2} >= '{cutoff_str}')"
         return [predicate]
+
+    def _special_probe_query(self, select_cols: str) -> Optional[str]:
+        """
+        Looks up self.ingest_obj.config_master_id in special_lookup_queries.json.
+        If a matching entry exists, substitutes {key_column}/{lookback_timestamp}
+        into its 'lookup_query' template and returns the finished, wrapped
+        dbtable expression. Returns None when there's no matching entry, so
+        build_probe_query() falls back to the generic logic unchanged.
+
+        custom_query is never parsed or modified here — the template is used
+        verbatim aside from the two placeholder substitutions.
+        """
+        config_master_id = self.ingest_obj.config_master_id
+        if config_master_id is None:
+            return None
+
+        entry = _load_special_lookup_queries().get(str(config_master_id))
+        if entry is None:
+            return None
+
+        template = entry.get("lookup_query")
+        if not template:
+            raise ValueError(
+                f"special_lookup_queries.json entry for config_master_id="
+                f"{config_master_id} is missing 'lookup_query'."
+            )
+
+        cutoff_str = self._lookback_cutoff() or ""
+        query = template.replace("{key_column}", select_cols).replace(
+            "{lookback_timestamp}", cutoff_str
+        )
+        return f"({query}) _src"
 
     def build_probe_query(self) -> str:
         """
@@ -225,13 +314,21 @@ class JdbcConnector(BaseConnector):
         derived from Source_Query, projecting the primary key columns instead
         of '*' (falls back to '1' if no key column is configured).
 
-        FULL load: unfiltered. INCREMENTAL load: filtered by
+        FULL load: unfiltered, always generic. INCREMENTAL load: first checks
+        special_lookup_queries.json for a config_master_id-specific template
+        (see _special_probe_query()); if none matches, filters by
         _lookback_predicates() (Delta_Column_1/2 vs. Silver_Last_Sink_Date -
-        Lookback_Hours). Used by LookupExecutor instead of a separate
-        Lookup_Query_Template column.
+        Lookback_Hours) same as before. Used by LookupExecutor instead of a
+        separate Lookup_Query_Template column.
         """
         io = self.ingest_obj
         select_cols = ", ".join(io.primary_key_list) if io.primary_key_list else "1"
+
+        if io.load_type == "INCREMENTAL":
+            special_query = self._special_probe_query(select_cols)
+            if special_query is not None:
+                return special_query
+
         return self._wrap_query(
             self._base_sql(), self._lookback_predicates(), select_cols=select_cols, row_limit=1
         )

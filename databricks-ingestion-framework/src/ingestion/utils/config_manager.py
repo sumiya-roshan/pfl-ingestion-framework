@@ -119,6 +119,11 @@ class IngestionTaskConfig:
     partition_column: Optional[str]
     source_filter: Optional[str]
 
+    # config_master routing ID this task was loaded under — set by
+    # ConfigManager.get_active_tasks(). Used by JdbcConnector.build_probe_query()
+    # to look up a special-case lookup query in special_lookup_queries.json.
+    config_master_id: Optional[int] = None
+
     # Watermark date for incremental lookup query generation
     silver_last_sink_date: Optional[str] = None
     # Secondary delta column (OR condition in lookup WHERE clause)
@@ -395,6 +400,7 @@ class ConfigManager:
         tasks = []
         for r in child_rows:
             task = self._build_ingestion_task(r.asDict())
+            task.config_master_id = config_master_id
             # If pipeline_name is specified, only include tasks that match it
             if pipeline_name and task.pipeline_name != pipeline_name:
                 continue
