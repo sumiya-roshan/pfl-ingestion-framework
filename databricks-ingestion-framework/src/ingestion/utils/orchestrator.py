@@ -38,6 +38,7 @@ from .writers.s3_writer import S3RawWriter
 from .writers.bronze_writer import BronzeWriter
 from .logger import get_logger
 from .secrets import SecretResolver
+from .notifier import GraphMailNotifier
 from silver.silver_processor import SilverProcessor
 
 
@@ -80,6 +81,7 @@ class IngestionOrchestrator:
         self.s3_writer     = S3RawWriter()
         self.bronze_writer = BronzeWriter(spark)
         self.logger        = get_logger(environment=environment)
+        self.notifier      = GraphMailNotifier(logger=self.logger)
 
         # Silver trigger: runs inline, coupled to the landing write — a table's
         # Bronze Delta write does not start until that table's Silver run has
@@ -164,6 +166,7 @@ class IngestionOrchestrator:
         run_id = audit_run["job_run_id"]
 
         try:
+            stage = "EXTRACT"
             watermark_start = resolve_watermark(self.spark, self.logger, ingest_obj)
             self.logger.info(
                 f"[{run_id}] START config_id={ingest_obj.config_id} "
@@ -186,6 +189,7 @@ class IngestionOrchestrator:
             silver_result = None
             fmt = ingest_obj.file_format or "parquet"
             if landing_volume_path:
+                stage = "RAW_WRITE"
                 landing_path = self.s3_writer.write(
                     df,
                     landing_volume_path = landing_volume_path,
@@ -198,6 +202,7 @@ class IngestionOrchestrator:
                     f"[{run_id}] Landing write → {landing_path} ({rows_read} rows, format={fmt})"
                 )
                 self.dependency.mark_source_to_raw_end(dep_run)
+                stage = "SILVER"
 
                 # ── Trigger Silver, coupled — right after the S3 write, on this
                 # same thread. The Bronze Delta write below does not start until
@@ -227,6 +232,25 @@ class IngestionOrchestrator:
                     )
                     self.dependency.mark_raw_to_silver_end(dep_run)
 
+                    # _trigger_silver() never raises — a Silver failure comes
+                    # back here as a FAILED result dict, not an exception, so
+                    # it has to be checked explicitly or it would silently
+                    # never trigger a notification (or fail the table at all).
+                    if silver_result and silver_result.get("status") == "FAILED":
+                        try:
+                            self.notifier.send_failure_email(
+                                stage="SILVER",
+                                source_name=source_sys.source_name,
+                                table_name=ingest_obj.source_object_name,
+                                config_id=ingest_obj.config_id,
+                                run_id=run_id,
+                                error_message=silver_result.get("error") or "Unknown Silver failure",
+                            )
+                        except Exception as notify_exc:
+                            self.logger.warning(
+                                f"[{run_id}] Could not send Silver failure notification: {notify_exc}"
+                            )
+
                     # Stamp Silver_Last_Sink_Date in the child config table this
                     # task came from. Best-effort — a bookkeeping failure here
                     # must not fail the table's actual ingestion.
@@ -242,6 +266,7 @@ class IngestionOrchestrator:
                                 f"for config_id={ingest_obj.config_id}: {sink_exc}"
                             )
 
+            stage = "BRONZE_WRITE"
             import time
             write_start_time = time.time()
 
@@ -345,6 +370,17 @@ class IngestionOrchestrator:
                 self.audit.fail_run(audit_run=audit_run, error_code = error_code,error_message=error_msg)
             except Exception as audit_exc:
                 self.logger.error(f"[{run_id}] Could not write FAILED status to audit: {audit_exc}")
+            try:
+                self.notifier.send_failure_email(
+                    stage=stage,
+                    source_name=source_sys.source_name,
+                    table_name=ingest_obj.source_object_name,
+                    config_id=ingest_obj.config_id,
+                    run_id=run_id,
+                    error_message=error_msg,
+                )
+            except Exception as notify_exc:
+                self.logger.error(f"[{run_id}] Could not send failure notification: {notify_exc}")
             return {
                 "config_id": ingest_obj.config_id,
                 "run_id":   run_id,

@@ -1,0 +1,156 @@
+<mxfile host="app.diagrams.net" agent="claude-code">
+  <diagram name="Pipeline Flow" id="pipeline-flow">
+    <mxGraphModel dx="2473" dy="663" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1150" pageHeight="1250" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;fontSize=18;fontStyle=1;align=left;verticalAlign=middle;fontColor=#1B222C;" value="How a table gets refreshed, end to end" vertex="1">
+          <mxGeometry height="30" width="760" x="40" as="geometry" />
+        </mxCell>
+        <mxCell id="lbl-scheduler" parent="1" style="text;html=1;fontSize=11;fontStyle=1;fontColor=#A85A16;align=left;" value="MULTI-REFRESH SCHEDULER · loops till all tables are refreshed" vertex="1">
+          <mxGeometry height="18" width="600" x="40" y="58" as="geometry" />
+        </mxCell>
+        <mxCell id="box1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F6E9DA;strokeColor=#A85A16;fontColor=#1B222C;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="Scan tb_report_batch_run_config&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#5B6672;&quot;&gt;is any table&#39;s refresh window open right now?&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#8A7357;font-family:monospace;&quot;&gt;columns: Config_Master_ID, Config_ID, Refresh_Time, Next_Refresh_Time, Last_Sink_Date, Is_Active&lt;/font&gt;" vertex="1">
+          <mxGeometry height="74" width="760" x="40" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="box-decide" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3E7;strokeColor=#C08A3E;fontColor=#1B222C;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="Decide which of those tables are eligible&amp;nbsp;&amp;nbsp;&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(91, 102, 114);&quot;&gt;Day_Status_Flag = 1 → row exists in ingestion_config table : Day_Execution_Count &amp;gt; 0 AND Sink_Batch_Started_Date = today&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(91, 102, 114);&quot;&gt;Current_Status_Flag = 1 → row exists in dependency_master_config with dependency_resolve_time IS NULL (still unresolved)&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(138, 115, 87); font-family: monospace;&quot;&gt;eligible = Current_Status_Flag = 0 AND Day_Status_Flag = 1&lt;/font&gt;" vertex="1">
+          <mxGeometry height="98" width="760" x="40" y="164" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-scan-decide" edge="1" parent="1" source="box1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#A85A16;endArrow=block;endFill=1;" target="box-decide">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="box-pipeline-map" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FBF3E7;strokeColor=#C08A3E;fontColor=#1B222C;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="Map eligible rows back to the config table get the Pipeline_Name&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(91, 102, 114);&quot;&gt;for each eligible (Config_Master_ID, Config_ID), looked up one row at a time in ingestion_config · no match found → that table is dropped from the eligible set&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(138, 115, 87); font-family: monospace;&quot;&gt;eligible_df.collect() → per-row lookup → eligible_df rebuilt with Pipeline_Name attached&lt;/font&gt;" vertex="1">
+          <mxGeometry height="76" width="760" x="40" y="278" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-decide-map" edge="1" parent="1" source="box-decide" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#A85A16;endArrow=block;endFill=1;" target="box-pipeline-map">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="box2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F6E9DA;strokeColor=#A85A16;fontColor=#1B222C;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="POST /jobs/run-now&lt;div&gt;&lt;font style=&quot;font-size: 9px;&quot;&gt;MERGE dependency_resolve_time = null,&amp;nbsp;sink_batch_started_date = {trigger_time}, statu = &#39;In-progress&#39;,&amp;nbsp;Last_Sink_Date =&amp;nbsp;MAX(modification_time_IST)&lt;br&gt;&lt;/font&gt;&lt;font style=&quot;font-size: 10px; color: rgb(91, 102, 114);&quot;&gt;JobTrigger REST call - fires the child ingestion job by name&lt;/font&gt;&lt;div&gt;&lt;font style=&quot;font-size: 10px; color: rgb(138, 115, 87); font-family: monospace;&quot;&gt;run_now_by_name(job_name, notebook_params={batch_start_date, pipeline_name})&lt;/font&gt;&lt;/div&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="94" width="760" x="40" y="370" as="geometry" />
+        </mxCell>
+        <mxCell id="edge1" edge="1" parent="1" source="box-pipeline-map" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#A85A16;fontColor=#A85A16;fontSize=10;endArrow=block;endFill=1;" target="box2" value="eligible tables, now with pipeline_name">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="lbl-job" parent="1" style="text;html=1;fontSize=11;fontStyle=1;fontColor=#5B6672;align=left;" value="INGESTION JOB" vertex="1">
+          <mxGeometry height="18" width="300" x="40" y="480" as="geometry" />
+        </mxCell>
+        <mxCell id="box3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="Task 0 - get_tasks: fetch active config rows&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(91, 102, 114);&quot;&gt;publishes the task list via taskValues&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#4A6A88;font-family:monospace;&quot;&gt;widgets: config_master_id, source_system_id, pipeline_name, batch_start_date → taskValues[active_tasks_metadata]&lt;/font&gt;" vertex="1">
+          <mxGeometry height="68" width="760" x="40" y="502" as="geometry" />
+        </mxCell>
+        <mxCell id="_OYlN9YI7tSGRjv8dXXc-1" edge="1" parent="1" source="box3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="_OYlN9YI7tSGRjv8dXXc-2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="810" y="534" />
+              <mxPoint x="810" y="534" />
+            </Array>
+            <mxPoint x="830" y="536" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="_OYlN9YI7tSGRjv8dXXc-2" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="batch_start_date = 1 if the job is triggered independently; batch_start_date = {trigger_time} if from Multi refresh job trigger (passed via params)" vertex="1">
+          <mxGeometry height="27" width="250" x="860" y="521" as="geometry" />
+        </mxCell>
+        <mxCell id="lbl-parallel" parent="1" style="text;html=1;fontSize=11;fontStyle=1;fontColor=#5B6672;align=left;" value="THREAD POOL · one thread per table from Task 0 · tables run concurrently · audit + email notification both live inside this thread too" vertex="1">
+          <mxGeometry height="18" width="900" x="40" y="580" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EEF0F2;strokeColor=#DDE1E6;" value="" vertex="1">
+          <mxGeometry height="426" width="1600" x="-314" y="634" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4F5F7;strokeColor=#D5D9DE;" value="" vertex="1">
+          <mxGeometry height="426" width="1600" x="-322" y="628" as="geometry" />
+        </mxCell>
+        <mxCell id="thread-container" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#8C97A8;dashed=1;verticalAlign=top;align=left;spacingLeft=12;spacingTop=8;fontSize=10;fontStyle=2;fontColor=#8C97A8;" value="1 of N threads running in parallel" vertex="1">
+          <mxGeometry height="426" width="1600" x="-330" y="622" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-fork" edge="1" parent="1" source="box3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#A85A16;fontColor=#5B6672;fontSize=10;endArrow=block;endFill=1;" target="sub0" value="filtered_tasks_metadata → one thread per table">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="sub0" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#1B222C;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="Task 1 Lookup - COUNT(*) check for this table&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(91, 102, 114);&quot;&gt;0 rows → SKIPPED audit row written, thread exits here · otherwise continue to Raw&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(74, 106, 136); font-family: monospace;&quot;&gt;LookupExecutor._lookup_one(source_sys, task) → count, resolved_query&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size: 9px; color: #8C97A8; font-style: italic;&quot;&gt;fail-safe — never raises, so no FAILED email fires from this step&lt;/font&gt;" vertex="1">
+          <mxGeometry height="84" width="720" x="60" y="646" as="geometry" />
+        </mxCell>
+        <mxCell id="sub1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEBD3;strokeColor=#B9770E;fontColor=#1B222C;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="Raw - Task 2 main.py: extract source table → write raw file to S3&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#8A6A2F;font-family:monospace;&quot;&gt;orchestrator.run(source_sys, task, config_master_id, landing_volume_path, trigger_id, job_context)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="58" width="720" x="60" y="740" as="geometry" />
+        </mxCell>
+        <mxCell id="sub2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E4ECF3;strokeColor=#2F5A82;fontColor=#1B222C;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="Silver - silver_transform.ipynb: read raw file from S3 → write Silver Delta table&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(91, 102, 114);&quot;&gt;notebook, triggered inline in the same thread right after the raw write&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#4A6A88;font-family:monospace;&quot;&gt;_trigger_silver(config_id, source_system_id, landing_path, silver_catalog/schema/table, dependency_table)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="64" width="720" x="60" y="808" as="geometry" />
+        </mxCell>
+        <mxCell id="sub3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAEDF1;strokeColor=#1B222C;fontColor=#1B222C;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="Resolve dependency - update child config table dates, set dependency_resolve_time =&amp;nbsp;&lt;span style=&quot;background-color: transparent;&quot;&gt;Activity_End_Time(the exact timestamp the Silver pipeline successfully finished)&lt;/span&gt;" vertex="1">
+          <mxGeometry height="64" width="720" x="60" y="882" as="geometry" />
+        </mxCell>
+        <mxCell id="sub4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAEDF1;strokeColor=#1B222C;fontColor=#1B222C;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="Audit log - write this table&#39;s FINAL run status (SUCCESS / FAILED)&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(91, 102, 114);&quot;&gt;closing update — the arrows either side show every step&#39;s own outcome too&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#444;font-family:monospace;&quot;&gt;audit.complete_run(audit_run, status, rows_read, rows_copied, data_written_bytes, throughput_mb_per_sec)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="68" width="720" x="60" y="956" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-sub0" edge="1" parent="1" source="sub0" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#6c8ebf;endArrow=block;endFill=1;" target="sub1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-sub1" edge="1" parent="1" source="sub1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#B9770E;endArrow=block;endFill=1;" target="sub2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-sub2" edge="1" parent="1" source="sub2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#2F5A82;endArrow=block;endFill=1;" target="sub3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-sub3" edge="1" parent="1" source="sub3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1B222C;endArrow=block;endFill=1;" target="sub4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ==== Audit table — now inside the widened thread-pool boundary, right side ==== -->
+        <mxCell id="audit-table" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAEDF1;strokeColor=#1B222C;fontColor=#1B222C;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="tb_audit_log (Audit log table)&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(91, 102, 114);&quot;&gt;one row per step, per table, per run&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(68, 68, 68); font-family: monospace;&quot;&gt;table_id, delta_layer, status, error_code, error_message, rows_read, rows_copied&lt;/font&gt;" vertex="1">
+          <mxGeometry height="280" width="270" x="980" y="700" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-audit0" edge="1" parent="1" source="sub0" target="audit-table" style="html=1;strokeColor=#6c8ebf;endArrow=block;endFill=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.1;entryDx=0;entryDy=0;" value="SKIPPED (0 rows)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-audit1" edge="1" parent="1" source="sub1" target="audit-table" style="html=1;strokeColor=#B9770E;endArrow=block;endFill=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0;" value="INPROGRESS · FAILED on error">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-audit2" edge="1" parent="1" source="sub2" target="audit-table" style="html=1;strokeColor=#2F5A82;endArrow=block;endFill=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" value="FAILED on error">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-audit3" edge="1" parent="1" source="sub3" target="audit-table" style="html=1;strokeColor=#1B222C;endArrow=block;endFill=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.7;entryDx=0;entryDy=0;" value="FAILED here also fails the table (same try block, not caught separately)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-audit4" edge="1" parent="1" source="sub4" target="audit-table" style="html=1;strokeColor=#1B222C;endArrow=block;endFill=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.9;entryDx=0;entryDy=0;" value="SUCCESS / FAILED (final)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ==== NEW: Email notification — inside the thread pool too, left side ==== -->
+        <mxCell id="mail-box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E9F0;strokeColor=#8E4C7A;fontColor=#1B222C;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="Email notification (per step, per table)&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(91, 102, 114);&quot;&gt;on FAILURE (Raw / Silver / Resolve dependency / final) → always notify the configured recipients&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(91, 102, 114);&quot;&gt;on SUCCESS (final only) → notify only recipients marked eligible for success in the recipient config table&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; color: rgb(142, 76, 122); font-family: monospace;&quot;&gt;recipient config table: pipeline_name, recipient_email, notify_on_success (name TBD)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="280" width="270" x="-300" y="700" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-mail1" edge="1" parent="1" source="sub1" target="mail-box" style="html=1;strokeColor=#B9770E;endArrow=block;endFill=1;rounded=0;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.15;entryDx=0;entryDy=0;" value="FAILED here → notify (fails the table)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-mail2" edge="1" parent="1" source="sub2" target="mail-box" style="html=1;strokeColor=#2F5A82;endArrow=block;endFill=1;rounded=0;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.35;entryDx=0;entryDy=0;" value="FAILED here → notify (fails the table)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-mail3" edge="1" parent="1" source="sub3" target="mail-box" style="html=1;strokeColor=#1B222C;endArrow=block;endFill=1;rounded=0;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.55;entryDx=0;entryDy=0;" value="FAILED here → notify (same try block, also fails the table)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-mail4f" edge="1" parent="1" source="sub4" target="mail-box" style="html=1;strokeColor=#1B222C;endArrow=block;endFill=1;rounded=0;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.75;entryDx=0;entryDy=0;" value="FAILED (final) → notify all configured recipients">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-mail4s" edge="1" parent="1" source="sub4" target="mail-box" style="html=1;strokeColor=#8E4C7A;endArrow=block;endFill=1;rounded=0;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.9;entryDx=0;entryDy=0;" value="SUCCESS (final) → notify only recipients enabled for success">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lbl-state" parent="1" style="text;html=1;fontSize=11;fontStyle=1;fontColor=#5B6672;align=left;" value="SHARED STATE" vertex="1">
+          <mxGeometry height="18" width="300" x="40" y="1068" as="geometry" />
+        </mxCell>
+        <mxCell id="box9" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAEDF1;strokeColor=#1B222C;fontColor=#1B222C;fontSize=12;align=center;verticalAlign=middle;spacing=6;" value="dependency_master_config.dependency_resolve_time&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#5B6672;&quot;&gt;NULL = not ready · a timestamp = safe to consume, safe to re-eligible&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#444;font-family:monospace;&quot;&gt;row key: (config_id, source_system_id) · columns: job_run_id, business_date, pipeline_start_time, pipeline_end_time, dependency_resolve_time&lt;/font&gt;" vertex="1">
+          <mxGeometry height="72" width="760" x="40" y="1096" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-join" edge="1" parent="1" source="sub4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1B222C;fontColor=#5B6672;fontSize=10;endArrow=block;endFill=1;" target="box9" value="threads join → result dict returned to main.py">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-loop" edge="1" parent="1" source="box9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#A85A16;fontColor=#A85A16;fontSize=10;dashed=1;endArrow=block;endFill=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="box1" value="polled by the scheduler on every iteration">
+          <mxGeometry relative="1" x="-0.0081" y="60" as="geometry">
+            <mxPoint as="offset" />
+            <Array as="points">
+              <mxPoint x="10" y="1132" />
+              <mxPoint x="10" y="117" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
