@@ -151,8 +151,12 @@ def _upload_on_exit() -> None:
 
     try:
         if dbutils is not None:
-            # dbutils.fs.cp uses the cluster's IAM role — same as Spark S3 writes
-            dbutils.fs.cp(f"file:{local_file}", dest)
+            # Read log content with Python (always allowed on Serverless),
+            # then write via dbutils.fs.put() which uses the cluster's IAM role.
+            # NOTE: dbutils.fs.cp("file:...") is blocked on Serverless clusters.
+            with open(local_file, "r", encoding="utf-8") as fh:
+                log_content = fh.read()
+            dbutils.fs.put(dest, log_content, overwrite=True)
             print(f"[Logger] Uploaded logs -> {dest}")
         elif not dest.startswith("s3://"):
             # Local / UC Volume / DBFS — plain file copy
