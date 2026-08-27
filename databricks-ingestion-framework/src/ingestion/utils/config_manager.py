@@ -96,11 +96,28 @@ class IngestionTaskConfig:
 
     child_table_fqn: Optional[str] = None   # the config_master-resolved child table this task came from
 
+    # JSON array string, e.g. ["a@x.com","b@x.com"] — config table's own
+    # failure-notification recipients for this table, overriding the
+    # notifier's fixed default list when present. See notifier.py.
+    recipients: Optional[str] = None
+
     @property
     def primary_key_list(self) -> Optional[List[str]]:
         if self.primary_key_cols:
             return [k.strip() for k in self.primary_key_cols.split(",") if k.strip()]
         return None
+
+    @property
+    def recipient_list(self) -> Optional[List[str]]:
+        if not self.recipients:
+            return None
+        try:
+            parsed = json.loads(self.recipients)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(parsed, list):
+            return None
+        return [str(r).strip() for r in parsed if str(r).strip()]
 
     @property
     def full_target_table(self) -> str:
@@ -225,6 +242,7 @@ class ConfigManager:
             s3_raw_sink_bucket_name = r.get("s3_raw_sink_bucket_name") or r.get("raw_sink_bucket_name"),
             s3_raw_sink_file_path   = r.get("s3_raw_sink_file_path")  or r.get("raw_sink_file_path"),
             child_table_fqn         = child_table_fqn,
+            recipients              = r.get("recipients") or r.get("Recipients"),
         )
 
     # ── Database Operations ───────────────────────────────────────────────────

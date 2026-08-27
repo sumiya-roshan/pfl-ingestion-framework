@@ -245,6 +245,7 @@ class IngestionOrchestrator:
                                 config_id=ingest_obj.config_id,
                                 run_id=run_id,
                                 error_message=silver_result.get("error") or "Unknown Silver failure",
+                                recipients=ingest_obj.recipient_list,
                             )
                         except Exception as notify_exc:
                             self.logger.warning(
@@ -378,6 +379,7 @@ class IngestionOrchestrator:
                     config_id=ingest_obj.config_id,
                     run_id=run_id,
                     error_message=error_msg,
+                    recipients=ingest_obj.recipient_list,
                 )
             except Exception as notify_exc:
                 self.logger.error(f"[{run_id}] Could not send failure notification: {notify_exc}")

@@ -35,15 +35,6 @@ GRAPH_SECRET_KEY   = "graph-secrets"
 # Mailbox the app sends as — needs Mail.Send app permission for this mailbox.
 SENDER_MAILBOX = "siriki.prasanthi@ganitinc.com"
 
-# Fixed recipient list for now — revisit as a config table later if you need
-# per-pipeline/per-source routing.
-FAILURE_NOTIFICATION_RECIPIENTS = [
-    "siriki.prasanthi@ganitinc.com",
-    "benny.charles@ganitinc.com",
-    "sumiya.roshan@ganitinc.com",
-    "hirithi.nandha@ganitinc.com",
-]
-
 
 class GraphMailNotifier:
 
@@ -72,14 +63,20 @@ class GraphMailNotifier:
         config_id: int,
         run_id: Optional[str],
         error_message: str,
-        recipients: Optional[List[str]] = None,
+        recipients: Optional[List[str]],
     ) -> None:
-        """Never raises — logs and swallows any failure to send."""
+        """
+        Never raises — logs and swallows any failure to send. recipients
+        comes from that table's own config-table 'recipients' column
+        (IngestionTaskConfig.recipient_list) — there is no fallback list, so
+        a table with no recipients configured is skipped rather than
+        notifying anyone.
+        """
         try:
-            to = recipients or FAILURE_NOTIFICATION_RECIPIENTS
-            if not to:
-                self._log_warning("No failure-notification recipients configured — skipping email.")
+            if not recipients:
+                self._log_warning(f"No recipients configured for config_id={config_id} — skipping email.")
                 return
+            to = recipients
 
             subject = f"[Pipeline FAILURE] {stage} — {source_name}.{table_name} (config_id={config_id})"
             body = (
