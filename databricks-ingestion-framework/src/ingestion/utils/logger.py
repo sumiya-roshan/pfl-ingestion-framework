@@ -117,17 +117,22 @@ def get_logger(
 
 # ─── S3 / Volume log-upload support ──────────────────────────────────────────
 
+_DBUTILS = None  # injected from the notebook via configure_s3_logging(dbutils=...)
+
+
 def _upload_on_exit() -> None:
     """Flush log handlers and upload the local log file to S3 / Volume.
     Idempotent — safe to call multiple times; only uploads once.
+    Uses dbutils.fs.cp() (same IAM creds as Spark) when available.
     """
-    global _LOCAL_LOG_FILE, _S3_LOG_PATH
+    global _LOCAL_LOG_FILE, _S3_LOG_PATH, _DBUTILS
     if not _LOCAL_LOG_FILE or not _S3_LOG_PATH:
         return
 
-    # Capture and clear immediately so any second call (e.g. atexit) is a no-op
+    # Capture and clear so any second call (e.g. atexit) is a no-op
     local_file = _LOCAL_LOG_FILE
     dest       = _S3_LOG_PATH
+    dbutils    = _DBUTILS
     _LOCAL_LOG_FILE = None
     _S3_LOG_PATH    = None
 
@@ -141,10 +146,23 @@ def _upload_on_exit() -> None:
                 pass
 
     if not os.path.exists(local_file) or os.path.getsize(local_file) == 0:
+        print("[Logger] Log file is empty — skipping upload.")
         return
 
     try:
-        if dest.startswith("s3://"):
+        if dbutils is not None:
+            # dbutils.fs.cp uses the cluster's IAM role — same as Spark S3 writes
+            dbutils.fs.cp(f"file:{local_file}", dest)
+            print(f"[Logger] Uploaded logs -> {dest}")
+        elif not dest.startswith("s3://"):
+            # Local / UC Volume / DBFS — plain file copy
+            dest_dir = os.path.dirname(dest)
+            if dest_dir:
+                os.makedirs(dest_dir, exist_ok=True)
+            shutil.copy(local_file, dest)
+            print(f"[Logger] Copied logs  -> {dest}")
+        else:
+            # No dbutils and S3 path — last resort: boto3
             import boto3
             path_parts = dest[5:].split("/", 1)
             bucket = path_parts[0]
@@ -153,11 +171,6 @@ def _upload_on_exit() -> None:
                 key = f"{key}{os.path.basename(local_file)}"
             boto3.client("s3").upload_file(local_file, bucket, key)
             print(f"[Logger] Uploaded logs -> s3://{bucket}/{key}")
-        else:
-            # UC Volume / DBFS / local filesystem
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.copy(local_file, dest)
-            print(f"[Logger] Copied logs  -> {dest}")
     except Exception as exc:
         print(f"[Logger] Failed to upload logs to '{dest}': {exc}")
 
@@ -165,20 +178,22 @@ def _upload_on_exit() -> None:
 def configure_s3_logging(
     s3_log_path: str,
     logger_name: str = "ingestion_framework",
+    dbutils=None,
 ) -> None:
     """
-    Attach a FileHandler that writes logs to a local temp file during execution,
-    then register an atexit hook to upload the file to s3_log_path on exit.
+    Attach a FileHandler that writes logs to a local temp file during execution.
+    Call _upload_on_exit() explicitly at the end of the notebook to upload.
 
     Parameters
     ----------
-    s3_log_path  : destination path — 's3://bucket/prefix/file.log'
-                   or a Databricks Volume / DBFS path
-    logger_name  : name of the logger to attach the handler to
-                   (default: 'ingestion_framework')
+    s3_log_path  : destination — 's3://bucket/prefix/file.log' or a Volume path
+    logger_name  : logger name to attach the FileHandler to
+    dbutils      : pass dbutils from your notebook so upload uses dbutils.fs.cp()
+                   (same IAM credentials as Spark — works on Serverless clusters)
     """
-    global _LOCAL_LOG_FILE, _S3_LOG_PATH
+    global _LOCAL_LOG_FILE, _S3_LOG_PATH, _DBUTILS
     _S3_LOG_PATH = s3_log_path
+    _DBUTILS     = dbutils
 
     _LOCAL_LOG_FILE = os.path.join(
         tempfile.gettempdir(),

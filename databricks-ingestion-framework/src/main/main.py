@@ -212,7 +212,7 @@ resolved_landing_path = landing_volume_path or source_sys.landing_volume_path
 if resolved_landing_path:
     s3_log_path = f"{resolved_landing_path.rstrip('/')}/logs/{pipeline_name}_{job_run_id}.log"
     from ingestion.utils.logger import configure_s3_logging
-    configure_s3_logging(s3_log_path)
+    configure_s3_logging(s3_log_path, dbutils=dbutils)
 
 logger.info(f"Pipeline started for source: {source_sys.source_name} ({source_sys.source_type})")
 
