@@ -169,13 +169,15 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
     for r in eligible_rows:
         r_dict = r.asDict()
         res = spark.sql(f"""
-            SELECT Pipeline_Name FROM {RDBMS_CFG_TABLE}
+            SELECT Pipeline_Name, Source_Name FROM {RDBMS_CFG_TABLE}
             WHERE Config_Master_ID = {r['Config_Master_ID']} AND Config_ID = {r['Config_ID']}
             LIMIT 1
         """).collect()
         if res:
             r_dict["Pipeline_Name"] = res[0]["Pipeline_Name"]
+            r_dict["Source_Name"] = res[0]["Source_Name"]
             result_rows.append(r_dict)
+
 
     if not result_rows:
         return 0
@@ -373,7 +375,7 @@ def trigger_eligible_jobs(trigger_time_str: str) -> None:
         rows = (
             eligible_df
             .filter(f"Config_Master_ID = {int(cmid)}")
-            .select("Config_Master_ID", "Pipeline_Name")
+            .select("Config_Master_ID", "Pipeline_Name", "Source_Name")
             .distinct()
             .collect()
         )
@@ -383,23 +385,26 @@ def trigger_eligible_jobs(trigger_time_str: str) -> None:
                     "Databricks_Job_Name": row["Pipeline_Name"],
                     "Config_Master_ID":    row["Config_Master_ID"],
                     "Pipeline_Name":       row["Pipeline_Name"],
+                    "Source_Name":         row["Source_Name"],
                 })
 
     for row in job_cfg_rows:
         job_name      = row["Databricks_Job_Name"]
         cmid          = row["Config_Master_ID"]
         pipeline_name = row["Pipeline_Name"]
+        source_name   = row["Source_Name"]
         try:
             run_id = job_trigger.run_now_by_name(
                 job_name        = job_name,
                 notebook_params = {
                     "batch_start_date": trigger_time_str,
-                    "pipeline_name":    pipeline_name
+                    "pipeline_name":    pipeline_name,
+                    "source_name":      source_name
                 },
             )
             logger.info(
                 f"[MultiRefresh] Triggered job '{job_name}' for Config_Master_ID={cmid} "
-                f"pipeline={pipeline_name} ? run_id={run_id}  batch_start_date={trigger_time_str}"
+                f"pipeline={pipeline_name} source_name={source_name} ? run_id={run_id}  batch_start_date={trigger_time_str}"
             )
         except Exception as exc:
             logger.error(
