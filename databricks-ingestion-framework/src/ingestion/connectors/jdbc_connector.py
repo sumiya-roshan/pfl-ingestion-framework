@@ -126,9 +126,13 @@ class JdbcConnector(BaseConnector):
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _resolve_jdbc_url(self) -> str:
+    def _read_options(self) -> dict:
         ss = self.source_system
-        return _build_url(
+        username, password = self.secrets.get_credentials(
+            ss.secret_scope, ss.secret_key_credentials
+        )
+
+        url = _build_url(
             source_type=ss.source_type,
             host=ss.host,
             port=ss.port or 0,
@@ -136,28 +140,20 @@ class JdbcConnector(BaseConnector):
             extra_params={},                                # no extra_params in new schema
         )
 
-    def _resolve_driver(self) -> str:
-        ss = self.source_system
-        if ss.driver_class:
-            return ss.driver_class                          # explicit config wins
-        driver = _DEFAULT_DRIVER.get(ss.source_type.upper())
-        if driver is None:
-            raise ValueError(
-                f"No built-in JDBC driver for source_type='{ss.source_type}'. "
-                f"Set driver_class in config_source_system."
-            )
-        return driver
+        driver = ss.driver_class                            # explicit config wins
+        if not driver:
+            driver = _DEFAULT_DRIVER.get(ss.source_type.upper())
+            if driver is None:
+                raise ValueError(
+                    f"No built-in JDBC driver for source_type='{ss.source_type}'. "
+                    f"Set driver_class in config_source_system."
+                )
 
-    def _read_options(self) -> dict:
-        ss = self.source_system
-        username, password = self.secrets.get_credentials(
-            ss.secret_scope, ss.secret_key_credentials
-        )
         opts = {
-            "url":      self._resolve_jdbc_url(),
+            "url":      url,
             "user":     username,
             "password": password,
-            "driver":   self._resolve_driver(),
+            "driver":   driver,
         }
         # Parallel-read tuning: optionally set via source_filter JSON extras
         # or extend ingestion_config with dedicated columns in a future iteration.
@@ -242,98 +238,51 @@ class JdbcConnector(BaseConnector):
 
         return self._wrap_query(self._base_sql(), predicates)
 
-    def _lookback_cutoff(self) -> Optional[str]:
-        """
-        Silver_Last_Sink_Date - Lookback_Hours, formatted 'YYYY-MM-DD HH:MM:SS'.
-        Returns None for FULL load or when silver_last_sink_date isn't set yet
-        (first run). Shared by _lookback_predicates() and the special-case
-        template substitution in _special_probe_query() — both must derive
-        the cutoff the same way.
-        """
-        io = self.ingest_obj
-        if io.load_type != "INCREMENTAL" or not io.silver_last_sink_date:
-            return None
-
-        from datetime import datetime, timedelta
-
-        last_sink_str = str(io.silver_last_sink_date).replace("T", " ").split(".")[0]
-        last_sink = datetime.strptime(last_sink_str, "%Y-%m-%d %H:%M:%S")
-        cutoff = last_sink - timedelta(hours=int(io.lookback_hours or 3))
-        return cutoff.strftime("%Y-%m-%d %H:%M:%S")
-
-    def _lookback_predicates(self) -> list:
-        """
-        Watermark predicate for the generic lookup probe:
-        incremental_column (OR delta_column_2) >= Silver_Last_Sink_Date - Lookback_Hours.
-
-        Returns [] for FULL load, or when there's no incremental column or no
-        cutoff yet (first run — probe unfiltered).
-        """
-        io = self.ingest_obj
-        cutoff_str = self._lookback_cutoff()
-        if not io.incremental_column or cutoff_str is None:
-            return []
-
-        predicate = f"{io.incremental_column} >= '{cutoff_str}'"
-        if io.delta_column_2:
-            predicate = f"({predicate} OR {io.delta_column_2} >= '{cutoff_str}')"
-        return [predicate]
-
-    def _special_probe_query(self, select_cols: str) -> Optional[str]:
-        """
-        Looks up self.ingest_obj.config_id (the per-table row identifier — NOT
-        config_master_id, which is shared by every pipeline of a given source
-        type) in special_lookup_queries.json. If a matching entry exists,
-        substitutes {key_column}/{lookback_timestamp} into its 'lookup_query'
-        template and returns the finished, wrapped dbtable expression. Returns
-        None when there's no matching entry, so build_probe_query() falls
-        back to the generic logic unchanged.
-
-        custom_query is never parsed or modified here — the template is used
-        verbatim aside from the two placeholder substitutions.
-        """
-        config_id = self.ingest_obj.config_id
-        entry = _load_special_lookup_queries().get(str(config_id))
-        if entry is None:
-            return None
-
-        template = entry.get("lookup_query")
-        if not template:
-            raise ValueError(
-                f"special_lookup_queries.json entry for config_id="
-                f"{config_id} is missing 'lookup_query'."
-            )
-
-        cutoff_str = self._lookback_cutoff() or ""
-        query = template.replace("{key_column}", select_cols).replace(
-            "{lookback_timestamp}", cutoff_str
-        )
-        return f"({query}) _src"
-
     def build_probe_query(self) -> str:
         """
-        SELECT <key_cols> ... LIMIT 1 (dialect-mapped) — cheap existence check
-        derived from Source_Query, projecting the primary key columns instead
-        of '*' (falls back to '1' if no key column is configured).
-
-        FULL load: unfiltered, always generic. INCREMENTAL load: first checks
-        special_lookup_queries.json for a config_id-specific template (this
-        table only — see _special_probe_query()); if none matches, filters by
-        _lookback_predicates() (Delta_Column_1/2 vs. Silver_Last_Sink_Date -
-        Lookback_Hours) same as before. Used by LookupExecutor instead of a
+        existence-check query derived from Source_Query, projecting the
+        primary key columns (falls back to '1' if none configured), limited
+        to 1 row (dialect-mapped). Used by LookupExecutor instead of a
         separate Lookup_Query_Template column.
+
+        FULL load: always the generic unfiltered form.
+
+        INCREMENTAL load: first checks special_lookup_queries.json for a
+        config_id-specific template — for the rare table whose join structure
+        can't be filtered generically (delta columns live on a joined table).
+        If no entry matches, falls back to the generic predicate:
+        Delta_Column_1 (OR Delta_Column_2) >= Silver_Last_Sink_Date - Lookback_Hours.
         """
         io = self.ingest_obj
         select_cols = ", ".join(io.primary_key_list) if io.primary_key_list else "1"
+        predicates = []
 
         if io.load_type == "INCREMENTAL":
-            special_query = self._special_probe_query(select_cols)
-            if special_query is not None:
-                return special_query
+            from ..utils.watermark import resolve_watermark
+            cutoff = resolve_watermark(io)
 
-        return self._wrap_query(
-            self._base_sql(), self._lookback_predicates(), select_cols=select_cols, row_limit=1
-        )
+            special_entry = _load_special_lookup_queries().get(str(io.config_id))
+            if special_entry is not None:
+                template = special_entry.get("lookup_query")
+                if not template:
+                    raise ValueError(
+                        f"special_lookup_queries.json entry for config_id="
+                        f"{io.config_id} is missing 'lookup_query'."
+                    )
+                # custom_query is never parsed here — the template is used
+                # verbatim aside from these two placeholder substitutions.
+                query = template.replace("{key_column}", select_cols).replace(
+                    "{lookback_timestamp}", cutoff or ""
+                )
+                return f"({query}) _src"
+
+            if io.incremental_column and cutoff is not None:
+                predicate = f"{io.incremental_column} >= '{cutoff}'"
+                if io.delta_column_2:
+                    predicate = f"({predicate} OR {io.delta_column_2} >= '{cutoff}')"
+                predicates.append(predicate)
+
+        return self._wrap_query(self._base_sql(), predicates, select_cols=select_cols, row_limit=1)
 
     def build_key_query(self) -> str:
         """
@@ -348,38 +297,27 @@ class JdbcConnector(BaseConnector):
     # ── Public extract ────────────────────────────────────────────────────────
 
     def extract(self, watermark_start: Optional[str]) -> Tuple[DataFrame, Optional[str]]:
-        import time
-        retries = 3
-        delay = 5
-        last_exception = None
+        """
+        Retries are handled by the caller (orchestrator.py wraps this whole
+        call in retry_on_failure(max_retries=source_sys.retry_count,
+        retry_interval=source_sys.retry_interval)) — no retry loop here, so
+        there's a single configurable retry policy instead of two nested ones.
+        """
+        options = self._read_options()
+        dbtable = self._build_source_query(watermark_start)
 
-        options  = self._read_options()
-        dbtable  = self._build_source_query(watermark_start)
-
-        for attempt in range(retries):
-            try:
-                df = (
-                    self.spark.read.format("jdbc")
-                    .options(**options)
-                    .option("dbtable", dbtable)
-                    .load()
-                )
-
-                max_watermark: Optional[str] = None
-                io = self.ingest_obj
-                if io.load_type == "INCREMENTAL" and io.incremental_column:
-                    # Spark performs the actual database read action here. 
-                    # Wrapping this ensures we catch transient connection dropouts.
-                    max_row = df.agg({io.incremental_column: "max"}).collect()
-                    if max_row and max_row[0][0] is not None:
-                        max_watermark = str(max_row[0][0])
-
-                return df, max_watermark
-            except Exception as exc:
-                last_exception = exc
-                if attempt < retries - 1:
-                    time.sleep(delay)
-
-        raise ConnectionError(
-            f"Failed to execute JDBC extraction after {retries} attempts due to transient error: {last_exception}"
+        df = (
+            self.spark.read.format("jdbc")
+            .options(**options)
+            .option("dbtable", dbtable)
+            .load()
         )
+
+        max_watermark: Optional[str] = None
+        io = self.ingest_obj
+        if io.load_type == "INCREMENTAL" and io.incremental_column:
+            max_row = df.agg({io.incremental_column: "max"}).collect()
+            if max_row and max_row[0][0] is not None:
+                max_watermark = str(max_row[0][0])
+
+        return df, max_watermark

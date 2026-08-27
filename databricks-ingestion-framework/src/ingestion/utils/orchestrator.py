@@ -170,7 +170,7 @@ class IngestionOrchestrator:
         run_id = audit_run["job_run_id"]
 
         try:
-            watermark_start = resolve_watermark(self.spark, self.logger, ingest_obj)
+            watermark_start = resolve_watermark(ingest_obj)
             self.logger.info(
                 f"[{run_id}] START config_id={ingest_obj.config_id} "
                 f"source='{source_sys.source_name}' object='{ingest_obj.source_object_name}' "
