@@ -171,6 +171,8 @@ class IngestionOrchestrator:
 
         try:
             watermark_start = resolve_watermark(ingest_obj)
+            if ingest_obj.load_type.upper() == "INCREMENTAL" and watermark_start:
+                self.logger.debug(f"[{run_id}] Incremental watermark = {watermark_start}")
             self.logger.info(
                 f"[{run_id}] START config_id={ingest_obj.config_id} "
                 f"source='{source_sys.source_name}' object='{ingest_obj.source_object_name}' "
@@ -223,9 +225,9 @@ class IngestionOrchestrator:
             rows_copied = rows_read
             copy_duration_sec = round(time.time() - write_start_time, 2)
 
-            self.logger.info(
-                f"[{run_id}] Bronze write → {target_table} ({rows_read} rows, mode={ingest_obj.write_mode})"
-            )
+            if rows_read == 0:
+                self.logger.warning(f"[{run_id}] Source returned zero records for {ingest_obj.source_object_name}")
+            self.logger.info(f"[{run_id}] {rows_read:,} records written to {target_table}")
 
             # Retrieve metrics from Delta table history
             data_read_bytes = 0
@@ -286,7 +288,15 @@ class IngestionOrchestrator:
                 except Exception as sink_exc:
                     self.logger.warning(f"[{run_id}] Could not update sink metadata: {sink_exc}")
 
-            self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
+            import time
+            total_duration_sec = round(time.time() - run_start_time.timestamp(), 2)
+            if total_duration_sec >= 60:
+                mins = int(total_duration_sec // 60)
+                secs = int(total_duration_sec % 60)
+                duration_str = f"{mins}m {secs}s"
+            else:
+                duration_str = f"{total_duration_sec}s"
+            self.logger.info(f"[{run_id}] Pipeline completed in {duration_str}")
             return {
                 "config_id": ingest_obj.config_id,
                 "run_id":   run_id,
@@ -305,7 +315,7 @@ class IngestionOrchestrator:
             #     error_code_dtl = exc.getErrorClass()
             error_code  = type(exc).__name__
             self.logger.error(
-                f"[{run_id}] FAILED config_id={ingest_obj.config_id}: {error_msg}",
+                f"[{run_id}] Failed to write {ingest_obj.target_table} table due to error: {error_msg}",
                 exc_info=True,
             )
             try:

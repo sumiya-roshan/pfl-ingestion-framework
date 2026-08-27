@@ -84,6 +84,7 @@ class LookupExecutor:
 
                 if isinstance(connector, JdbcConnector):
                     resolved_query = connector.build_probe_query()
+                    self.logger.debug(f"[LookupExecutor] Lookup query generated: {resolved_query}")
                     count = self._lookup_jdbc(connector, resolved_query)
                 elif isinstance(connector, MongoConnector):
                     # find_one() probes the collection directly — no query template needed.
@@ -127,8 +128,8 @@ class LookupExecutor:
 
                 attempt += 1
                 self.logger.warning(
-                    f"[LookupExecutor] Lookup attempt {attempt}/{max_retries} FAILED for config_id={config_id} "
-                    f"({object_name}): {exc}. Retrying in {retry_interval}s..."
+                    f"Retry attempt {attempt} of {max_retries} for [LookupExecutor] Lookup for config_id={config_id} "
+                    f"({object_name}) due to error: {exc}. Retrying in {retry_interval}s..."
                 )
                 if retry_interval > 0:
                     import time

@@ -38,8 +38,8 @@ def retry_on_failure(
                 raise
             attempt += 1
             message = (
-                f"{description} failed (attempt {attempt}/{max_retries}), "
-                f"retrying in {retry_interval}s: {exc}"
+                f"Retry attempt {attempt} of {max_retries} for {description} "
+                f"due to error: {exc}. Retrying in {retry_interval}s..."
             )
             if logger:
                 logger.warning(message)

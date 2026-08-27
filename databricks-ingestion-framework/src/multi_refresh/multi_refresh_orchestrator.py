@@ -42,6 +42,7 @@ dbutils.widgets.text("job_run_id",            "",      "Job Run ID - set to {{jo
 dbutils.widgets.text("max_iterations",        "200",   "Safety: max loop iterations before exit")
 dbutils.widgets.text("secret_scope",          "",      "Secret scope for Databricks PAT token")
 dbutils.widgets.text("secret_key_pat",        "databricks-pat-token", "Secret key for Databricks PAT token")
+dbutils.widgets.text("s3_log_path",           "",      "S3 Log Path (e.g. s3://bucket/logs/)")
 
 # COMMAND ----------
 
@@ -51,6 +52,7 @@ job_run_id         = dbutils.widgets.get("job_run_id")         or "MANUAL"
 max_iterations     = int(dbutils.widgets.get("max_iterations") or "200")
 secret_scope       = dbutils.widgets.get("secret_scope")       or None
 secret_key_pat     = dbutils.widgets.get("secret_key_pat")     or "databricks-pat-token"
+s3_log_path        = dbutils.widgets.get("s3_log_path")        or None
 
 if not admin_catalog_name:
     dbutils.notebook.exit("Error: admin_catalog_name widget is required.")
@@ -68,6 +70,9 @@ ELIGIBLE_TEMP_TABLE  = f"{TEMP_SCHEMA}.tb_eligible_objects"
 
 IST = pytz.timezone("Asia/Kolkata")
 logger = get_logger(environment=environment)
+if s3_log_path:
+    from ingestion.utils.logger import configure_s3_logging
+    configure_s3_logging(f"{s3_log_path.rstrip('/')}/multi_refresh_{job_run_id}.log")
 
 print(f"admin_catalog_name : {admin_catalog_name}")
 print(f"environment        : {environment}")

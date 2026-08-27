@@ -96,6 +96,9 @@ audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABL
 batch_start_date_raw = dbutils.widgets.get("batch_start_date")     or "1"
 max_workers          = int(dbutils.widgets.get("max_workers") or "4")
 
+from ingestion.utils.logger import get_logger
+logger = get_logger(environment=environment)
+
 # Parse batch_start_date_raw to datetime object if it is from the orchestrator
 from datetime import datetime
 parsed_batch_start_date = None
@@ -204,6 +207,15 @@ source_sys, tasks = config_mgr.get_active_tasks(
 print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
 print(f"Active tasks    : {len(tasks)}")
 
+# Configure S3/Volume logging dynamically
+resolved_landing_path = landing_volume_path or source_sys.landing_volume_path
+if resolved_landing_path:
+    s3_log_path = f"{resolved_landing_path.rstrip('/')}/logs/{pipeline_name}_{job_run_id}.log"
+    from ingestion.utils.logger import configure_s3_logging
+    configure_s3_logging(s3_log_path)
+
+logger.info(f"Pipeline started for source: {source_sys.source_name} ({source_sys.source_type})")
+
 if not tasks:
     dbutils.notebook.exit("No active ingestion tasks found for this pipeline.")
 
@@ -236,6 +248,7 @@ orchestrator = IngestionOrchestrator(
 )
 
 def run_one(task: IngestionTaskConfig) -> dict:
+    logger.info(f"Processing table {task.source_object_name}")
     """
     Run a single ingestion task — works for RDBMS, NoSQL, and S3.
 
@@ -313,6 +326,10 @@ print(
 
 if failed:
     failed_ids = [r["config_id"] for r in failed]
+    logger.critical(
+        f"Pipeline cannot continue — {len(failed)} of {len(results)} ingestion object(s) FAILED. "
+        f"Failed Config IDs: {failed_ids}"
+    )
     raise Exception(
         f"{len(failed)} of {len(results)} ingestion object(s) FAILED. "
         f"Check the audit table for details. Failed Config IDs: {failed_ids}"
