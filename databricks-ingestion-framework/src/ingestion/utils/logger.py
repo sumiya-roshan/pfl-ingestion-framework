@@ -118,12 +118,20 @@ def get_logger(
 # ─── S3 / Volume log-upload support ──────────────────────────────────────────
 
 def _upload_on_exit() -> None:
-    """Flush all log handlers and upload the local log file to S3 / Volume."""
+    """Flush log handlers and upload the local log file to S3 / Volume.
+    Idempotent — safe to call multiple times; only uploads once.
+    """
     global _LOCAL_LOG_FILE, _S3_LOG_PATH
     if not _LOCAL_LOG_FILE or not _S3_LOG_PATH:
         return
 
-    # Flush every known handler so nothing is lost
+    # Capture and clear immediately so any second call (e.g. atexit) is a no-op
+    local_file = _LOCAL_LOG_FILE
+    dest       = _S3_LOG_PATH
+    _LOCAL_LOG_FILE = None
+    _S3_LOG_PATH    = None
+
+    # Flush every known handler so nothing is lost before upload
     for lname in [""] + list(logging.root.manager.loggerDict.keys()):
         lgr = logging.getLogger(lname)
         for h in lgr.handlers:
@@ -132,27 +140,26 @@ def _upload_on_exit() -> None:
             except Exception:
                 pass
 
-    if not os.path.exists(_LOCAL_LOG_FILE) or os.path.getsize(_LOCAL_LOG_FILE) == 0:
+    if not os.path.exists(local_file) or os.path.getsize(local_file) == 0:
         return
 
     try:
-        dest = _S3_LOG_PATH
         if dest.startswith("s3://"):
             import boto3
             path_parts = dest[5:].split("/", 1)
             bucket = path_parts[0]
             key    = path_parts[1] if len(path_parts) > 1 else ""
             if not key or key.endswith("/"):
-                key = f"{key}{os.path.basename(_LOCAL_LOG_FILE)}"
-            boto3.client("s3").upload_file(_LOCAL_LOG_FILE, bucket, key)
+                key = f"{key}{os.path.basename(local_file)}"
+            boto3.client("s3").upload_file(local_file, bucket, key)
             print(f"[Logger] Uploaded logs -> s3://{bucket}/{key}")
         else:
             # UC Volume / DBFS / local filesystem
             os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.copy(_LOCAL_LOG_FILE, dest)
+            shutil.copy(local_file, dest)
             print(f"[Logger] Copied logs  -> {dest}")
     except Exception as exc:
-        print(f"[Logger] Failed to upload logs to '{_S3_LOG_PATH}': {exc}")
+        print(f"[Logger] Failed to upload logs to '{dest}': {exc}")
 
 
 def configure_s3_logging(

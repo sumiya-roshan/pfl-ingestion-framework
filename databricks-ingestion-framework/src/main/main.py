@@ -324,17 +324,21 @@ print(
 
 # COMMAND ----------
 
+from ingestion.utils.logger import _upload_on_exit
+
 if failed:
     failed_ids = [r["config_id"] for r in failed]
     logger.critical(
         f"Pipeline cannot continue — {len(failed)} of {len(results)} ingestion object(s) FAILED. "
         f"Failed Config IDs: {failed_ids}"
     )
+    _upload_on_exit()
     raise Exception(
         f"{len(failed)} of {len(results)} ingestion object(s) FAILED. "
         f"Check the audit table for details. Failed Config IDs: {failed_ids}"
     )
 
+_upload_on_exit()
 dbutils.notebook.exit(
     f"SUCCESS: {len(succeeded)}/{len(results)} objects ingested "
     f"({len(skipped)} skipped — 0 rows in source)."
