@@ -81,7 +81,7 @@ class IngestionOrchestrator:
         self.s3_writer     = S3RawWriter()
         self.bronze_writer = BronzeWriter(spark)
         self.logger        = get_logger(environment=environment)
-        self.notifier      = GraphMailNotifier(logger=self.logger)
+        self.notifier      = GraphMailNotifier(dbutils=dbutils, logger=self.logger)
 
         # Silver trigger: runs inline, coupled to the landing write — a table's
         # Bronze Delta write does not start until that table's Silver run has

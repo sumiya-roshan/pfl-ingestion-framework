@@ -1,2 +1,0 @@
-# Hardcoded Graph API credentials — never commit real tenant/client secrets.
-databricks-ingestion-framework/src/ingestion/utils/notification_config.py
