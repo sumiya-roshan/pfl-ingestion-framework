@@ -37,35 +37,23 @@ _SPECIAL_LOOKUP_CONFIG_PATH = (
     Path(__file__).resolve().parents[3] / "config" / "special_lookup_queries.json"
 )
 
-# Loaded lazily on first use and kept for the life of the process — set
-# _special_lookup_queries_cache back to None (e.g. in a test) to force a re-read.
-_special_lookup_queries_cache: Optional[dict] = None
-
-
 def _load_special_lookup_queries() -> dict:
     """
-    Loads _SPECIAL_LOOKUP_CONFIG_PATH once per process. Missing file → {}
-    (every pipeline falls back to the generic build_probe_query() logic).
-    Malformed JSON raises a clear configuration error rather than silently
-    falling back, since a typo there should not go unnoticed.
+    Missing file → {} (every pipeline falls back to the generic
+    build_probe_query() logic). Malformed JSON raises a clear configuration
+    error rather than silently falling back, since a typo there should not
+    go unnoticed.
     """
-    global _special_lookup_queries_cache
-    if _special_lookup_queries_cache is not None:
-        return _special_lookup_queries_cache
-
     if not _SPECIAL_LOOKUP_CONFIG_PATH.exists():
-        _special_lookup_queries_cache = {}
-        return _special_lookup_queries_cache
+        return {}
 
     try:
         with open(_SPECIAL_LOOKUP_CONFIG_PATH, "r") as f:
-            _special_lookup_queries_cache = json.load(f)
+            return json.load(f)
     except json.JSONDecodeError as exc:
         raise ValueError(
             f"Invalid JSON in special lookup config '{_SPECIAL_LOOKUP_CONFIG_PATH}': {exc}"
         ) from exc
-
-    return _special_lookup_queries_cache
 
 
 def _parse_timeout_to_seconds(value: Optional[str]) -> Optional[int]:
