@@ -339,6 +339,20 @@ class IngestionOrchestrator:
             )
             self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
 
+            try:
+                self.notifier.send_success_email(
+                    source_name=source_sys.source_name,
+                    table_name=ingest_obj.source_object_name,
+                    config_id=ingest_obj.config_id,
+                    run_id=run_id,
+                    rows_read=rows_read,
+                    rows_copied=rows_copied,
+                    target_table=target_table,
+                    recipients=ingest_obj.recipient_list,
+                )
+            except Exception as notify_exc:
+                self.logger.warning(f"[{run_id}] Could not send success notification: {notify_exc}")
+
             if self.silver_processor and not landing_path:
                 print(
                     f"[SILVER] Skipped for config_id={ingest_obj.config_id} — "

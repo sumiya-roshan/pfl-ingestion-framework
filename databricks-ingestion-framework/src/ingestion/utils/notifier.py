@@ -91,6 +91,38 @@ class GraphMailNotifier:
         except Exception as exc:
             self._log_warning(f"Failed to send failure-notification email for stage={stage}: {exc}")
 
+    def send_success_email(
+        self,
+        source_name: str,
+        table_name: str,
+        config_id: int,
+        run_id: Optional[str],
+        rows_read: int,
+        rows_copied: int,
+        target_table: str,
+        recipients: Optional[List[str]],
+    ) -> None:
+        """Never raises — same recipients rule as send_failure_email: no
+        fallback list, a table with no recipients configured is skipped."""
+        try:
+            if not recipients:
+                self._log_warning(f"No recipients configured for config_id={config_id} — skipping success email.")
+                return
+
+            subject = f"[Pipeline SUCCESS] {source_name}.{table_name} (config_id={config_id})"
+            body = (
+                f"Source: {source_name}\n"
+                f"Table: {table_name}\n"
+                f"Config ID: {config_id}\n"
+                f"Run ID: {run_id}\n"
+                f"Target: {target_table}\n"
+                f"Rows read: {rows_read}\n"
+                f"Rows copied: {rows_copied}\n"
+            )
+            self._send_mail(to_recipients=recipients, subject=subject, body=body)
+        except Exception as exc:
+            self._log_warning(f"Failed to send success-notification email for config_id={config_id}: {exc}")
+
     # ── Internal: auth + send ────────────────────────────────────────────────
 
     def _get_access_token(self) -> str:
