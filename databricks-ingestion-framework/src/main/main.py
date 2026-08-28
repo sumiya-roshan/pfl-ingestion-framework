@@ -182,27 +182,49 @@ print(f"pipeline_name from widget: '{pipeline_name}'")
 # MAGIC %md
 # MAGIC ### Discover ingestion tasks for this source
 # MAGIC
-# MAGIC Lookup (presence check) and extraction are coupled per table inside
-# MAGIC `IngestionOrchestrator.run()` — there is no separate lookup-only phase.
-# MAGIC Every active task is loaded here and handed straight to the thread pool below;
-# MAGIC tables with 0 rows in the source are detected and skipped individually as
-# MAGIC their turn comes up, right before extraction would have started.
+# MAGIC When running as part of a Databricks Job, Task 0 (`get_tasks.py`) queries
+# MAGIC the config tables and publishes the active tasks via `taskValues`.
+# MAGIC This task reads them from `taskValues` to avoid duplicate config queries.
+# MAGIC Falls back to a direct config query when running the notebook standalone
+# MAGIC (interactive / manual run without Task 0).
 
 # COMMAND ----------
 
-config_mgr = ConfigManager(
-    spark,
-    source_system_table = SOURCE_SYSTEM_TABLE,
-    config_master_table = CONFIG_MASTER_TABLE,
-    target_catalog      = target_catalog,
-)
+import json
+from ingestion.utils.config_manager import SourceSystemConfig, IngestionTaskConfig
 
-source_sys, tasks = config_mgr.get_active_tasks(
-    config_master_id = config_master_id,
-    source_system_id = source_system_id,
-    pipeline_name    = pipeline_name,
-    batch_start_date = batch_start_date_raw,
-)
+payload_str = None
+try:
+    payload_str = dbutils.jobs.taskValues.get(
+        taskKey   = "get_table_details",
+        key       = "active_tasks_metadata",
+        default   = None,
+        debugValue = None,
+    )
+except Exception:
+    pass  # taskValues not available in standalone mode
+
+if payload_str:
+    # ── Job mode: deserialize what get_tasks.py published ──────────────────
+    print("[Tasks] Reading active tasks from taskValues (get_table_details task).")
+    payload    = json.loads(payload_str)
+    source_sys = SourceSystemConfig.from_dict(payload["source_sys"])
+    tasks      = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
+else:
+    # ── Standalone mode: query config tables directly ──────────────────────
+    print("[Tasks] taskValues not available — querying config tables directly (standalone mode).")
+    config_mgr = ConfigManager(
+        spark,
+        source_system_table = SOURCE_SYSTEM_TABLE,
+        config_master_table = CONFIG_MASTER_TABLE,
+        target_catalog      = target_catalog,
+    )
+    source_sys, tasks = config_mgr.get_active_tasks(
+        config_master_id = config_master_id,
+        source_system_id = source_system_id,
+        pipeline_name    = pipeline_name,
+        batch_start_date = batch_start_date_raw,
+    )
 
 print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
 print(f"Active tasks    : {len(tasks)}")
