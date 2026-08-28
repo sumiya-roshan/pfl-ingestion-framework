@@ -38,7 +38,7 @@ from .writers.s3_writer import S3RawWriter
 from .writers.bronze_writer import BronzeWriter
 from .logger import get_logger
 from .secrets import SecretResolver
-from .notifier import GraphMailNotifier
+from .email_notifier import GraphMailNotifier
 from silver.silver_processor import SilverProcessor
 
 
@@ -237,20 +237,19 @@ class IngestionOrchestrator:
                     # it has to be checked explicitly or it would silently
                     # never trigger a notification (or fail the table at all).
                     if silver_result and silver_result.get("status") == "FAILED":
-                        try:
-                            self.notifier.send_failure_email(
-                                stage="SILVER",
-                                source_name=source_sys.source_name,
-                                table_name=ingest_obj.source_object_name,
-                                config_id=ingest_obj.config_id,
-                                run_id=run_id,
-                                error_message=silver_result.get("error") or "Unknown Silver failure",
-                                recipients=ingest_obj.recipient_list,
-                            )
-                        except Exception as notify_exc:
-                            self.logger.warning(
-                                f"[{run_id}] Could not send Silver failure notification: {notify_exc}"
-                            )
+                        self.notifier.send_email(
+                            subject=f"[FAILURE] SILVER — {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
+                            body=(
+                                f"Stage failed: SILVER\n"
+                                f"Source: {source_sys.source_name}\n"
+                                f"Table: {ingest_obj.source_object_name}\n"
+                                f"Config ID: {ingest_obj.config_id}\n"
+                                f"Run ID: {run_id}\n\n"
+                                f"Error:\n{silver_result.get('error') or 'Unknown Silver failure'}"
+                            ),
+                            recipients=ingest_obj.recipient_list,
+                            config_id=ingest_obj.config_id,
+                        )
 
                     # Stamp Silver_Last_Sink_Date in the child config table this
                     # task came from. Best-effort — a bookkeeping failure here
@@ -339,19 +338,20 @@ class IngestionOrchestrator:
             )
             self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
 
-            try:
-                self.notifier.send_success_email(
-                    source_name=source_sys.source_name,
-                    table_name=ingest_obj.source_object_name,
-                    config_id=ingest_obj.config_id,
-                    run_id=run_id,
-                    rows_read=rows_read,
-                    rows_copied=rows_copied,
-                    target_table=target_table,
-                    recipients=ingest_obj.recipient_list,
-                )
-            except Exception as notify_exc:
-                self.logger.warning(f"[{run_id}] Could not send success notification: {notify_exc}")
+            self.notifier.send_email(
+                subject=f"[SUCCESS] {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
+                body=(
+                    f"Source: {source_sys.source_name}\n"
+                    f"Table: {ingest_obj.source_object_name}\n"
+                    f"Config ID: {ingest_obj.config_id}\n"
+                    f"Run ID: {run_id}\n"
+                    f"Target: {target_table}\n"
+                    f"Rows read: {rows_read}\n"
+                    f"Rows copied: {rows_copied}\n"
+                ),
+                recipients=ingest_obj.recipient_list,
+                config_id=ingest_obj.config_id,
+            )
 
             if self.silver_processor and not landing_path:
                 print(
@@ -385,18 +385,19 @@ class IngestionOrchestrator:
                 self.audit.fail_run(audit_run=audit_run, error_code = error_code,error_message=error_msg)
             except Exception as audit_exc:
                 self.logger.error(f"[{run_id}] Could not write FAILED status to audit: {audit_exc}")
-            try:
-                self.notifier.send_failure_email(
-                    stage=stage,
-                    source_name=source_sys.source_name,
-                    table_name=ingest_obj.source_object_name,
-                    config_id=ingest_obj.config_id,
-                    run_id=run_id,
-                    error_message=error_msg,
-                    recipients=ingest_obj.recipient_list,
-                )
-            except Exception as notify_exc:
-                self.logger.error(f"[{run_id}] Could not send failure notification: {notify_exc}")
+            self.notifier.send_email(
+                subject=f"[FAILURE] {stage} — {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
+                body=(
+                    f"Stage failed: {stage}\n"
+                    f"Source: {source_sys.source_name}\n"
+                    f"Table: {ingest_obj.source_object_name}\n"
+                    f"Config ID: {ingest_obj.config_id}\n"
+                    f"Run ID: {run_id}\n\n"
+                    f"Error:\n{error_msg}"
+                ),
+                recipients=ingest_obj.recipient_list,
+                config_id=ingest_obj.config_id,
+            )
             return {
                 "config_id": ingest_obj.config_id,
                 "run_id":   run_id,
