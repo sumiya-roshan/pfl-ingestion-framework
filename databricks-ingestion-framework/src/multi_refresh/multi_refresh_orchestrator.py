@@ -343,7 +343,7 @@ def _active_pipeline_names(child_table_fqn: str) -> set:
         return set()
 
     rows = (
-        df.filter(f"{active_col} = true")
+        df.filter(f"{active_col} = 1")
         .select(pipeline_col)
         .distinct()
         .collect()
