@@ -34,6 +34,7 @@
 # COMMAND ----------
 
 import sys
+from datetime import date, datetime
 sys.path.append("..")
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -69,6 +70,9 @@ dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date"
 dbutils.widgets.text("max_workers",         "4",              "Max parallel workers (lookup + extraction per task)")
 
 # COMMAND ----------
+
+process_timestamp = datetime.utcnow()
+print(f"Using process_timestamp for this ingestion batch: {process_timestamp}")
 
 config_master_id_raw = dbutils.widgets.get("config_master_id") or None
 source_system_id_raw = dbutils.widgets.get("source_system_id") or None
@@ -293,6 +297,7 @@ def run_one(task: IngestionTaskConfig) -> dict:
         # trigger_type        = trigger_type,
         job_context          = job_context,
         sink_batch_started_date = parsed_batch_start_date,
+        process_timestamp     = process_timestamp,
     )
 
 
