@@ -21,6 +21,7 @@ from typing import Optional, List, Dict, Tuple
 SOURCE_SYSTEM_TABLE = "migration_x_catalog.pfl_x_schema.config_source_system"
 CONFIG_MASTER_TABLE = "migration_x_catalog.pfl_x_schema.config_master"
 AUDIT_TABLE         = "migration_x_catalog.pfl_x_schema.tb_audit_log"
+DEPENDENCY_TABLE    = "migration_x_catalog.pfl_x_schema.dependency_master_config"
 
 # Audit lifecycle values shared by the entry point, orchestrator, and logger.
 AUDIT_STATUS_INPROGRESS = "INPROGRESS"
@@ -144,12 +145,30 @@ class IngestionTaskConfig:
     # rdbms_ingestion_config.Max_Workers — same value repeated on every row for
     # a given pipeline. main.py reads it off the first loaded task.
     max_workers: Optional[int] = None
+    child_table_fqn: Optional[str] = None   # the config_master-resolved child table this task came from
+
+    # JSON array string, e.g. ["a@x.com","b@x.com"] — config table's own
+    # failure-notification recipients for this table, overriding the
+    # notifier's fixed default list when present. See notifier.py.
+    recipients: Optional[str] = None
 
     @property
     def primary_key_list(self) -> Optional[List[str]]:
         if self.primary_key_cols:
             return [k.strip() for k in self.primary_key_cols.split(",") if k.strip()]
         return None
+
+    @property
+    def recipient_list(self) -> Optional[List[str]]:
+        if not self.recipients:
+            return None
+        try:
+            parsed = json.loads(self.recipients)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(parsed, list):
+            return None
+        return [str(r).strip() for r in parsed if str(r).strip()]
 
     @property
     def full_target_table(self) -> str:
@@ -239,7 +258,7 @@ class ConfigManager:
             return None
         return int(float(value))
 
-    def _build_ingestion_task(self, r: dict) -> IngestionTaskConfig:
+    def _build_ingestion_task(self, r: dict, child_table_fqn: Optional[str] = None) -> IngestionTaskConfig:
         """
         Dynamically falls back across different column aliases to support 
         both RDBMS and NoSQL schema structures without hardcoding.
@@ -321,6 +340,8 @@ class ConfigManager:
             s3_first_row_header     = r.get("s3_first_row_header")    or r.get("first_row_header"),
             s3_raw_sink_bucket_name = r.get("s3_raw_sink_bucket_name") or r.get("raw_sink_bucket_name"),
             s3_raw_sink_file_path   = r.get("s3_raw_sink_file_path")  or r.get("raw_sink_file_path"),
+            child_table_fqn         = child_table_fqn,
+            recipients              = r.get("recipients") or r.get("Recipients"),
         )
 
     # ── Database Operations ───────────────────────────────────────────────────
@@ -476,3 +497,21 @@ class ConfigManager:
     @staticmethod
     def _sql_literal(value) -> str:
         return "NULL" if value is None else "'" + str(value).replace("'", "''") + "'"
+  
+
+    def update_silver_last_sink_date(self, child_table_fqn: str, config_id: int) -> None:
+        """
+        Stamps Silver_Last_Sink_Date = current_timestamp() on this table's row
+        in its child config table — called right after Silver completes for
+        that table (see IngestionOrchestrator.run()). Column/PK names are
+        resolved case-insensitively since child config tables vary
+        (Config_ID vs config_id, Silver_Last_Sink_Date vs silver_last_sink_date).
+        """
+        columns = self.spark.table(child_table_fqn).columns
+        config_id_col = next((c for c in columns if c.lower() == "config_id"), "Config_ID")
+        sink_date_col = next((c for c in columns if c.lower() == "silver_last_sink_date"), "Silver_Last_Sink_Date")
+        self.spark.sql(f"""
+            UPDATE {child_table_fqn}
+            SET {sink_date_col} = current_timestamp()
+            WHERE {config_id_col} = {int(config_id)}
+        """)

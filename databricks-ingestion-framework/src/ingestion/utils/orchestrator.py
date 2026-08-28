@@ -13,6 +13,11 @@ Key behaviours
 - Fault tolerance: run() catches all exceptions, records FAILED in audit, and
                   returns a result dict — it never re-raises. The calling
                   notebook decides whether to raise after collecting all results.
+- Silver trigger : coupled — runs inline, synchronously, right after the S3
+                  landing write, on the same thread. The Bronze Delta write
+                  below does not start until Silver has finished for that
+                  table. No separate thread pool; each table's run() call
+                  simply takes longer when Silver is enabled.
 """
 from datetime import date, datetime
 from typing import Optional
@@ -27,6 +32,7 @@ from .config_manager import (
 )
 from .watermark import resolve_watermark
 from .audit import AuditLogger
+from .dependency_logger import DependencyLogger
 from ..connectors.factory import get_connector
 from ..connectors.jdbc_connector import JdbcConnector
 from .writers.s3_writer import S3RawWriter
@@ -35,6 +41,8 @@ from .logger import get_logger
 from .secrets import SecretResolver
 from .retry import retry_on_failure
 from lookup.lookup_executor import LookupExecutor
+from .email_notifier import GraphMailNotifier
+from silver.silver_processor import SilverProcessor
 
 
 class IngestionOrchestrator:
@@ -56,21 +64,39 @@ class IngestionOrchestrator:
         spark,
         dbutils=None,
         audit_table: str   = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master",
+        dependency_table: str = "migration_x_catalog.pfl_x_schema.dependency_master_config",
         pipeline_name: str = "ingestion_framework",
         environment: str   = "dev",
         department_id: int = 0,
+        silver_notebook_path: Optional[str] = None,
+        silver_notebook_timeout: int        = 3600,
+        config_mgr: Optional[ConfigManager] = None,
     ):
         self.spark         = spark
+        self.dbutils       = dbutils
         self.pipeline_name = pipeline_name
         self.environment   = environment
+        self.config_mgr    = config_mgr
 
         self.audit         = AuditLogger(spark, audit_table=audit_table, department_id=department_id)
         self.config_manager = ConfigManager(spark)
+        self.dependency    = DependencyLogger(spark, dependency_table=dependency_table)
         self.secrets       = SecretResolver(dbutils)
         self.s3_writer     = S3RawWriter()
         self.bronze_writer = BronzeWriter(spark)
         self.logger        = get_logger(environment=environment)
         self.lookup_executor = LookupExecutor(spark, self.secrets, self.logger)
+        self.notifier      = GraphMailNotifier(dbutils=dbutils, logger=self.logger)
+
+        # Silver trigger: runs inline, coupled to the landing write — a table's
+        # Bronze Delta write does not start until that table's Silver run has
+        # finished. Disabled when no notebook path is given.
+        self.silver_processor = (
+            SilverProcessor(dbutils, silver_notebook_path, silver_notebook_timeout)
+            if silver_notebook_path else None
+        )
+        if self.silver_processor:
+            print(f"[SILVER] ready (coupled, inline) — notebook='{silver_notebook_path}'")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -161,6 +187,24 @@ class IngestionOrchestrator:
         audit_context = dict(job_context or {})
         # audit_context.setdefault("trigger_type", trigger_type)
         audit_context.setdefault("trigger_id", trigger_id)
+
+        # Dependency row: inserted BEFORE the audit row, per requirement.
+        # pipeline_start_time is job-level (same value for every table in this
+        # job_run_id) — set once in main.py and threaded through job_context.
+        job_run_id_value  = audit_context.get("job_run_id")
+        resolved_business_date = business_date or datetime.utcnow().date()
+        dep_run = self.dependency.start_table(
+            config_master_id    = config_master_id if config_master_id is not None else ingest_obj.config_id,
+            source_system_id    = source_sys.source_id,
+            config_id           = ingest_obj.config_id,
+            table_name          = ingest_obj.source_object_name,
+            pipeline_name       = pipeline_name,
+            job_run_id          = job_run_id_value,
+            business_date       = resolved_business_date,
+            pipeline_start_time = audit_context.get("pipeline_start_time") or datetime.utcnow(),
+        )
+
+        # Start audit: insert the INPROGRESS record before any ingestion work.
         audit_run = self.audit.start_run(
             task=ingest_obj,
             source_sys=source_sys,
@@ -175,6 +219,8 @@ class IngestionOrchestrator:
             watermark_start = resolve_watermark(ingest_obj)
             if ingest_obj.load_type.upper() == "INCREMENTAL" and watermark_start:
                 self.logger.debug(f"[{run_id}] Incremental watermark = {watermark_start}")
+            stage = "EXTRACT"
+            # watermark_start = resolve_watermark(self.spark, self.logger, ingest_obj)
             self.logger.info(
                 f"[{run_id}] START config_id={ingest_obj.config_id} "
                 f"source='{source_sys.source_name}' object='{ingest_obj.source_object_name}' "
@@ -240,8 +286,13 @@ class IngestionOrchestrator:
             rows_deleted = 0
 
             # ── Landing / raw write (optional) ────────────────────────────────
+            # landing_path/fmt/silver_result stay in scope past the if-block
+            # (None/default when landing write is skipped).
+            landing_path  = None
+            silver_result = None
+            fmt = ingest_obj.file_format or "parquet"
             if landing_volume_path:
-                fmt = ingest_obj.file_format or "parquet"
+                stage = "RAW_WRITE"
                 landing_path = self.s3_writer.write(
                     df,
                     landing_volume_path = landing_volume_path,
@@ -254,21 +305,88 @@ class IngestionOrchestrator:
                 self.logger.info(
                     f"[{run_id}] Landing write → {landing_path} ({rows_read} rows, format={fmt})"
                 )
+                self.dependency.mark_source_to_raw_end(dep_run)
+                stage = "SILVER"
 
+                # ── Trigger Silver, coupled — right after the S3 write, on this
+                # same thread. The Bronze Delta write below does not start until
+                # this finishes. _trigger_silver() never raises (catches its own
+                # exceptions and returns a FAILED result dict), so this can't
+                # abort the Bronze write on its own.
+                if self.silver_processor:
+                    silver_schema = f"{ingest_obj.target_schema}_silver"
+                    print(
+                        f"[SILVER] {threading.current_thread().name} running Silver (coupled) for "
+                        f"config_id={ingest_obj.config_id} landing_path='{landing_path}' "
+                        f"→ {ingest_obj.target_catalog}.{silver_schema}.{ingest_obj.target_table}"
+                    )
+                    self.dependency.mark_raw_to_silver_start(dep_run)
+                    silver_result = self._trigger_silver(
+                        config_id           = ingest_obj.config_id,
+                        source_system_id    = source_sys.source_id,
+                        landing_path        = landing_path,
+                        file_format         = fmt,
+                        silver_catalog      = ingest_obj.target_catalog,
+                        silver_schema       = silver_schema,
+                        silver_table        = ingest_obj.target_table,
+                        source_schema       = ingest_obj.source_schema,
+                        source_object_name  = ingest_obj.source_object_name,
+                        load_type           = ingest_obj.load_type,
+                        primary_key_cols    = ingest_obj.primary_key_cols,
+                    )
+                    self.dependency.mark_raw_to_silver_end(dep_run)
+
+                    # _trigger_silver() never raises — a Silver failure comes
+                    # back here as a FAILED result dict, not an exception, so
+                    # it has to be checked explicitly or it would silently
+                    # never trigger a notification (or fail the table at all).
+                    if silver_result and silver_result.get("status") == "FAILED":
+                        self.notifier.send_email(
+                            subject=f"[FAILURE] SILVER — {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
+                            body=(
+                                f"Stage failed: SILVER\n"
+                                f"Source: {source_sys.source_name}\n"
+                                f"Table: {ingest_obj.source_object_name}\n"
+                                f"Config ID: {ingest_obj.config_id}\n"
+                                f"Run ID: {run_id}\n\n"
+                                f"Error:\n{silver_result.get('error') or 'Unknown Silver failure'}"
+                            ),
+                            recipients=ingest_obj.recipient_list,
+                            config_id=ingest_obj.config_id,
+                        )
+
+                    # Stamp Silver_Last_Sink_Date in the child config table this
+                    # task came from. Best-effort — a bookkeeping failure here
+                    # must not fail the table's actual ingestion.
+                    if self.config_mgr and ingest_obj.child_table_fqn:
+                        try:
+                            self.config_mgr.update_silver_last_sink_date(
+                                child_table_fqn=ingest_obj.child_table_fqn,
+                                config_id=ingest_obj.config_id,
+                            )
+                        except Exception as sink_exc:
+                            self.logger.warning(
+                                f"[{run_id}] Could not update Silver_Last_Sink_Date "
+                                f"for config_id={ingest_obj.config_id}: {sink_exc}"
+                            )
+
+            stage = "BRONZE_WRITE"
             import time
             write_start_time = time.time()
 
             # ── Bronze Delta write ─────────────────────────────────────────────
-            target_table = self.bronze_writer.write(
-                df,
-                catalog               = ingest_obj.target_catalog,
-                schema                = ingest_obj.target_schema,
-                table                 = ingest_obj.target_table,
-                write_mode            = ingest_obj.write_mode,
-                merge_keys            = ingest_obj.primary_key_list,
-                schema_evolution_mode = ingest_obj.schema_evolution_mode,
-                partition_column      = ingest_obj.partition_column,
-            )
+            # TEMP: commented out to test Silver in isolation — restore before merging.
+            # target_table = self.bronze_writer.write(
+            #     df,
+            #     catalog               = ingest_obj.target_catalog,
+            #     schema                = ingest_obj.target_schema,
+            #     table                 = ingest_obj.target_table,
+            #     write_mode            = ingest_obj.write_mode,
+            #     merge_keys            = ingest_obj.primary_key_list,
+            #     schema_evolution_mode = ingest_obj.schema_evolution_mode,
+            #     partition_column      = ingest_obj.partition_column,
+            # )
+            target_table = f"{ingest_obj.target_catalog}.{ingest_obj.target_schema}.{ingest_obj.target_table}"
             rows_copied = rows_read
             copy_duration_sec = round(time.time() - write_start_time, 2)
 
@@ -344,6 +462,29 @@ class IngestionOrchestrator:
             else:
                 duration_str = f"{total_duration_sec}s"
             self.logger.info(f"[{run_id}] Pipeline completed in {duration_str}")
+            self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
+
+            self.notifier.send_email(
+                subject=f"[SUCCESS] {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
+                body=(
+                    f"Source: {source_sys.source_name}\n"
+                    f"Table: {ingest_obj.source_object_name}\n"
+                    f"Config ID: {ingest_obj.config_id}\n"
+                    f"Run ID: {run_id}\n"
+                    f"Target: {target_table}\n"
+                    f"Rows read: {rows_read}\n"
+                    f"Rows copied: {rows_copied}\n"
+                ),
+                recipients=ingest_obj.recipient_list,
+                config_id=ingest_obj.config_id,
+            )
+
+            if self.silver_processor and not landing_path:
+                print(
+                    f"[SILVER] Skipped for config_id={ingest_obj.config_id} — "
+                    f"no landing_volume_path was set, nothing for Silver to read."
+                )
+
             return {
                 "config_id": ingest_obj.config_id,
                 "run_id":   run_id,
@@ -351,6 +492,7 @@ class IngestionOrchestrator:
                 "rows_read": rows_read,
                 "error_code": None,
                 "error":    None,
+                "silver_result": silver_result,
             }
 
         except Exception as exc:
@@ -369,6 +511,19 @@ class IngestionOrchestrator:
                 self.audit.fail_run(audit_run=audit_run, error_code = error_code,error_message=error_msg)
             except Exception as audit_exc:
                 self.logger.error(f"[{run_id}] Could not write FAILED status to audit: {audit_exc}")
+            self.notifier.send_email(
+                subject=f"[FAILURE] {stage} — {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
+                body=(
+                    f"Stage failed: {stage}\n"
+                    f"Source: {source_sys.source_name}\n"
+                    f"Table: {ingest_obj.source_object_name}\n"
+                    f"Config ID: {ingest_obj.config_id}\n"
+                    f"Run ID: {run_id}\n\n"
+                    f"Error:\n{error_msg}"
+                ),
+                recipients=ingest_obj.recipient_list,
+                config_id=ingest_obj.config_id,
+            )
             return {
                 "config_id": ingest_obj.config_id,
                 "run_id":   run_id,
@@ -377,3 +532,55 @@ class IngestionOrchestrator:
                 "error_code": error_code,
                 "error":    error_msg,
             }
+
+    # ── Silver trigger ───────────────────────────────────────────────────────
+
+    def _trigger_silver(
+        self,
+        config_id: int,
+        source_system_id: int,
+        landing_path: str,
+        file_format: str,
+        silver_catalog: str,
+        silver_schema: str,
+        silver_table: str,
+        source_schema: str,
+        source_object_name: str,
+        load_type: str,
+        primary_key_cols: str,
+    ) -> dict:
+        """Runs inline on the calling (Bronze) thread — coupled with the landing
+        write, not a separate pool. Never raises — caught and returned as a
+        result dict, so a Silver failure can't abort the caller's Bronze write."""
+        thread_name = threading.current_thread().name
+        target = f"{silver_catalog}.{silver_schema}.{silver_table}"
+        print(f"[SILVER] {thread_name} started for config_id={config_id} landing_path='{landing_path}' → {target}")
+        try:
+            result = self.silver_processor.trigger(
+                config_id           = config_id,
+                source_system_id    = source_system_id,
+                landing_path        = landing_path,
+                file_format         = file_format,
+                silver_catalog      = silver_catalog,
+                silver_schema       = silver_schema,
+                silver_table        = silver_table,
+                source_schema       = source_schema,
+                source_object_name  = source_object_name,
+                load_type           = load_type,
+                primary_key_cols    = primary_key_cols,
+            )
+        except Exception as exc:
+            self.logger.error(
+                f"[SILVER] Trigger failed for config_id={config_id} landing_path='{landing_path}': {exc}",
+                exc_info=True,
+            )
+            return {
+                "config_id":    config_id,
+                "target":       target,
+                "status":       "FAILED",
+                "exit_value":   None,
+                "error":        str(exc),
+            }
+
+        print(f"[SILVER] {thread_name} finished for config_id={config_id} status={result['status']}")
+        return result

@@ -47,6 +47,7 @@ from ingestion.utils.config_manager import (
     SOURCE_SYSTEM_TABLE,
     CONFIG_MASTER_TABLE,
     AUDIT_TABLE,
+    DEPENDENCY_TABLE,
 )
 from ingestion.utils.orchestrator import IngestionOrchestrator
 
@@ -68,6 +69,9 @@ dbutils.widgets.text("environment",         "dev",            "Environment: dev 
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
 dbutils.widgets.text("max_workers",         "4",              "Max parallel workers (lookup + extraction per task)")
+dbutils.widgets.text("dependency_table",    DEPENDENCY_TABLE, "Dependency Table (override)")
+dbutils.widgets.text("silver_notebook_path",    "",           "Workspace path to Silver transformation notebook (blank = skip Silver trigger)")
+dbutils.widgets.text("silver_notebook_timeout", "3600",       "Max seconds to wait for each Silver notebook run")
 
 # COMMAND ----------
 
@@ -118,6 +122,10 @@ if batch_start_date_raw and str(batch_start_date_raw).strip() != "1":
         print(f"Using parsed batch_start_date: {parsed_batch_start_date}")
     except Exception as parse_err:
         print(f"[Warning] Failed to parse batch_start_date '{batch_start_date_raw}': {parse_err}")
+dependency_table     = dbutils.widgets.get("dependency_table")     or DEPENDENCY_TABLE
+
+silver_notebook_path    = dbutils.widgets.get("silver_notebook_path")    or None
+silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
 
 
 # COMMAND ----------
@@ -175,6 +183,13 @@ print(f"job_run_id   : {job_run_id}")
 
 job_context["job_run_id"]   = job_run_id
 # job_context["trigger_type"] = trigger_type
+
+# pipeline_start_time is job-level — captured ONCE here, before the table
+# fan-out below, and threaded through job_context so every table's
+# DependencyLogger row uses the same value (see orchestrator.run()).
+pipeline_start_time = datetime.utcnow()
+job_context["pipeline_start_time"] = pipeline_start_time
+print(f"pipeline_start_time (job-level): {pipeline_start_time}")
 
 # COMMAND ----------
 
@@ -273,10 +288,16 @@ job_context["trigger_id"] = trigger_id
 orchestrator = IngestionOrchestrator(
     spark,
     dbutils,
-    audit_table   = audit_table,
-    pipeline_name = pipeline_name,
-    environment   = environment,
+    audit_table             = audit_table,
+    dependency_table        = dependency_table,
+    pipeline_name           = pipeline_name,
+    environment             = environment,
+    silver_notebook_path    = silver_notebook_path,
+    silver_notebook_timeout = silver_notebook_timeout,
+    config_mgr              = config_mgr,
 )
+
+import threading
 
 def run_one(task: IngestionTaskConfig) -> dict:
     logger.info(f"Processing table {task.source_object_name}")
@@ -288,6 +309,7 @@ def run_one(task: IngestionTaskConfig) -> dict:
     retry_count/retry_interval from config_source_system. Writing/transform
     steps are not retried — a failure there fails the task outright.
     """
+
     return orchestrator.run(
         source_sys          = source_sys,
         task                = task,
@@ -299,6 +321,7 @@ def run_one(task: IngestionTaskConfig) -> dict:
         sink_batch_started_date = parsed_batch_start_date,
         process_timestamp     = process_timestamp,
     )
+
 
 
 results = []
@@ -328,7 +351,27 @@ with ThreadPoolExecutor(max_workers=max_workers) as executor:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Close the dependency job
+# MAGIC
+# MAGIC pipeline_end_time isn't known until every table has finished — bulk-stamp
+# MAGIC it (and the derived dependency_resolve_time) onto every dependency_master_config
+# MAGIC row for this job_run_id in one shot, now that the fan-out above is done.
+
+# COMMAND ----------
+
+orchestrator.dependency.complete_job(job_run_id)
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ### Results summary
+# MAGIC
+# MAGIC Silver now runs coupled — inline, synchronously — inside each table's
+# MAGIC own orchestrator.run() call (see IngestionOrchestrator._trigger_silver),
+# MAGIC right after that table's landing write and before its Bronze Delta
+# MAGIC write. By the time a task's future resolves above, its Silver run (if
+# MAGIC enabled) has already finished, so results already carry it under
+# MAGIC "silver_result" — no separate wait step needed.
 
 # COMMAND ----------
 
@@ -354,23 +397,39 @@ print(
     f"⏭️ Skipped (0 rows): {len(skipped)} | ❌ Failed: {len(failed)}\n"
 )
 
+silver_results = [r["silver_result"] for r in results if r.get("silver_result")]
+
+if silver_results:
+    print(f"{'='*75}")
+    print(f"{'CONF ID':>8}  {'SILVER STATUS':<14}  TARGET")
+    print(f"{'='*75}")
+    for r in sorted(silver_results, key=lambda x: x["config_id"]):
+        icon = "✅" if r["status"] == "SUCCESS" else "❌"
+        print(f"{r['config_id']:>8}  {icon} {r['status']:<12}  {r.get('target', '')}")
+    print(f"{'='*75}")
+
+silver_failed = [r for r in silver_results if r["status"] == "FAILED"]
+print(
+    f"Silver — Total: {len(silver_results)} | "
+    f"✅ Succeeded: {len(silver_results) - len(silver_failed)} | ❌ Failed: {len(silver_failed)}\n"
+)
+
 # COMMAND ----------
 
 from ingestion.utils.logger import _upload_on_exit
 
 if failed:
     failed_ids = [r["config_id"] for r in failed]
+    silver_failed_ids = [r["config_id"] for r in silver_failed]
     logger.critical(
         f"Pipeline cannot continue — {len(failed)} of {len(results)} ingestion object(s) FAILED. "
         f"Failed Config IDs: {failed_ids}"
+        f"{len(silver_failed)} of {len(silver_results)} Silver trigger(s) FAILED "
+        f"(Config IDs: {silver_failed_ids}). "
+        f"Check the audit table and logs above for details."       
     )
     _upload_on_exit()
-    raise Exception(
-        f"{len(failed)} of {len(results)} ingestion object(s) FAILED. "
-        f"Check the audit table for details. Failed Config IDs: {failed_ids}"
-    )
 
-_upload_on_exit()
 dbutils.notebook.exit(
     f"SUCCESS: {len(succeeded)}/{len(results)} objects ingested "
     f"({len(skipped)} skipped — 0 rows in source)."

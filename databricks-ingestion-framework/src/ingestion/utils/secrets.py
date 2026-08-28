@@ -217,3 +217,27 @@ class SecretResolver:
                 f"'password' field. Keys found: {list(payload.keys())}"
             )
         return username, password
+
+    # ── High-level: parse an arbitrary JSON credential blob ───────────────────
+
+    def get_json(self, scope: str, key: str) -> dict:
+        """
+        Retrieve and parse a JSON secret with an arbitrary shape (unlike
+        get_credentials, not limited to username/password) — e.g. the
+        {"tenant_id", "client_id", "client_secret"} blob used by
+        GraphMailNotifier for its Azure AD app registration.
+        """
+        raw = self.get(scope, key)
+
+        cleaned = raw.strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ("'", '"'):
+            cleaned = cleaned[1:-1].strip()
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Secret scope='{scope}' key='{key}' must be a valid JSON object. "
+                f"Received (first 120 chars): {repr(raw[:120])}. "
+                f"JSON parse error: {exc}"
+            ) from exc
