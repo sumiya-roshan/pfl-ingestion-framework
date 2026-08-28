@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md
 # MAGIC # Ingestion — Source System Entry Point
 # MAGIC
@@ -19,7 +23,8 @@
 
 # COMMAND ----------
 
-dbutils.library.restartPython()
+# MAGIC %pip install python-dotenv --quiet
+# MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -80,7 +85,7 @@ try:
     job_id              = dbutils.widgets.get("job_id")           or None
 except Exception:
     job_id              = None
-job_run_id           = dbutils.widgets.get("run_id")           or None
+job_run_id           = dbutils.widgets.get("job_run_id")           or None
 # trigger_type         = dbutils.widgets.get("trigger_type")         or None
 
 if not pipeline_name:
