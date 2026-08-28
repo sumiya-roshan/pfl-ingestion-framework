@@ -22,6 +22,8 @@ from typing import Optional
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
+from databricks.sdk.runtime import dbutils
+
 
 class S3RawWriter:
 
@@ -34,6 +36,8 @@ class S3RawWriter:
         source_object_name: str,
         file_format: str = "parquet",
         mode: str = "append",
+        file_prefix: Optional[str] = None,
+        file_timestamp: Optional[datetime] = None,
     ) -> str:
         """
         Write *df* to the landing path and return the full target path.
@@ -47,7 +51,7 @@ class S3RawWriter:
         file_format         : output format
         mode                : Spark write mode (default: append)
         """
-        ingest_date = datetime.utcnow().strftime("%Y-%m-%d")
+
         schema_part = f"{source_schema}/" if source_schema else ""
 
         target_path = (
@@ -55,9 +59,51 @@ class S3RawWriter:
             f"{source_name}/"
             f"{schema_part}"
             f"{source_object_name}/"
-            f"ingest_date={ingest_date}"
+            f"{file_timestamp.strftime('%Y')}/"
+            f"{file_timestamp.strftime('%b')}/"
+            f"{file_timestamp.strftime('%d')}"
         )
 
         df_out = df.withColumn("_ingested_at", F.current_timestamp())
         df_out.write.format(file_format).mode(mode).save(target_path)
+
+        file_timestamp = file_timestamp.strftime("%Y_%m_%d_%H_%M_%S")
+
+        final_filename = self._build_filename(
+            source_object_name, file_timestamp, file_format, file_prefix
+        )
+        self._rename_output_file(target_path, final_filename)
+
         return target_path
+
+    @staticmethod
+    def _build_filename(
+        source_object_name: str,
+        timestamp: str,
+        file_format: str,
+        filename_prefix: Optional[str],
+    ) -> str:
+        base = f"{source_object_name}_{timestamp}.{file_format}"
+        return f"{filename_prefix}_{base}" if filename_prefix else base
+
+    @staticmethod
+    def _rename_output_file(target_path: str, final_filename: str) -> None:
+        """
+        Rename Spark's auto-generated part-* file to final_filename, and
+        clean up the _SUCCESS / .crc sidecar files. Uses dbutils.fs (via the
+        Connect-safe SDK shim) so it works under Spark Connect / serverless,
+        where sparkContext._jvm is unavailable.
+        """
+        files = dbutils.fs.ls(target_path)
+
+        part_files = [f for f in files if f.name.startswith("part-")]
+        if not part_files:
+            raise FileNotFoundError(f"No part-* file found under {target_path} to rename")
+
+        part_file = part_files[0].path
+        dbutils.fs.mv(part_file, f"{target_path}/{final_filename}")
+
+        # cleanup: _SUCCESS, _committed_*, _started_*, .crc files
+        for f in dbutils.fs.ls(target_path):
+            if f.name.startswith("_") or f.name.endswith(".crc"):
+                dbutils.fs.rm(f.path, True)

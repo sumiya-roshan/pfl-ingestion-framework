@@ -34,6 +34,7 @@ from .watermark import resolve_watermark
 from .audit import AuditLogger
 from .dependency_logger import DependencyLogger
 from ..connectors.factory import get_connector
+from ..connectors.jdbc_connector import JdbcConnector
 from .writers.s3_writer import S3RawWriter
 from .writers.bronze_writer import BronzeWriter
 from .logger import get_logger
@@ -110,6 +111,7 @@ class IngestionOrchestrator:
         business_date: Optional[date]      = None,
         job_context: Optional[dict]        = None,
         sink_batch_started_date: Optional[datetime] = None,
+        process_timestamp: Optional[datetime] = None,
     ) -> dict:
         """
         Execute a single ingestion object end-to-end.
@@ -236,6 +238,50 @@ class IngestionOrchestrator:
             )
             rows_read = df.count()
 
+            # build_key_query() already exists on JdbcConnector and generates
+            # the correct SELECT <PK columns> query. The orchestration layer
+            # executes that query here to ingest pk keys file in s3
+            if ingest_obj.staging_flag == 1 and isinstance(connector, JdbcConnector):
+                if not landing_volume_path:
+                    raise ValueError(
+                        f"Staging_Flag=1 for config_id={ingest_obj.config_id}, "
+                        "but landing_volume_path is not configured."
+                    )
+
+                key_query = connector.build_key_query()
+                self.logger.info(f"[{run_id}] PK staging query → {key_query}")
+
+                pk_df = retry_on_failure(
+                    lambda: (
+                        self.spark.read.format("jdbc")
+                        .options(**connector._read_options())
+                        .option("dbtable", key_query)
+                        .load()
+                    ),
+                    max_retries    = int(source_sys.retry_count or 0),
+                    retry_interval = int(source_sys.retry_interval or 0),
+                    logger         = self.logger,
+                    description    = f"[{run_id}] primary-key extract config_id={ingest_obj.config_id} object='{ingest_obj.source_object_name}'",
+                )
+
+                pk_rows = pk_df.count()
+                fmt = ingest_obj.file_format or "parquet"
+
+                pk_path = self.s3_writer.write(
+                    pk_df,
+                    landing_volume_path = landing_volume_path,
+                    source_name         = source_sys.source_name,
+                    source_schema       = ingest_obj.source_schema,
+                    source_object_name  = ingest_obj.source_object_name,
+                    file_format         = fmt,
+                    file_prefix         = 'all_key',
+                    file_timestamp      = sink_batch_started_date or process_timestamp,
+                )
+
+                self.logger.info(
+                    f"[{run_id}] PK staging write → {pk_path} ({pk_rows} rows)"
+                )
+
             rows_copied  = 0
             rows_deleted = 0
 
@@ -254,6 +300,7 @@ class IngestionOrchestrator:
                     source_schema       = ingest_obj.source_schema,
                     source_object_name  = ingest_obj.source_object_name,
                     file_format         = fmt,
+                    file_timestamp      = sink_batch_started_date or process_timestamp,
                 )
                 self.logger.info(
                     f"[{run_id}] Landing write → {landing_path} ({rows_read} rows, format={fmt})"

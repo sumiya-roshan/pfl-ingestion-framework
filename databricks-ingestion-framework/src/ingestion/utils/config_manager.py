@@ -120,6 +120,8 @@ class IngestionTaskConfig:
     partition_column: Optional[str]
     source_filter: Optional[str]
 
+    staging_flag: Optional[int] = None
+
     # config_master routing ID this task was loaded under — set by
     # ConfigManager.get_active_tasks(). Used by JdbcConnector.build_probe_query()
     # to look up a special-case lookup query in special_lookup_queries.json.
@@ -317,6 +319,7 @@ class ConfigManager:
             schema_evolution_mode = r.get("schema_evolution_mode"),
             partition_column    = r.get("partition_column"),
             source_filter       = r.get("source_filter"),
+            staging_flag        = self._to_int(r.get("Staging_Flag") or r.get("staging_flag")) or 0,
             # Watermark date for incremental lookup query generation
             silver_last_sink_date = (
                 str(r.get("Silver_Last_Sink_Date") or r.get("silver_last_sink_date") or "")
