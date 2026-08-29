@@ -228,6 +228,17 @@ try:
 except Exception:
     pass  # taskValues not available in standalone mode
 
+# config_mgr is needed regardless of mode — IngestionOrchestrator uses it
+# later for Silver_Last_Sink_Date bookkeeping (see orchestrator.run()), even
+# in Job mode where task discovery itself is skipped (tasks already came
+# from taskValues).
+config_mgr = ConfigManager(
+    spark,
+    source_system_table = SOURCE_SYSTEM_TABLE,
+    config_master_table = CONFIG_MASTER_TABLE,
+    target_catalog      = target_catalog,
+)
+
 if payload_str:
     # ── Job mode: deserialize what get_tasks.py published ──────────────────
     print("[Tasks] Reading active tasks from taskValues (get_table_details task).")
@@ -237,12 +248,6 @@ if payload_str:
 else:
     # ── Standalone mode: query config tables directly ──────────────────────
     print("[Tasks] taskValues not available — querying config tables directly (standalone mode).")
-    config_mgr = ConfigManager(
-        spark,
-        source_system_table = SOURCE_SYSTEM_TABLE,
-        config_master_table = CONFIG_MASTER_TABLE,
-        target_catalog      = target_catalog,
-    )
     source_sys, tasks = config_mgr.get_active_tasks(
         config_master_id = config_master_id,
         source_system_id = source_system_id,
