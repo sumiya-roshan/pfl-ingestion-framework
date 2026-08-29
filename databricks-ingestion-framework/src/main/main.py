@@ -435,6 +435,8 @@ if failed:
     )
     _upload_on_exit()
 
+
+_upload_on_exit()
 dbutils.notebook.exit(
     f"SUCCESS: {len(succeeded)}/{len(results)} objects ingested "
     f"({len(skipped)} skipped — 0 rows in source)."
