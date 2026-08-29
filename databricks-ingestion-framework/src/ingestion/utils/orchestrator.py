@@ -19,6 +19,7 @@ Key behaviours
                   table. No separate thread pool; each table's run() call
                   simply takes longer when Silver is enabled.
 """
+import threading
 from datetime import date, datetime
 from typing import Optional
 
