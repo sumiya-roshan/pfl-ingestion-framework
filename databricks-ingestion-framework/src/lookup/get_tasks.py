@@ -15,6 +15,7 @@ import sys
 sys.path.append("..")
 
 import json
+from datetime import datetime, timezone
 from ingestion.utils.config_manager import (
     ConfigManager,
     SOURCE_SYSTEM_TABLE,
@@ -52,12 +53,13 @@ source_system_id  = int(source_system_id_raw)
 # batch to In Progress, reset Day_Execution_Count to 0, and stamp the batch start
 # date. TODO: move to the batch-init notebook.
 if batch_start_date == "1":
-    # For now: inline UPDATE for testing. Hardcoded constant so every matching
-    # row shares the exact same batch start timestamp.
+    # For now: inline UPDATE for testing. Generate the UTC timestamp once here
+    # and pass it in as a literal so every matching row gets the exact same value.
+    batch_started_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
     spark.sql(f"""
         UPDATE migration_x_catalog.pfl_x_schema.rdbms_ingestion_config
         SET Status = 'In Progress', Day_Execution_Count = 0,
-            sink_batch_started_date = TIMESTAMP '2026-08-31 17:39:00.044+00:00'
+            sink_batch_started_date = TIMESTAMP '{batch_started_ts}'
         WHERE Source_Name = 'PG_TEST_RDS'
     """)
 
