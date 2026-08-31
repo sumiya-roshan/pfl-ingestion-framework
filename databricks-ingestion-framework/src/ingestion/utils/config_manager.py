@@ -15,6 +15,7 @@ Default table locations
 """
 import json
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Optional, List, Dict, Tuple
 
 # ── Fully-qualified table name defaults ───────────────────────────────────────
@@ -467,7 +468,10 @@ class ConfigManager:
         business_date = sink_batch_started_date.date()
 
         # deltacolumn_1 = the source's incremental/watermark column, read from
-        # the bronze table just written (not the config table itself).
+        # the bronze table just written (not the config table itself). Only a
+        # real date/timestamp value is written — a misconfigured Delta_Column_1
+        # (e.g. a uuid/text id) is skipped so it can't fail the whole UPDATE and
+        # leave the row stuck at 'In Progress'.
         raw_last_sink_date = None
         if ingest_obj.incremental_column:
             row = (
@@ -475,15 +479,27 @@ class ConfigManager:
                 .agg({ingest_obj.incremental_column: "max"})
                 .collect()[0]
             )
-            raw_last_sink_date = row[0]
+            if isinstance(row[0], (date, datetime)):
+                raw_last_sink_date = row[0]
+            elif row[0] is not None:
+                print(
+                    f"[ConfigManager] config_id={ingest_obj.config_id}: "
+                    f"Delta_Column_1 '{ingest_obj.incremental_column}' MAX() is "
+                    f"{row[0]!r} (not a date/timestamp) — leaving raw_last_sink_date unchanged."
+                )
+
+        set_clauses = [
+            f"status        = {self._sql_literal(AUDIT_STATUS_SUCCESS)}",
+            f"business_date  = {self._sql_literal(business_date)}",
+            f"rownum         = {int(rownum or 0)}",
+            f"data_size      = {int(data_size or 0)}",
+        ]
+        if raw_last_sink_date is not None:
+            set_clauses.append(f"raw_last_sink_date = {self._sql_literal(raw_last_sink_date)}")
 
         self.spark.sql(f"""
             UPDATE {child_table_fqn}
-            SET status                  = {self._sql_literal(AUDIT_STATUS_SUCCESS)},
-                business_date           = {self._sql_literal(business_date)},
-                raw_last_sink_date      = {self._sql_literal(raw_last_sink_date)},
-                rownum                  = {int(rownum or 0)},
-                data_size               = {int(data_size or 0)}
+            SET {', '.join(set_clauses)}
             WHERE config_id = {int(ingest_obj.config_id)}
         """)
 

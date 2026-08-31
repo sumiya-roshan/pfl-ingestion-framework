@@ -176,6 +176,15 @@ class IngestionOrchestrator:
                 self.logger.error(
                     f"config_id={ingest_obj.config_id} — failed to write SKIPPED audit row: {audit_exc}"
                 )
+            if self.config_mgr and ingest_obj.child_table_fqn:
+                try:
+                    self.config_mgr.update_status(
+                        ingest_obj.child_table_fqn, ingest_obj.config_id, "Skipped"
+                    )
+                except Exception as status_exc:
+                    self.logger.warning(
+                        f"config_id={ingest_obj.config_id} — could not set Status=Skipped in config: {status_exc}"
+                    )
             return {
                 "config_id": ingest_obj.config_id,
                 "run_id":   None,
