@@ -129,8 +129,8 @@ class JdbcConnector(BaseConnector):
     def _base_sql(self) -> str:
         """
         Source_Query (custom_query) verbatim, or a plain schema.table SELECT *
-        when no custom query is configured. Never mutated — always wrapped by
-        _wrap_query() so the original text is untouched.
+        when no custom query is configured. Never mutated — _build_source_query
+        wraps it as a subquery so the original text is untouched.
         """
         io = self.ingest_obj
         if io.custom_query:
@@ -138,46 +138,18 @@ class JdbcConnector(BaseConnector):
         schema_prefix = f"{io.source_schema}." if io.source_schema else ""
         return f"SELECT * FROM {schema_prefix}{io.source_object_name}"
 
-    def _wrap_query(
-        self,
-        base_sql: str,
-        predicates: list,
-        select_cols: str = "*",
-        row_limit: Optional[int] = None,
-    ) -> str:
-        """
-        Wraps base_sql as a subquery with a single outer WHERE ANDing all
-        predicates together. Because the predicate always lands on the outer
-        wrapper, any WHERE clause already inside base_sql (schema.table has
-        none, but a custom_query might) stays inside its own subquery and is
-        never touched or duplicated.
-        """
-        where_clause = f" WHERE {' AND '.join(predicates)}" if predicates else ""
-        sql = f"SELECT {select_cols} FROM ({base_sql}) _src_wrapped{where_clause}"
-
-        if row_limit:
-            source_type = self.source_system.source_type.upper()
-            if source_type == "MSSQL":
-                sql = sql.replace("SELECT ", f"SELECT TOP {row_limit} ", 1)
-            elif source_type == "ORACLE":
-                sql += f" FETCH FIRST {row_limit} ROWS ONLY"
-            else:  # POSTGRES, MYSQL
-                sql += f" LIMIT {row_limit}"
-
-        return f"({sql}) _src"
-
     def _build_source_query(self, watermark_start: Optional[str]) -> str:
         """
-        Constructs the SQL subquery sent to the JDBC driver as dbtable.
+        Constructs the SQL subquery sent to the JDBC driver as dbtable: the
+        Source_Query (custom_query, or schema.table) wrapped as a subquery with
+        a single outer WHERE ANDing all predicates. Because the predicates land
+        on the outer wrapper, any WHERE already inside the Source_Query stays in
+        its own subquery and is never touched or duplicated.
 
-        Priority:
-          1. custom_query  (verbatim user-supplied SQL)
-          2. source_schema.source_object_name  (standard table reference)
-
-        Then injects:
-          - incremental predicate (load_type = INCREMENTAL): Delta_Column_1 > watermark,
+        Predicates injected:
+          - incremental (load_type = INCREMENTAL): Delta_Column_1 > watermark,
             ORed with Delta_Column_2 > watermark when configured
-          - source_filter         (additional static predicate from config)
+          - source_filter (additional static predicate from config)
         """
         io = self.ingest_obj
         predicates = []
@@ -193,7 +165,8 @@ class JdbcConnector(BaseConnector):
         if io.source_filter:
             predicates.append(f"({io.source_filter})")
 
-        return self._wrap_query(self._base_sql(), predicates)
+        where_clause = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+        return f"(SELECT * FROM ({self._base_sql()}) _src_wrapped{where_clause}) _src"
 
     # ── Public extract ────────────────────────────────────────────────────────
 

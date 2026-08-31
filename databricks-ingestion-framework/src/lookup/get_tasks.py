@@ -57,14 +57,14 @@ if batch_start_date == "1":
         UPDATE migration_x_catalog.pfl_x_schema.rdbms_ingestion_config
         SET Status = 'In Progress', Day_Execution_Count = 0,
             sink_batch_started_date = from_utc_timestamp(current_timestamp(), 'UTC')
-        WHERE Source_System_ID = {source_system_id}
+        WHERE Source_Name = 'PG_TEST_RDS'
     """)
 
     # dbutils.notebook.run(
     #     "./start_batch",  # TODO: point to the actual batch-init notebook
     #     600,
     #     {
-    #         "source_system_id": str(source_system_id),
+    #         "source_id": str(source_system_id),
     #         "batch_start_date": batch_start_date,
     #     },
     # )
