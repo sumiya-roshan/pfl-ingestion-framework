@@ -1,5 +1,5 @@
 {
-  "1": {
+  "102": {
     "pipeline_name": "pfl_rdbms_ingestion",
     "table_name": "LMS_ASSET_REPOSSESSION_DTL",
     "lookup_query": "SELECT ard.{key_column} FROM TAB_NEO_CAS_LMS.LMS_ASSET_REPOSSESSION_DTL ard INNER JOIN (SELECT ID FROM TAB_NEO_CAS_LMS.LMS_ASSET_REPOSSESSION_HDR WHERE CREATION_TIME_STAMP >= TO_DATE('{lookback_timestamp}','YYYY-MM-DD HH24:MI:SS') OR LAST_UPDATED_TIME_STAMP >= TO_DATE('{lookback_timestamp}','YYYY-MM-DD HH24:MI:SS')) arh ON arh.ID = ard.ASSET_REPO_HDRID FETCH NEXT 1 ROWS ONLY"
