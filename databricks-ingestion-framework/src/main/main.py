@@ -270,12 +270,9 @@ logger.info(f"Pipeline started for source: {source_sys.source_name} ({source_sys
 if not tasks:
     dbutils.notebook.exit("No active ingestion tasks found for this pipeline.")
 
-# rdbms_ingestion_config.Max_Workers overrides the widget default when set —
-# same value is expected on every row for a given pipeline (see IngestionTaskConfig.max_workers).
-config_max_workers = tasks[0].max_workers
-if config_max_workers:
-    max_workers = config_max_workers
-    print(f"Using max_workers={max_workers} from rdbms_ingestion_config.Max_Workers")
+# NOTE: max_workers is now derived dynamically from the distinct batch_id count
+# for this pipeline in the execution section below. The widget / config
+# Max_Workers value is no longer used to size the thread pool.
 
 # COMMAND ----------
 
@@ -330,28 +327,71 @@ def run_one(task: IngestionTaskConfig) -> dict:
 
 
 results = []
-# max_workers = 4 # Adjust depending on cluster size and DB load
 
-tasks_sorted = sorted(tasks, key=lambda t: t.priority)
+# ── Batch-level parallelism ────────────────────────────────────────────────
+# batch_id  → controls PARALLEL execution: one thread per distinct batch.
+# priority  → controls SEQUENTIAL execution of tables WITHIN a batch (ascending).
+#
+# max_workers is derived dynamically from the distinct batch_id count for this
+# pipeline — NOT hardcoded, NOT taken from the widget/config. Tables are never
+# assigned to their own threads; a batch's tables run one-by-one inside the
+# batch's single thread. Per-table processing (load type, incremental/full,
+# retry, timeout, watermark, …) is unchanged — it all still happens in run_one.
 
-print(f"\nStarting {len(tasks_sorted)} tasks with ThreadPoolExecutor (max_workers={max_workers})...")
-with ThreadPoolExecutor(max_workers=max_workers) as executor:
-    future_to_task = {executor.submit(run_one, task): task for task in tasks_sorted}
-    
-    for future in as_completed(future_to_task):
-        task = future_to_task[future]
+# Group tasks by batch_id, tables inside each batch ordered by priority ascending.
+batches = {}
+for task in sorted(tasks, key=lambda t: t.priority):
+    batches.setdefault(task.batch_id, []).append(task)
+
+max_workers = len(batches)   # distinct batch_id count for this pipeline
+
+
+def run_batch(batch_id, batch_tasks: list) -> list:
+    """Run every table in one batch sequentially, in priority order."""
+    batch_results = []
+    print(
+        f"[Batch {batch_id}] Starting {len(batch_tasks)} table(s) sequentially: "
+        f"{[t.source_object_name for t in batch_tasks]}"
+    )
+    for task in batch_tasks:
         try:
-            res = future.result()
-            results.append(res)
+            batch_results.append(run_one(task))
         except Exception as exc:
             print(f"Task {task.source_object_name} (Config ID: {task.config_id}) failed with exception: {exc}")
-            results.append({
+            batch_results.append({
                 "config_id": task.config_id,
                 "run_id":   None,
                 "status":   AUDIT_STATUS_FAILED,
                 "rows_read": 0,
                 "error":    str(exc),
             })
+    return batch_results
+
+
+print(
+    f"\nStarting {len(tasks)} tasks across {len(batches)} batch(es) with "
+    f"ThreadPoolExecutor (max_workers={max_workers})..."
+)
+with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    future_to_batch = {
+        executor.submit(run_batch, batch_id, batch_tasks): batch_id
+        for batch_id, batch_tasks in batches.items()
+    }
+
+    for future in as_completed(future_to_batch):
+        batch_id = future_to_batch[future]
+        try:
+            results.extend(future.result())
+        except Exception as exc:
+            print(f"Batch {batch_id} failed with exception: {exc}")
+            for task in batches[batch_id]:
+                results.append({
+                    "config_id": task.config_id,
+                    "run_id":   None,
+                    "status":   AUDIT_STATUS_FAILED,
+                    "rows_read": 0,
+                    "error":    str(exc),
+                })
 
 # COMMAND ----------
 
