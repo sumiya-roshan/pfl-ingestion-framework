@@ -440,8 +440,12 @@ class ConfigManager:
         data_size: int,
     ) -> None:
         """
-        Updates status, business_date, raw_last_sink_date, sink_batch_started_date,
-        rownum, and data_size on the child config table row for this task.
+        Updates status, business_date, raw_last_sink_date, rownum, and data_size
+        on the child config table row for this task.
+
+        sink_batch_started_date is NOT written here — it is stamped once at batch
+        start (see get_tasks.py) and must stay constant for the whole run. The
+        param is still used to derive business_date.
 
         Only called from the SUCCESS path in IngestionOrchestrator.run(), so
         status is written as AUDIT_STATUS_SUCCESS unconditionally.
@@ -473,21 +477,11 @@ class ConfigManager:
             )
             raw_last_sink_date = row[0]
 
-        # Convert sink_batch_started_date to a UTC string literal for timezone-safety
-        sb_val = "NULL"
-        if sink_batch_started_date:
-            sb_str = str(sink_batch_started_date).replace("T", " ")
-            if not sb_str.endswith(" UTC") and not sb_str.endswith("+00:00"):
-                # Clean microsecond part and append UTC timezone
-                sb_str = sb_str.split("+")[0] + " UTC"
-            sb_val = f"'{sb_str}'"
-
         self.spark.sql(f"""
             UPDATE {child_table_fqn}
             SET status                  = {self._sql_literal(AUDIT_STATUS_SUCCESS)},
                 business_date           = {self._sql_literal(business_date)},
                 raw_last_sink_date      = {self._sql_literal(raw_last_sink_date)},
-                sink_batch_started_date = {sb_val},
                 rownum                  = {int(rownum or 0)},
                 data_size               = {int(data_size or 0)}
             WHERE config_id = {int(ingest_obj.config_id)}
@@ -512,5 +506,20 @@ class ConfigManager:
         self.spark.sql(f"""
             UPDATE {child_table_fqn}
             SET {sink_date_col} = current_timestamp()
+            WHERE {config_id_col} = {int(config_id)}
+        """)
+
+    def update_status(self, child_table_fqn: str, config_id: int, status: str) -> None:
+        """
+        Sets Status on this table's row in its child config table — called by
+        IngestionOrchestrator.run() to flag 'Failed' when the raw or silver
+        layer fails. Column/PK names are resolved case-insensitively.
+        """
+        columns = self.spark.table(child_table_fqn).columns
+        config_id_col = next((c for c in columns if c.lower() == "config_id"), "Config_ID")
+        status_col    = next((c for c in columns if c.lower() == "status"), "Status")
+        self.spark.sql(f"""
+            UPDATE {child_table_fqn}
+            SET {status_col} = '{status}'
             WHERE {config_id_col} = {int(config_id)}
         """)

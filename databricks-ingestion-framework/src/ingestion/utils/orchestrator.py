@@ -347,6 +347,16 @@ class IngestionOrchestrator:
                     # it has to be checked explicitly or it would silently
                     # never trigger a notification (or fail the table at all).
                     if silver_result and silver_result.get("status") == "FAILED":
+                        if self.config_mgr and ingest_obj.child_table_fqn:
+                            try:
+                                self.config_mgr.update_status(
+                                    ingest_obj.child_table_fqn, ingest_obj.config_id, "Failed"
+                                )
+                            except Exception as status_exc:
+                                self.logger.warning(
+                                    f"[{run_id}] Could not set Status=Failed for "
+                                    f"config_id={ingest_obj.config_id}: {status_exc}"
+                                )
                         self.notifier.send_email(
                             subject=f"[FAILURE] SILVER — {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
                             body=(
@@ -517,6 +527,13 @@ class IngestionOrchestrator:
                 self.audit.fail_run(audit_run=audit_run, error_code = error_code,error_message=error_msg)
             except Exception as audit_exc:
                 self.logger.error(f"[{run_id}] Could not write FAILED status to audit: {audit_exc}")
+            if self.config_mgr and ingest_obj.child_table_fqn:
+                try:
+                    self.config_mgr.update_status(
+                        ingest_obj.child_table_fqn, ingest_obj.config_id, "Failed"
+                    )
+                except Exception as status_exc:
+                    self.logger.error(f"[{run_id}] Could not set Status=Failed in config: {status_exc}")
             self.notifier.send_email(
                 subject=f"[FAILURE] {stage} — {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
                 body=(
