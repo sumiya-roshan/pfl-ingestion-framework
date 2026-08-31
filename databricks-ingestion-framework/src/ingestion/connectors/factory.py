@@ -6,7 +6,7 @@ Routing is based on source_system.source_type (case-insensitive).
 """
 from ..utils.config_manager import SourceSystemConfig, IngestionTaskConfig
 from .base_connector import BaseConnector
-from .jdbc_connector import JdbcConnector
+from .federated_connector import FederatedConnector
 from .sftp_connector import SftpConnector
 from .mongo_connector import MongoConnector
 from .s3_connector import S3Connector
@@ -14,18 +14,24 @@ from .s3_connector import S3Connector
 # ── Connector registry ────────────────────────────────────────────────────────
 # Key   : value of config_source_system.source_type (upper-cased)
 # Value : BaseConnector subclass to instantiate
+#
+# All RDBMS source types now route to FederatedConnector (Databricks
+# Lakehouse Federation / Unity Catalog foreign catalog).
+# JdbcConnector is no longer used — JDBC driver jars and credential
+# config in config_source_system are no longer required for these types.
 _CONNECTOR_MAP: dict = {
-    "POSTGRES": JdbcConnector,
-    "POSTGRESQL": JdbcConnector,
-    "PG":       JdbcConnector,
-    "MYSQL":    JdbcConnector,
-    "ORACLE":   JdbcConnector,
-    "MSSQL":    JdbcConnector,    # SQL Server via JDBC
-    "SQLSERVER": JdbcConnector,
-    "SFTP":     SftpConnector,
-    "MONGODB":  MongoConnector,
-    "MONGO":    MongoConnector,
-    "S3":       S3Connector,
+    "POSTGRES":   FederatedConnector,
+    "POSTGRESQL": FederatedConnector,
+    "PG":         FederatedConnector,
+    "MYSQL":      FederatedConnector,
+    "ORACLE":     FederatedConnector,
+    "MSSQL":      FederatedConnector,
+    "SQLSERVER":  FederatedConnector,
+    "FEDERATED":  FederatedConnector,   # explicit alias if preferred
+    "SFTP":       SftpConnector,
+    "MONGODB":    MongoConnector,
+    "MONGO":      MongoConnector,
+    "S3":         S3Connector,
 }
 
 

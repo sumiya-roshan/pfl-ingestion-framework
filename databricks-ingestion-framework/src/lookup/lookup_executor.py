@@ -82,10 +82,16 @@ class LookupExecutor:
             try:
                 connector = get_connector(self.spark, source_sys, task, self.secrets)
 
-                if isinstance(connector, JdbcConnector):
+                if hasattr(connector, 'build_probe_query'):
+                    # Both JdbcConnector and FederatedConnector support build_probe_query
                     resolved_query = connector.build_probe_query()
                     self.logger.debug(f"[LookupExecutor] Lookup query generated: {resolved_query}")
-                    count = self._lookup_jdbc(connector, resolved_query)
+                    
+                    if "FederatedConnector" in str(type(connector)):
+                        count = self._lookup_federated(connector, resolved_query)
+                    else:
+                        count = self._lookup_jdbc(connector, resolved_query)
+                        
                 elif isinstance(connector, MongoConnector):
                     # find_one() probes the collection directly — no query template needed.
                     count = self._lookup_mongo(connector)
@@ -159,6 +165,22 @@ class LookupExecutor:
         if not row:
             return 0
         return 1
+
+    # ── Strategy: Federated (Unity Catalog) ──────────────────────────────────
+
+    def _lookup_federated(self, connector, resolved_query: str) -> int:
+        """
+        Run the resolved COUNT(*) query via spark.sql on the foreign catalog.
+        """
+        # resolved_query is already a fully formed SELECT COUNT(*) FROM ...
+        df = self.spark.sql(resolved_query)
+        row = df.collect()
+        
+        # The query is SELECT COUNT(*), so row[0][0] holds the count value
+        if not row or not row[0] or row[0][0] is None:
+            return 0
+            
+        return int(row[0][0])
 
     # ── Strategy: MongoDB ────────────────────────────────────────────────────
 

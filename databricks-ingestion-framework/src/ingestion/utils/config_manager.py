@@ -59,6 +59,9 @@ class SourceSystemConfig:
 
     secret_scope: str
     secret_key_credentials: Optional[str] 
+    
+    # Unity Catalog foreign catalog name for Lakehouse Federation
+    federated_catalog_name: Optional[str]
 
     is_active: int
 
@@ -236,9 +239,10 @@ class ConfigManager:
             sftp_root_path          = r.get("sftp_root_path"),
             sftp_file_pattern       = r.get("sftp_file_pattern"),
             sftp_host_key_fingerprint = r.get("sftp_host_key_fingerprint"),
-            secret_scope            = r["secret_scope"],
+            secret_scope            = r.get("secret_scope") or r.get("secret_Scope"),
             secret_key_credentials  = r.get("secret_key_credentials"),
-            is_active               = r.get("is_active", 1),
+            federated_catalog_name  = r.get("federated_catalog_name") or r.get("Federated_Catalog_Name"),
+            is_active               = int(r.get("is_active", 0)),
             extra_params            = r.get("extra_params"),
             landing_volume_path     = r.get("landing_volume_path"),
             retry_count             = r.get("retry_count"),

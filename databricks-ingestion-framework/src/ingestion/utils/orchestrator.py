@@ -239,10 +239,10 @@ class IngestionOrchestrator:
             )
             rows_read = df.count()
 
-            # build_key_query() already exists on JdbcConnector and generates
-            # the correct SELECT <PK columns> query. The orchestration layer
-            # executes that query here to ingest pk keys file in s3
-            if ingest_obj.staging_flag == 1 and isinstance(connector, JdbcConnector):
+            # build_key_query() generates the correct SELECT <PK columns> query.
+            # The orchestration layer executes that query here to ingest pk keys file in s3.
+            # Supported by both JdbcConnector and FederatedConnector.
+            if ingest_obj.staging_flag == 1 and hasattr(connector, 'build_key_query'):
                 if not landing_volume_path:
                     raise ValueError(
                         f"Staging_Flag=1 for config_id={ingest_obj.config_id}, "
@@ -252,13 +252,19 @@ class IngestionOrchestrator:
                 key_query = connector.build_key_query()
                 self.logger.info(f"[{run_id}] PK staging query → {key_query}")
 
+                def _extract_pk_df():
+                    if "FederatedConnector" in str(type(connector)):
+                        return self.spark.sql(key_query)
+                    else:
+                        return (
+                            self.spark.read.format("jdbc")
+                            .options(**connector._read_options())
+                            .option("dbtable", key_query)
+                            .load()
+                        )
+
                 pk_df = retry_on_failure(
-                    lambda: (
-                        self.spark.read.format("jdbc")
-                        .options(**connector._read_options())
-                        .option("dbtable", key_query)
-                        .load()
-                    ),
+                    _extract_pk_df,
                     max_retries    = int(source_sys.retry_count or 0),
                     retry_interval = int(source_sys.retry_interval or 0),
                     logger         = self.logger,
