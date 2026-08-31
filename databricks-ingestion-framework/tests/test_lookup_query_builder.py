@@ -118,11 +118,15 @@ def test_case4_trailing_clause_after_where_is_also_dropped():
 
 
 # ── Row-limit clause ───────────────────────────────────────────────────────
-def test_postgres_uses_limit_oracle_uses_fetch():
+def test_row_limit_per_dialect():
     assert build_lookup_query("select * from t", "id", "full",
                               dialect="postgres").endswith("LIMIT 1")
     assert build_lookup_query("select * from t", "id", "full",
+                              dialect="mysql").endswith("LIMIT 1")
+    assert build_lookup_query("select * from t", "id", "full",
                               dialect="oracle").endswith("FETCH NEXT 1 ROWS ONLY")
+    assert build_lookup_query("select * from t", "id", "full",
+                              dialect="mssql") == "select TOP 1 id from t"
 
 
 # ── detect_pattern_type ────────────────────────────────────────────────────

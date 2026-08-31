@@ -162,11 +162,11 @@ class LookupExecutor:
             source_query = f"SELECT * FROM {schema_prefix}{task.source_object_name}"
 
         incremental = task.load_type == "INCREMENTAL"
-        dialect = (
-            "postgres"
-            if (source_sys.source_type or "").upper() in ("POSTGRES", "MYSQL")
-            else "oracle"
-        )
+        dialect = {
+            "POSTGRES": "postgres",
+            "MYSQL": "mysql",
+            "MSSQL": "mssql",
+        }.get((source_sys.source_type or "").upper(), "oracle")
 
         return build_lookup_query(
             source_query=source_query,
