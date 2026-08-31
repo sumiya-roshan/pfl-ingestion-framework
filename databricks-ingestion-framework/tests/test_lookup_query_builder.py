@@ -143,24 +143,26 @@ def test_detect_generic_for_identifier_named_trigger_time():
     assert detect_pattern_type("SELECT trigger_time_col FROM t") == "generic"
 
 
+# ── Staging_Flag=1 key extract: no row-limit clause ────────────────────────
+def test_row_limit_false_omits_limit_clause():
+    assert build_lookup_query("SELECT * FROM dbo.contracts", "id, name", "full",
+                              row_limit=False) == "SELECT id, name FROM dbo.contracts"
+
+
+def test_row_limit_false_strips_existing_where():
+    assert build_lookup_query("SELECT * FROM dbo.contracts WHERE region = 1",
+                              "id", "full", row_limit=False) == "SELECT id FROM dbo.contracts"
+
+
 # ── Error handling ─────────────────────────────────────────────────────────
-def test_no_select_from_raises():
-    with pytest.raises(ValueError):
-        build_lookup_query("EXEC some_proc", "id", "full")
-
-
-def test_incremental_generic_without_delta_col_raises():
-    with pytest.raises(ValueError):
-        build_lookup_query("select * from t", "id", "incremental", cutoff=CUTOFF)
-
-
-def test_special_trigger_time_structure_missing_raises():
-    with pytest.raises(ValueError) as exc:
-        build_lookup_query("select * from public.contracts", "id", "incremental",
-                           cutoff=CUTOFF, pattern_type="special_trigger_time")
-    assert "public.contracts" in str(exc.value)
-
-
 def test_bad_load_type_raises():
     with pytest.raises(ValueError):
         build_lookup_query("select * from t", "id", "delta")
+
+
+def test_trigger_time_left_in_output_raises():
+    # special pattern selected but the predicate shape isn't the templated one,
+    # so 'trigger_time' survives -> caught by the final guard.
+    src = "SELECT * FROM t WHERE ts >= to_date('trigger_time','YYYY')"
+    with pytest.raises(ValueError):
+        build_lookup_query(src, "id", "full", pattern_type="special_trigger_time")

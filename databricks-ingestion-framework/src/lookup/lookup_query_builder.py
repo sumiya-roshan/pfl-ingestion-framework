@@ -56,7 +56,7 @@ def detect_pattern_type(source_query):
 
 def build_lookup_query(source_query, key_col, load_type,
                        cutoff=None, delta_col=None, delta_col_2=None,
-                       dialect="postgres", pattern_type="generic"):
+                       dialect="postgres", pattern_type="generic", row_limit=True):
     """
     Build a row-presence lookup query from source_query.
 
@@ -68,6 +68,8 @@ def build_lookup_query(source_query, key_col, load_type,
                    ONLY (ignored for special_trigger_time — always Oracle-style).
     pattern_type : "generic" or "special_trigger_time" — from the caller
                    (see detect_pattern_type), never sniffed here.
+    row_limit    : generic only — set False for the Staging_Flag=1 key extract,
+                   which pulls ALL key rows unfiltered ("SELECT <keys> FROM src").
     """
     load_type = (load_type or "").strip().lower()
     if load_type not in ("full", "incremental", "incremental-append"):
@@ -100,7 +102,9 @@ def build_lookup_query(source_query, key_col, load_type,
             query = f"{query} WHERE {pred}"
         d = (dialect or "").lower()
 
-        if d in ("postgres", "mysql"):
+        if not row_limit:
+            result = query
+        elif d in ("postgres", "mysql"):
             result = f"{query} LIMIT 1"
         elif d == "mssql":
             result = re.sub(r"(?i)^(\s*SELECT\s+)", r"\1TOP 1 ", query, count=1)

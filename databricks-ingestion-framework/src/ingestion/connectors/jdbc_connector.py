@@ -195,16 +195,6 @@ class JdbcConnector(BaseConnector):
 
         return self._wrap_query(self._base_sql(), predicates)
 
-    def build_key_query(self) -> str:
-        """
-        SELECT <primary_key_cols> ... derived from Source_Query. Independent
-        of load_type — always unfiltered (no incremental/lookback predicate),
-        matching the ADF key-extraction behavior.
-        """
-        io = self.ingest_obj
-        key_cols = ", ".join(io.primary_key_list) if io.primary_key_list else "*"
-        return self._wrap_query(self._base_sql(), [], select_cols=key_cols)
-
     # ── Public extract ────────────────────────────────────────────────────────
 
     def extract(self, watermark_start: Optional[str]) -> Tuple[DataFrame, Optional[str]]:

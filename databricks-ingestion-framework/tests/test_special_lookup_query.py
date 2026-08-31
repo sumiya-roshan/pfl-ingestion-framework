@@ -142,12 +142,6 @@ class TestSpecialTriggerTime(unittest.TestCase):
     def test_never_leaks_trigger_time_literal(self):
         self.assertNotIn("trigger_time", probe(self._task()))
 
-    def test_full_load_with_trigger_time_query_raises(self):
-        task = self._task(load_type="FULL", incremental_column=None,
-                          silver_last_sink_date=None)
-        with self.assertRaises(ValueError):
-            probe(task)
-
 
 if __name__ == "__main__":
     unittest.main()

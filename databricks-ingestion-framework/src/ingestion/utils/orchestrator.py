@@ -42,6 +42,7 @@ from .logger import get_logger
 from .secrets import SecretResolver
 from .retry import retry_on_failure
 from lookup.lookup_executor import LookupExecutor
+from lookup.lookup_query_builder import build_lookup_query
 from .email_notifier import GraphMailNotifier
 from silver.silver_processor import SilverProcessor
 
@@ -239,9 +240,9 @@ class IngestionOrchestrator:
             )
             rows_read = df.count()
 
-            # build_key_query() already exists on JdbcConnector and generates
-            # the correct SELECT <PK columns> query. The orchestration layer
-            # executes that query here to ingest pk keys file in s3
+            # Staging_Flag=1 → pull ALL primary-key rows from source (unfiltered)
+            # and land them in s3. Same flat rewrite as the lookup probe, just
+            # without the row-limit clause (row_limit=False).
             if ingest_obj.staging_flag == 1 and isinstance(connector, JdbcConnector):
                 if not landing_volume_path:
                     raise ValueError(
@@ -249,14 +250,18 @@ class IngestionOrchestrator:
                         "but landing_volume_path is not configured."
                     )
 
-                key_query = connector.build_key_query()
+                key_query = build_lookup_query(
+                    connector._base_sql(),
+                    ", ".join(ingest_obj.primary_key_list) if ingest_obj.primary_key_list else "*",
+                    "full", row_limit=False,
+                )
                 self.logger.info(f"[{run_id}] PK staging query → {key_query}")
 
                 pk_df = retry_on_failure(
                     lambda: (
                         self.spark.read.format("jdbc")
                         .options(**connector._read_options())
-                        .option("dbtable", key_query)
+                        .option("query", key_query)
                         .load()
                     ),
                     max_retries    = int(source_sys.retry_count or 0),
