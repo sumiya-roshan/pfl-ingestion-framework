@@ -195,47 +195,6 @@ class JdbcConnector(BaseConnector):
 
         return self._wrap_query(self._base_sql(), predicates)
 
-    def build_probe_query(self) -> str:
-        """
-        Row-presence check query derived from Source_Query, delegated to
-        lookup.lookup_query_builder.build_lookup_query — a flat rewrite of the
-        source query (no "(...) _src_wrapped" subquery), run by LookupExecutor
-        via the Spark JDBC 'query' option.
-
-        FULL load        → SELECT <key> FROM <src> LIMIT 1 (dialect-mapped).
-        INCREMENTAL load → adds Delta_Column_1 (OR Delta_Column_2) >= cutoff,
-                           where cutoff = Silver_Last_Sink_Date - Lookback_Hours.
-
-        The rare joined header/detail table whose Source_Query carries a
-        literal 'trigger_time' placeholder is handled by the builder's
-        "special_trigger_time" pattern — no separate config_id-keyed template.
-        """
-        from ..utils.watermark import resolve_watermark
-        from lookup.lookup_query_builder import build_lookup_query, detect_pattern_type
-
-        io = self.ingest_obj
-        base_sql = self._base_sql()
-        key_col = ", ".join(io.primary_key_list) if io.primary_key_list else "1"
-        incremental = io.load_type == "INCREMENTAL"
-        cutoff = resolve_watermark(io) if incremental else None
-        pattern_type = detect_pattern_type(base_sql)
-        dialect = (
-            "postgres"
-            if self.source_system.source_type.upper() in ("POSTGRES", "MYSQL")
-            else "oracle"
-        )
-
-        return build_lookup_query(
-            source_query=base_sql,
-            key_col=key_col,
-            load_type="incremental" if incremental else "full",
-            cutoff=cutoff,
-            delta_col=io.incremental_column,
-            delta_col_2=io.delta_column_2,
-            dialect=dialect,
-            pattern_type=pattern_type,
-        )
-
     def build_key_query(self) -> str:
         """
         SELECT <primary_key_cols> ... derived from Source_Query. Independent

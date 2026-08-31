@@ -16,12 +16,12 @@ or database/collection mapping logic.
 
 Query source
 ------------
-The probe query is generated dynamically from Source_Query (the same query
-used for extraction) via JdbcConnector.build_probe_query(), which delegates to
-lookup.lookup_query_builder.build_lookup_query — there is no separate
-Lookup_Query_Template column. FULL load probes "SELECT <key> ... LIMIT 1"
-unfiltered; INCREMENTAL load adds a Silver_Last_Sink_Date/Lookback_Hours
-watermark predicate.
+For JDBC sources the probe query is assembled in one place —
+_build_jdbc_probe_query() — from the task's Source_Query, with the pure SQL
+rewrite delegated to lookup.lookup_query_builder.build_lookup_query. There is
+no separate Lookup_Query_Template column. FULL load probes
+"SELECT <key> ... LIMIT 1" unfiltered; INCREMENTAL load adds a
+Silver_Last_Sink_Date/Lookback_Hours watermark predicate.
 
 Threading model
 ---------------
@@ -35,10 +35,8 @@ from __future__ import annotations
 
 from typing import Dict
 
-# Import the existing connectors and factory
-from ingestion.connectors.factory import get_connector
-from ingestion.connectors.jdbc_connector import JdbcConnector
-from ingestion.connectors.mongo_connector import MongoConnector
+from ingestion.utils.watermark import resolve_watermark
+from lookup.lookup_query_builder import build_lookup_query, detect_pattern_type
 
 
 class LookupExecutor:
@@ -78,13 +76,17 @@ class LookupExecutor:
         max_retries    = int(getattr(source_sys, "retry_count", 0) or 0)
         retry_interval = int(getattr(source_sys, "retry_interval", 0) or 0)
 
+        from ingestion.connectors.factory import get_connector
+        from ingestion.connectors.jdbc_connector import JdbcConnector
+        from ingestion.connectors.mongo_connector import MongoConnector
+
         attempt = 0
         while True:
             try:
                 connector = get_connector(self.spark, source_sys, task, self.secrets)
 
                 if isinstance(connector, JdbcConnector):
-                    resolved_query = connector.build_probe_query()
+                    resolved_query = self._build_jdbc_probe_query(source_sys, task)
                     self.logger.debug(f"[LookupExecutor] Lookup query generated: {resolved_query}")
                     count = self._lookup_jdbc(connector, resolved_query)
                 elif isinstance(connector, MongoConnector):
@@ -136,18 +138,58 @@ class LookupExecutor:
                     import time
                     time.sleep(retry_interval)
 
+    # ── Probe query construction ────────────────────────────────────────────
+
+    @staticmethod
+    def _build_jdbc_probe_query(source_sys, task) -> str:
+        """
+        The single place the JDBC row-presence query is constructed.
+
+        Reads the task's Source_Query (custom_query, or a plain
+        ``SELECT * FROM schema.table``) and hands it to
+        lookup_query_builder.build_lookup_query, which does the pure SQL
+        rewrite:
+
+          FULL        → SELECT <key> FROM <src> <row-limit>
+          INCREMENTAL → + Delta_Column_1 (OR Delta_Column_2) >= cutoff,
+                        cutoff = Silver_Last_Sink_Date - Lookback_Hours
+          trigger_time templated Source_Query → special_trigger_time pattern
+        """
+        if task.custom_query:
+            source_query = task.custom_query
+        else:
+            schema_prefix = f"{task.source_schema}." if task.source_schema else ""
+            source_query = f"SELECT * FROM {schema_prefix}{task.source_object_name}"
+
+        incremental = task.load_type == "INCREMENTAL"
+        dialect = (
+            "postgres"
+            if (source_sys.source_type or "").upper() in ("POSTGRES", "MYSQL")
+            else "oracle"
+        )
+
+        return build_lookup_query(
+            source_query=source_query,
+            key_col=", ".join(task.primary_key_list) if task.primary_key_list else "1",
+            load_type="incremental" if incremental else "full",
+            cutoff=resolve_watermark(task) if incremental else None,
+            delta_col=task.incremental_column,
+            delta_col_2=task.delta_column_2,
+            dialect=dialect,
+            pattern_type=detect_pattern_type(source_query),
+        )
+
     # ── Strategy: JDBC ───────────────────────────────────────────────────────
 
-    def _lookup_jdbc(self, connector: JdbcConnector, resolved_query: str) -> int:
+    def _lookup_jdbc(self, connector, resolved_query: str) -> int:
         """
         Run the resolved query via JDBC and return 1 if any row is collected (data exists),
         or 0 if no row is collected.
         Reuses the connector's solved connection options (driver, credentials, url).
         """
-        # Call the connector's helper to resolve JDBC configuration parameters.
-        # resolved_query is a flat SELECT (see JdbcConnector.build_probe_query /
-        # lookup_query_builder) — pass it via the Spark JDBC 'query' option so
-        # no outer subquery wrapper is needed.
+        # Reuse the connector's resolved JDBC config (driver, credentials, url).
+        # resolved_query is a flat SELECT (see _build_jdbc_probe_query) — passed
+        # via the Spark JDBC 'query' option, so no subquery wrapper is needed.
         options = connector._read_options()
 
         df = (
@@ -163,7 +205,7 @@ class LookupExecutor:
 
     # ── Strategy: MongoDB ────────────────────────────────────────────────────
 
-    def _lookup_mongo(self, connector: MongoConnector) -> int:
+    def _lookup_mongo(self, connector) -> int:
         """
         Check if the MongoDB collection contains any documents using find_one().
         Reuses the connector's solved URI, database, and collection properties.
