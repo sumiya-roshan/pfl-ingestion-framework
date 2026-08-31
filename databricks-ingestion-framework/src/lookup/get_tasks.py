@@ -48,6 +48,29 @@ source_system_id  = int(source_system_id_raw)
 
 # COMMAND ----------
 
+# First trigger of the batch (batch_start_date still defaults to "1"): flip the
+# batch to In Progress, reset Day_Execution_Count to 0, and stamp the batch start
+# date with current_timestamp() in UTC. TODO: move to the batch-init notebook.
+if batch_start_date == "1":
+    # For now: inline UPDATE for testing. Later: swap for the batch-init notebook.
+    spark.sql(f"""
+        UPDATE migration_x_catalog.pfl_x_schema.rdbms_ingestion_config
+        SET Status = 'In Progress', Day_Execution_Count = 0,
+            sink_batch_started_date = from_utc_timestamp(current_timestamp(), 'UTC')
+        WHERE Source_System_ID = {source_system_id}
+    """)
+
+    # dbutils.notebook.run(
+    #     "./start_batch",  # TODO: point to the actual batch-init notebook
+    #     600,
+    #     {
+    #         "source_system_id": str(source_system_id),
+    #         "batch_start_date": batch_start_date,
+    #     },
+    # )
+
+# COMMAND ----------
+
 config_mgr = ConfigManager(
     spark,
     source_system_table = SOURCE_SYSTEM_TABLE,
