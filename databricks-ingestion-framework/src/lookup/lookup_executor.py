@@ -7,37 +7,14 @@ main ingestion pipeline and runs a lightweight probe query to determine
 whether data is present. Tables with zero rows are excluded from ingestion
 and logged to the audit table as SKIPPED — without ever calling extract().
 
-DRY Design
-----------
-This class instantiates the actual connector classes (JdbcConnector, MongoConnector)
-using the ingestion framework's Connector Factory. It reuses their connection, URI,
-and option resolution methods directly, eliminating duplicate credential, host,
-or database/collection mapping logic.
-
-Query source
-------------
-For JDBC sources the probe query is assembled in one place —
-_build_jdbc_probe_query() — from the task's Source_Query, with the pure SQL
-rewrite delegated to lookup.lookup_query_builder.build_lookup_query. There is
-no separate Lookup_Query_Template column. FULL load probes
-"SELECT <key> ... LIMIT 1" unfiltered; INCREMENTAL load adds a
-Silver_Last_Sink_Date/Lookback_Hours watermark predicate.
-
-Threading model
----------------
-IngestionOrchestrator.run() calls check_presence() for one task at a time,
-immediately followed by extraction for that same task if data is present.
-Concurrency across tables comes from the caller's own ThreadPoolExecutor
-(main.py) running run() for multiple tasks in parallel — there is no
-separate lookup-only fan-out phase.
 """
 from __future__ import annotations
-
 from typing import Dict
-
 from ingestion.utils.watermark import resolve_watermark
 from lookup.lookup_query_builder import build_lookup_query, detect_pattern_type
-
+from ingestion.connectors.factory import get_connector
+from ingestion.connectors.jdbc_connector import JdbcConnector
+from ingestion.connectors.mongo_connector import MongoConnector
 
 class LookupExecutor:
     """
@@ -59,84 +36,7 @@ class LookupExecutor:
         self.secrets = secrets
         self.logger  = logger
 
-    # ── Public API ────────────────────────────────────────────────────────────
 
-    def check_presence(self, source_sys, task) -> Dict:
-        """
-        Run a presence check for one ingestion task — the entry point used by
-        IngestionOrchestrator.run() to gate extraction. Dispatches to the JDBC,
-        MongoDB, or file-based strategy. Retries on the source system's
-        retry_count/retry_interval. Always returns a result dict — never raises
-        (a lookup error is fail-safe: the table is included, not excluded).
-        """
-        config_id      = task.config_id
-        object_name    = task.source_object_name
-        resolved_query = None
-
-        max_retries    = int(getattr(source_sys, "retry_count", 0) or 0)
-        retry_interval = int(getattr(source_sys, "retry_interval", 0) or 0)
-
-        from ingestion.connectors.factory import get_connector
-        from ingestion.connectors.jdbc_connector import JdbcConnector
-        from ingestion.connectors.mongo_connector import MongoConnector
-
-        attempt = 0
-        while True:
-            try:
-                connector = get_connector(self.spark, source_sys, task, self.secrets)
-
-                if isinstance(connector, JdbcConnector):
-                    resolved_query = self._build_jdbc_probe_query(source_sys, task)
-                    self.logger.debug(f"[LookupExecutor] Lookup query generated: {resolved_query}")
-                    count = self._lookup_jdbc(connector, resolved_query)
-                elif isinstance(connector, MongoConnector):
-                    # find_one() probes the collection directly — no query template needed.
-                    count = self._lookup_mongo(connector)
-                else:
-                    # File-based (S3, SFTP, etc.) — always included
-                    self.logger.info(
-                        f"[LookupExecutor] config_id={config_id} ({object_name}) "
-                        f"— non-queryable source ({type(connector).__name__}), always included."
-                    )
-                    count = 1
-
-                included = count > 0
-                self.logger.info(
-                    f"[LookupExecutor] config_id={config_id} ({object_name}) → "
-                    f"count={count}  included={included}"
-                )
-                return {
-                    "config_id":          config_id,
-                    "source_object_name": object_name,
-                    "resolved_query":     resolved_query,
-                    "count":              count,
-                    "included":           included,
-                    "error":              None,
-                }
-
-            except Exception as exc:
-                if attempt >= max_retries:
-                    self.logger.warning(
-                        f"[LookupExecutor] Lookup FAILED for config_id={config_id} "
-                        f"({object_name}) after {attempt} retries: {exc}. Including table (fail-safe)."
-                    )
-                    return {
-                        "config_id":          config_id,
-                        "source_object_name": object_name,
-                        "resolved_query":     resolved_query or "N/A",
-                        "count":              -1,
-                        "included":           True,
-                        "error":              str(exc),
-                    }
-
-                attempt += 1
-                self.logger.warning(
-                    f"Retry attempt {attempt} of {max_retries} for [LookupExecutor] Lookup for config_id={config_id} "
-                    f"({object_name}) due to error: {exc}. Retrying in {retry_interval}s..."
-                )
-                if retry_interval > 0:
-                    import time
-                    time.sleep(retry_interval)
 
     # ── Probe query construction ────────────────────────────────────────────
 
@@ -230,3 +130,80 @@ class LookupExecutor:
         finally:
             client.close()
 
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def check_presence(self, source_sys, task) -> Dict:
+        """
+        Run a presence check for one ingestion task — the entry point used by
+        IngestionOrchestrator.run() to gate extraction. Dispatches to the JDBC,
+        MongoDB, or file-based strategy. Retries on the source system's
+        retry_count/retry_interval.
+        """
+        config_id      = task.config_id
+        object_name    = task.source_object_name
+        resolved_query = None
+
+        max_retries    = int(getattr(source_sys, "retry_count", 0) or 0)
+        retry_interval = int(getattr(source_sys, "retry_interval", 0) or 0)
+
+
+        attempt = 0
+        while True:
+            try:
+                connector = get_connector(self.spark, source_sys, task, self.secrets)
+
+                if isinstance(connector, JdbcConnector):
+                    resolved_query = self._build_jdbc_probe_query(source_sys, task)
+                    self.logger.debug(f"[LookupExecutor] Lookup query generated: {resolved_query}")
+                    count = self._lookup_jdbc(connector, resolved_query)
+
+                elif isinstance(connector, MongoConnector):
+                    # find_one() probes the collection directly — no query template needed.
+                    count = self._lookup_mongo(connector)
+
+                else:
+                    # File-based (S3, SFTP, etc.) — always included
+                    self.logger.info(
+                        f"[LookupExecutor] config_id={config_id} ({object_name}) "
+                        f"— non-queryable source ({type(connector).__name__}), always included."
+                    )
+                    count = 1
+
+                included = count > 0
+                self.logger.info(
+                    f"[LookupExecutor] config_id={config_id} ({object_name}) → "
+                    f"count={count}  included={included}"
+                )
+                return {
+                    "config_id":          config_id,
+                    "source_object_name": object_name,
+                    "resolved_query":     resolved_query,
+                    "count":              count,
+                    "included":           included,
+                    "error":              None,
+                }
+
+            except Exception as exc:
+                if attempt >= max_retries:
+                    self.logger.warning(
+                        f"[LookupExecutor] Lookup FAILED for config_id={config_id} "
+                        f"({object_name}) after {attempt} retries: {exc}. Including table (fail-safe)."
+                    )
+                    return {
+                        "config_id":          config_id,
+                        "source_object_name": object_name,
+                        "resolved_query":     resolved_query or "N/A",
+                        "count":              -1,
+                        "included":           True,
+                        "error":              str(exc),
+                    }
+
+                attempt += 1
+                self.logger.warning(
+                    f"Retry attempt {attempt} of {max_retries} for [LookupExecutor] Lookup for config_id={config_id} "
+                    f"({object_name}) due to error: {exc}. Retrying in {retry_interval}s..."
+                )
+                if retry_interval > 0:
+                    import time
+                    time.sleep(retry_interval)

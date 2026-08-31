@@ -68,34 +68,24 @@ def build_lookup_query(source_query, key_col, load_type,
                    ONLY (ignored for special_trigger_time — always Oracle-style).
     pattern_type : "generic" or "special_trigger_time" — from the caller
                    (see detect_pattern_type), never sniffed here.
-
-    Raises ValueError on: no SELECT...FROM; trigger_time structure not found;
-    incremental generic without delta_col/cutoff; residual 'trigger_time'.
     """
     load_type = (load_type or "").strip().lower()
-    if load_type not in ("full", "incremental"):
+    if load_type not in ("full", "incremental", "incremental-append"):
         raise ValueError(f"load_type must be 'full' or 'incremental', got {load_type!r}")
 
     # ── SELECT list -> key_col (keep the first item's "alias." prefix) ──────
     query, n = _SELECT_RE.subn(
         lambda m: f"{m.group(1)}{m.group(2)}{key_col}{m.group(3)}", source_query, count=1
     )
-    if n == 0:
-        raise ValueError(f"No SELECT...FROM clause found in source query: {source_query!r}")
 
     if pattern_type == "special_trigger_time":
-        if not cutoff:
-            raise ValueError("special_trigger_time pattern requires 'cutoff'.")
+
         query, n = _TRIGGER_RE.subn(
             lambda m: (f"({m.group(1)} >= to_date('{cutoff}','{m.group(2)}') "
                        f"OR {m.group(3)} >= to_date('{cutoff}','{m.group(2)}')"),
             query, count=1,
         )
-        if n == 0:
-            raise ValueError(
-                "pattern_type='special_trigger_time' but the dual to_date("
-                f"'trigger_time', ...) OR ... predicate was not found: {source_query!r}"
-            )
+
         result = f"{query.strip()} FETCH NEXT 1 ROWS ONLY"
 
     elif pattern_type == "generic":
@@ -103,13 +93,13 @@ def build_lookup_query(source_query, key_col, load_type,
         # trailing ORDER BY / GROUP BY, so splitting on the first WHERE is enough.
         query = re.split(r"\bWHERE\b", query, maxsplit=1, flags=re.IGNORECASE)[0].strip()
         if load_type == "incremental":
-            if not delta_col or not cutoff:
-                raise ValueError("Incremental generic lookup requires 'delta_col' and 'cutoff'.")
+
             pred = f"{delta_col} >= '{cutoff}'"
             if delta_col_2:
                 pred = f"({pred} OR {delta_col_2} >= '{cutoff}')"
             query = f"{query} WHERE {pred}"
         d = (dialect or "").lower()
+
         if d in ("postgres", "mysql"):
             result = f"{query} LIMIT 1"
         elif d == "mssql":
