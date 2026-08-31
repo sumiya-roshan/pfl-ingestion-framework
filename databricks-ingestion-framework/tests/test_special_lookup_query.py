@@ -1,18 +1,16 @@
 """
-Tests for the special-case lookup query mechanism in JdbcConnector.build_probe_query().
+Tests for JdbcConnector.build_probe_query(), which delegates to
+lookup.lookup_query_builder.build_lookup_query.
 
 Run with (no pytest needed):
     python -m unittest databricks-ingestion-framework/tests/test_special_lookup_query.py -v
 """
 import os
 import sys
-import tempfile
 import unittest
-from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from ingestion.connectors import jdbc_connector
 from ingestion.connectors.jdbc_connector import JdbcConnector
 from ingestion.utils.config_manager import IngestionTaskConfig
 
@@ -75,138 +73,99 @@ def make_connector(task, source_type="ORACLE"):
     )
 
 
-class TestGenericFallback(unittest.TestCase):
-    """No special_lookup_queries.json entry for this config_id -> unchanged generic logic."""
+SPECIAL_QUERY = (
+    "SELECT ard.* FROM TAB_NEO_CAS_LMS.LMS_ASSET_REPOSSESSION_DTL ard INNER JOIN "
+    "(SELECT ID FROM TAB_NEO_CAS_LMS.LMS_ASSET_REPOSSESSION_HDR WHERE "
+    "CREATION_TIME_STAMP >= to_date('trigger_time','YYYY-MM-DD HH24:MI:SS') OR "
+    "LAST_UPDATED_TIME_STAMP >= to_date('trigger_time','YYYY-MM-DD HH24:MI:SS')) "
+    "arh ON arh.ID = ard.ASSET_REPO_HDRID"
+)
 
-    def setUp(self):
-        self.patcher = patch.object(jdbc_connector, "_load_special_lookup_queries", return_value={})
-        self.patcher.start()
 
-    def tearDown(self):
-        self.patcher.stop()
+class TestGeneric(unittest.TestCase):
 
-    def test_full_load_is_unfiltered_and_generic(self):
-        task = make_task(load_type="FULL", config_id=999, primary_key_cols="id")
-        connector = make_connector(task)
-        query = connector.build_probe_query()
-        self.assertIn("SELECT id FROM", query)
+    def test_full_load_is_unfiltered(self):
+        task = make_task(load_type="FULL", primary_key_cols="id")
+        query = make_connector(task).build_probe_query()
+        self.assertIn("SELECT id FROM dbo.orders", query)
         self.assertNotIn("WHERE", query)
-        self.assertIn("FETCH FIRST 1 ROWS ONLY", query)
+        self.assertIn("FETCH NEXT 1 ROWS ONLY", query)
 
-    def test_incremental_no_special_entry_uses_lookback_predicate(self):
+    def test_full_load_postgres_uses_limit(self):
+        task = make_task(load_type="FULL", primary_key_cols="id")
+        query = make_connector(task, source_type="POSTGRES").build_probe_query()
+        self.assertTrue(query.strip().endswith("LIMIT 1"))
+
+    def test_incremental_single_delta_column(self):
         task = make_task(
             load_type="INCREMENTAL",
             incremental_column="Delta_Column_1",
             silver_last_sink_date="2026-08-26 10:00:00",
             lookback_hours=3,
-            config_id=999,
             primary_key_cols="id",
         )
-        connector = make_connector(task)
-        query = connector.build_probe_query()
-        self.assertIn("Delta_Column_1 >= '2026-08-26 07:00:00'", query)
-        self.assertIn("FETCH FIRST 1 ROWS ONLY", query)
+        query = make_connector(task).build_probe_query()
+        self.assertIn("WHERE Delta_Column_1 >= '2026-08-26 07:00:00'", query)
+        self.assertIn("FETCH NEXT 1 ROWS ONLY", query)
 
-
-class TestSpecialCase(unittest.TestCase):
-    """A matching special_lookup_queries.json entry (keyed by config_id) short-circuits the generic logic."""
-
-    TEMPLATE = (
-        "SELECT ard.{key_column} FROM DTL ard INNER JOIN "
-        "(SELECT ID FROM HDR WHERE CREATION_TIME_STAMP >= TO_DATE('{lookback_timestamp}','YYYY-MM-DD HH24:MI:SS')) arh "
-        "ON arh.ID = ard.HDRID FETCH NEXT 1 ROWS ONLY"
-    )
-
-    def setUp(self):
-        self.patcher = patch.object(
-            jdbc_connector,
-            "_load_special_lookup_queries",
-            return_value={"123": {"pipeline_name": "pfl_rdbms_ingestion", "lookup_query": self.TEMPLATE}},
-        )
-        self.patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-
-    def test_matching_config_id_uses_template(self):
+    def test_incremental_two_delta_columns_are_ORed_in_parens(self):
         task = make_task(
-            config_id=123,
+            load_type="INCREMENTAL",
+            incremental_column="Delta_Column_1",
+            delta_column_2="Delta_Column_2",
+            silver_last_sink_date="2026-08-26 10:00:00",
+            lookback_hours=3,
+            primary_key_cols="id",
+        )
+        query = make_connector(task).build_probe_query()
+        self.assertIn(
+            "WHERE (Delta_Column_1 >= '2026-08-26 07:00:00' "
+            "OR Delta_Column_2 >= '2026-08-26 07:00:00')",
+            query,
+        )
+
+    def test_no_select_from_clause_raises(self):
+        task = make_task(custom_query="EXEC some_proc", primary_key_cols="id")
+        with self.assertRaises(ValueError):
+            make_connector(task).build_probe_query()
+
+
+class TestSpecialTriggerTime(unittest.TestCase):
+
+    def _task(self, **extra):
+        base = dict(
+            custom_query=SPECIAL_QUERY,
             load_type="INCREMENTAL",
             incremental_column="CREATION_TIME_STAMP",
             silver_last_sink_date="2026-08-26 10:00:00",
             lookback_hours=3,
-            primary_key_cols="id",
+            primary_key_cols="ID",
         )
-        connector = make_connector(task)
-        query = connector.build_probe_query()
+        base.update(extra)
+        return make_task(**base)
 
-        self.assertIn("SELECT ard.id FROM DTL ard INNER JOIN", query)
-        self.assertIn("TO_DATE('2026-08-26 07:00:00','YYYY-MM-DD HH24:MI:SS')", query)
-        self.assertIn("FETCH NEXT 1 ROWS ONLY", query)
-        # required join structure preserved verbatim
-        self.assertIn("ON arh.ID = ard.HDRID", query)
-
-    def test_full_load_never_uses_special_template(self):
-        task = make_task(config_id=123, load_type="FULL", primary_key_cols="id")
-        connector = make_connector(task)
-        query = connector.build_probe_query()
-        self.assertNotIn("DTL ard INNER JOIN", query)
-
-    def test_different_table_same_pipeline_falls_back_to_generic(self):
-        """
-        config_id uniquely identifies one table row. A different table in the
-        SAME pipeline (config_id=456, not in the special map) must NOT pick up
-        the config_id=123 template — proves the override is table-scoped, not
-        pipeline- or config_master_id-scoped.
-        """
-        task = make_task(
-            config_id=456,
-            load_type="INCREMENTAL",
-            incremental_column="Delta_Column_1",
-            silver_last_sink_date="2026-08-26 10:00:00",
-            primary_key_cols="id",
+    def test_placeholder_replaced_and_or_wrapped(self):
+        query = make_connector(self._task()).build_probe_query()
+        self.assertIn("SELECT ard.ID FROM TAB_NEO_CAS_LMS.LMS_ASSET_REPOSSESSION_DTL ard INNER JOIN", query)
+        self.assertIn(
+            "WHERE (CREATION_TIME_STAMP >= to_date('2026-08-26 07:00:00','YYYY-MM-DD HH24:MI:SS') "
+            "OR LAST_UPDATED_TIME_STAMP >= to_date('2026-08-26 07:00:00','YYYY-MM-DD HH24:MI:SS')",
+            query,
         )
-        connector = make_connector(task)
-        query = connector.build_probe_query()
-        self.assertNotIn("DTL ard INNER JOIN", query)
-        self.assertIn("Delta_Column_1 >=", query)
+        self.assertIn("ON arh.ID = ard.ASSET_REPO_HDRID", query)
+        self.assertTrue(query.strip().endswith("FETCH NEXT 1 ROWS ONLY"))
 
-    def test_missing_lookup_query_key_raises(self):
-        self.patcher.stop()
-        with patch.object(
-            jdbc_connector, "_load_special_lookup_queries", return_value={"123": {}}
-        ):
-            task = make_task(config_id=123, load_type="INCREMENTAL", primary_key_cols="id")
-            connector = make_connector(task)
-            with self.assertRaises(ValueError):
-                connector.build_probe_query()
-        self.patcher.start()
+    def test_never_leaks_trigger_time_literal(self):
+        query = make_connector(self._task()).build_probe_query()
+        self.assertNotIn("trigger_time", query)
 
-
-class TestLoadSpecialLookupQueries(unittest.TestCase):
-    """The actual file-loading helper, independent of JdbcConnector."""
-
-    def setUp(self):
-        jdbc_connector._special_lookup_queries_cache = None
-
-    def tearDown(self):
-        jdbc_connector._special_lookup_queries_cache = None
-
-    def test_missing_file_returns_empty_dict(self):
-        from pathlib import Path
-        with patch.object(jdbc_connector, "_SPECIAL_LOOKUP_CONFIG_PATH", Path("/no/such/file.json")):
-            self.assertEqual(jdbc_connector._load_special_lookup_queries(), {})
-
-    def test_invalid_json_raises_clear_error(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            f.write("{not valid json")
-            path = f.name
-        try:
-            with patch.object(jdbc_connector, "_SPECIAL_LOOKUP_CONFIG_PATH", __import__("pathlib").Path(path)):
-                with self.assertRaises(ValueError):
-                    jdbc_connector._load_special_lookup_queries()
-        finally:
-            os.remove(path)
+    def test_full_load_with_trigger_time_query_raises(self):
+        # No watermark cutoff on a FULL load -> builder fails loudly rather
+        # than emitting SQL that still contains 'trigger_time'.
+        task = self._task(load_type="FULL", incremental_column=None,
+                          silver_last_sink_date=None)
+        with self.assertRaises(ValueError):
+            make_connector(task).build_probe_query()
 
 
 if __name__ == "__main__":

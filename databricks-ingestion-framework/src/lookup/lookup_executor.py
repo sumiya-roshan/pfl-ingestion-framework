@@ -17,10 +17,11 @@ or database/collection mapping logic.
 Query source
 ------------
 The probe query is generated dynamically from Source_Query (the same query
-used for extraction) via JdbcConnector.build_probe_query() — there is no
-separate Lookup_Query_Template column. FULL load probes "SELECT 1 ... LIMIT 1"
+used for extraction) via JdbcConnector.build_probe_query(), which delegates to
+lookup.lookup_query_builder.build_lookup_query — there is no separate
+Lookup_Query_Template column. FULL load probes "SELECT <key> ... LIMIT 1"
 unfiltered; INCREMENTAL load adds a Silver_Last_Sink_Date/Lookback_Hours
-watermark predicate. See JdbcConnector._wrap_query / _lookback_predicates.
+watermark predicate.
 
 Threading model
 ---------------
@@ -144,15 +145,15 @@ class LookupExecutor:
         Reuses the connector's solved connection options (driver, credentials, url).
         """
         # Call the connector's helper to resolve JDBC configuration parameters.
-        # resolved_query is already a fully wrapped "(...) _src" expression
-        # (see JdbcConnector.build_probe_query) — use it directly as dbtable.
+        # resolved_query is a flat SELECT (see JdbcConnector.build_probe_query /
+        # lookup_query_builder) — pass it via the Spark JDBC 'query' option so
+        # no outer subquery wrapper is needed.
         options = connector._read_options()
-        dbtable = resolved_query
 
         df = (
             self.spark.read.format("jdbc")
             .options(**options)
-            .option("dbtable",  dbtable)
+            .option("query", resolved_query)
             .load()
         )
         row = df.collect()

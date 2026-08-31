@@ -18,42 +18,11 @@ Incremental extraction
   subquery wrapper so it works both with custom_query and schema.table reads.
 - source_filter from ingestion_config is ANDed into the same subquery.
 """
-import json
-from pathlib import Path
 from typing import Optional, Tuple
 
 from pyspark.sql import DataFrame
 
 from .base_connector import BaseConnector
-
-# JSON map of config_id (str, the per-table row identifier — NOT
-# config_master_id, which is shared by every pipeline of a given source type)
-# -> {"pipeline_name": ..., "table_name": ..., "lookup_query": "<template>"}
-# for tables whose incremental lookup can't be expressed generically (e.g. a
-# join against a header table where the delta columns live on the joined
-# side). pipeline_name/table_name are documentation only — the lookup key is
-# config_id. See JdbcConnector._special_probe_query().
-_SPECIAL_LOOKUP_CONFIG_PATH = (
-    Path(__file__).resolve().parents[3] / "config" / "special_lookup_queries.json"
-)
-
-def _load_special_lookup_queries() -> dict:
-    """
-    Missing file → {} (every pipeline falls back to the generic
-    build_probe_query() logic). Malformed JSON raises a clear configuration
-    error rather than silently falling back, since a typo there should not
-    go unnoticed.
-    """
-    if not _SPECIAL_LOOKUP_CONFIG_PATH.exists():
-        return {}
-
-    try:
-        with open(_SPECIAL_LOOKUP_CONFIG_PATH, "r") as f:
-            return json.load(f)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Invalid JSON in special lookup config '{_SPECIAL_LOOKUP_CONFIG_PATH}': {exc}"
-        ) from exc
 
 
 def _parse_timeout_to_seconds(value: Optional[str]) -> Optional[int]:
@@ -228,49 +197,44 @@ class JdbcConnector(BaseConnector):
 
     def build_probe_query(self) -> str:
         """
-        existence-check query derived from Source_Query, projecting the
-        primary key columns (falls back to '1' if none configured), limited
-        to 1 row (dialect-mapped). Used by LookupExecutor instead of a
-        separate Lookup_Query_Template column.
+        Row-presence check query derived from Source_Query, delegated to
+        lookup.lookup_query_builder.build_lookup_query — a flat rewrite of the
+        source query (no "(...) _src_wrapped" subquery), run by LookupExecutor
+        via the Spark JDBC 'query' option.
 
-        FULL load: always the generic unfiltered form.
+        FULL load        → SELECT <key> FROM <src> LIMIT 1 (dialect-mapped).
+        INCREMENTAL load → adds Delta_Column_1 (OR Delta_Column_2) >= cutoff,
+                           where cutoff = Silver_Last_Sink_Date - Lookback_Hours.
 
-        INCREMENTAL load: first checks special_lookup_queries.json for a
-        config_id-specific template — for the rare table whose join structure
-        can't be filtered generically (delta columns live on a joined table).
-        If no entry matches, falls back to the generic predicate:
-        Delta_Column_1 (OR Delta_Column_2) >= Silver_Last_Sink_Date - Lookback_Hours.
+        The rare joined header/detail table whose Source_Query carries a
+        literal 'trigger_time' placeholder is handled by the builder's
+        "special_trigger_time" pattern — no separate config_id-keyed template.
         """
+        from ..utils.watermark import resolve_watermark
+        from lookup.lookup_query_builder import build_lookup_query, detect_pattern_type
+
         io = self.ingest_obj
-        select_cols = ", ".join(io.primary_key_list) if io.primary_key_list else "1"
-        predicates = []
+        base_sql = self._base_sql()
+        key_col = ", ".join(io.primary_key_list) if io.primary_key_list else "1"
+        incremental = io.load_type == "INCREMENTAL"
+        cutoff = resolve_watermark(io) if incremental else None
+        pattern_type = detect_pattern_type(base_sql)
+        dialect = (
+            "postgres"
+            if self.source_system.source_type.upper() in ("POSTGRES", "MYSQL")
+            else "oracle"
+        )
 
-        if io.load_type == "INCREMENTAL":
-            from ..utils.watermark import resolve_watermark
-            cutoff = resolve_watermark(io)
-
-            special_entry = _load_special_lookup_queries().get(str(io.config_id))
-            if special_entry is not None:
-                template = special_entry.get("lookup_query")
-                if not template:
-                    raise ValueError(
-                        f"special_lookup_queries.json entry for config_id="
-                        f"{io.config_id} is missing 'lookup_query'."
-                    )
-                # custom_query is never parsed here — the template is used
-                # verbatim aside from these two placeholder substitutions.
-                query = template.replace("{key_column}", select_cols).replace(
-                    "{lookback_timestamp}", cutoff or ""
-                )
-                return f"({query}) _src"
-
-            if io.incremental_column and cutoff is not None:
-                predicate = f"{io.incremental_column} >= '{cutoff}'"
-                if io.delta_column_2:
-                    predicate = f"({predicate} OR {io.delta_column_2} >= '{cutoff}')"
-                predicates.append(predicate)
-
-        return self._wrap_query(self._base_sql(), predicates, select_cols=select_cols, row_limit=1)
+        return build_lookup_query(
+            source_query=base_sql,
+            key_col=key_col,
+            load_type="incremental" if incremental else "full",
+            cutoff=cutoff,
+            delta_col=io.incremental_column,
+            delta_col_2=io.delta_column_2,
+            dialect=dialect,
+            pattern_type=pattern_type,
+        )
 
     def build_key_query(self) -> str:
         """

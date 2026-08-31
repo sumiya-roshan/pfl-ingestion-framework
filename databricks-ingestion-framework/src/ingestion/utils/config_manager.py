@@ -123,8 +123,7 @@ class IngestionTaskConfig:
     staging_flag: Optional[int] = None
 
     # config_master routing ID this task was loaded under — set by
-    # ConfigManager.get_active_tasks(). Used by JdbcConnector.build_probe_query()
-    # to look up a special-case lookup query in special_lookup_queries.json.
+    # ConfigManager.get_active_tasks().
     config_master_id: Optional[int] = None
 
     # Watermark date for incremental lookup query generation
