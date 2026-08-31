@@ -468,24 +468,29 @@ class ConfigManager:
         business_date = sink_batch_started_date.date()
 
         # deltacolumn_1 = the source's incremental/watermark column, read from
-        # the bronze table just written (not the config table itself). Only a
-        # real date/timestamp value is written — a misconfigured Delta_Column_1
-        # (e.g. a uuid/text id) is skipped so it can't fail the whole UPDATE and
-        # leave the row stuck at 'In Progress'.
+        # the bronze table just written (not the config table itself). Best-effort:
+        # a missing bronze table or a misconfigured Delta_Column_1 (uuid/text id)
+        # is skipped so it can't fail the whole UPDATE and leave the row stuck at
+        # 'In Progress'.
         raw_last_sink_date = None
         if ingest_obj.incremental_column:
-            row = (
-                self.spark.table(ingest_obj.full_target_table)
-                .agg({ingest_obj.incremental_column: "max"})
-                .collect()[0]
-            )
-            if isinstance(row[0], (date, datetime)):
-                raw_last_sink_date = row[0]
-            elif row[0] is not None:
+            try:
+                max_val = (
+                    self.spark.table(ingest_obj.full_target_table)
+                    .agg({ingest_obj.incremental_column: "max"})
+                    .collect()[0][0]
+                )
+            except Exception as exc:
+                max_val = None
+                print(f"[ConfigManager] config_id={ingest_obj.config_id}: could not read "
+                      f"MAX({ingest_obj.incremental_column}) from {ingest_obj.full_target_table}: {exc}")
+            if isinstance(max_val, (date, datetime)):
+                raw_last_sink_date = max_val
+            elif max_val is not None:
                 print(
                     f"[ConfigManager] config_id={ingest_obj.config_id}: "
                     f"Delta_Column_1 '{ingest_obj.incremental_column}' MAX() is "
-                    f"{row[0]!r} (not a date/timestamp) — leaving raw_last_sink_date unchanged."
+                    f"{max_val!r} (not a date/timestamp) — leaving raw_last_sink_date unchanged."
                 )
 
         set_clauses = [
