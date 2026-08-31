@@ -72,6 +72,15 @@ class SourceSystemConfig:
     # JdbcConnector._read_options(). None → no timeout applied.
     query_timeout: Optional[str] = None
 
+    # Unity Catalog "Connection" object name (e.g. 'postgres_connection'),
+    # created via CREATE CONNECTION ... TYPE POSTGRESQL. Distinct from
+    # database_name, which holds the *foreign catalog* name built on top of
+    # this connection (CREATE FOREIGN CATALOG ... USING CONNECTION ...).
+    # Used only by FederatedConnector, to sanity-check that the foreign
+    # catalog is actually backed by the expected connection before querying
+    # it. See federated_connector.py._validate_connection().
+    uc_connection_name: Optional[str] = None
+
     def to_dict(self) -> dict:
         import decimal
         res = {}
@@ -244,6 +253,7 @@ class ConfigManager:
             retry_count             = r.get("retry_count"),
             retry_interval          = r.get("retry_interval"),
             query_timeout           = r.get("query_timeout"),
+            uc_connection_name      = r.get("uc_connection_name"),
         )
 
     @staticmethod

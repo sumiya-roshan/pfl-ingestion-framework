@@ -230,6 +230,7 @@ class IngestionOrchestrator:
             )
 
             connector = get_connector(self.spark, source_sys, ingest_obj, self.secrets)
+            print(f"connector: {connector}")
             df, watermark_end = retry_on_failure(
                 lambda: connector.extract(watermark_start),
                 max_retries    = int(source_sys.retry_count or 0),
