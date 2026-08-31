@@ -52,16 +52,15 @@ source_system_id  = int(source_system_id_raw)
 # First trigger of the batch (batch_start_date still defaults to "1"): flip the
 # batch to In Progress, reset Day_Execution_Count to 0, and stamp the batch start
 # date. TODO: move to the batch-init notebook.
-if batch_start_date == "1":
     # For now: inline UPDATE for testing. Generate the UTC timestamp once here
     # and pass it in as a literal so every matching row gets the exact same value.
-    batch_started_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
-    spark.sql(f"""
-        UPDATE migration_x_catalog.pfl_x_schema.rdbms_ingestion_config
-        SET Status = 'In Progress', Day_Execution_Count = 0,
-            sink_batch_started_date = TIMESTAMP '{batch_started_ts}'
-        WHERE Source_Name = 'PG_TEST_RDS'
-    """)
+batch_started_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+spark.sql(f"""
+    UPDATE migration_x_catalog.pfl_x_schema.rdbms_ingestion_config
+    SET Status = 'In Progress', Day_Execution_Count = 0,
+        sink_batch_started_date = TIMESTAMP '{batch_started_ts}'
+    WHERE Source_Name = 'PG_TEST_RDS'
+""")
 
     # dbutils.notebook.run(
     #     "./start_batch",  # TODO: point to the actual batch-init notebook
