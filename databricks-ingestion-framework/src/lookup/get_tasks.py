@@ -50,13 +50,14 @@ source_system_id  = int(source_system_id_raw)
 
 # First trigger of the batch (batch_start_date still defaults to "1"): flip the
 # batch to In Progress, reset Day_Execution_Count to 0, and stamp the batch start
-# date with current_timestamp() in UTC. TODO: move to the batch-init notebook.
+# date. TODO: move to the batch-init notebook.
 if batch_start_date == "1":
-    # For now: inline UPDATE for testing. Later: swap for the batch-init notebook.
+    # For now: inline UPDATE for testing. Hardcoded constant so every matching
+    # row shares the exact same batch start timestamp.
     spark.sql(f"""
         UPDATE migration_x_catalog.pfl_x_schema.rdbms_ingestion_config
         SET Status = 'In Progress', Day_Execution_Count = 0,
-            sink_batch_started_date = from_utc_timestamp(current_timestamp(), 'UTC')
+            sink_batch_started_date = TIMESTAMP '2026-08-31 17:39:00.044+00:00'
         WHERE Source_Name = 'PG_TEST_RDS'
     """)
 
