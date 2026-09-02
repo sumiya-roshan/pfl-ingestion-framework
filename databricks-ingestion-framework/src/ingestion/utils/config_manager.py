@@ -363,7 +363,8 @@ class ConfigManager:
         config_master_id: int,
         source_system_id: int,
         pipeline_name: Optional[str] = None,
-        batch_start_date: Optional[str] = None
+        batch_start_date: Optional[str] = None,
+        batch_id: Optional[str] = None
     ) -> Tuple[SourceSystemConfig, List[IngestionTaskConfig]]:
         """
         1. Fetch Source System by source_system_id to get credentials & source_name.
@@ -371,6 +372,7 @@ class ConfigManager:
         3. Query the child config table for active tasks for this source_name,
            filtering by pipeline_name if provided.
         4. If batch_start_date is provided and not '1', filter by sink_batch_started_date.
+        5. If batch_id is provided and not 'ALL', filter by batch_id.
         """
         
         # 1. Resolve source system
@@ -406,6 +408,12 @@ class ConfigManager:
 
         # Basic filtering by source system and active status
         filtered_df = child_df.filter(f"{src_col} = '{source_name}' AND {active_col} = 1")
+
+        # Apply batch_id filtering if provided and not 'ALL'
+        if batch_id and str(batch_id).strip().upper() != "ALL":
+            b_col = next((c for c in child_df.columns if c.lower() == "batch_id"), "Batch_ID")
+            print(f"[ConfigManager] Filtering active tasks by {b_col} = '{batch_id}'")
+            filtered_df = filtered_df.filter(f"{b_col} = {batch_id}")
 
         # Apply multi-refresh batch start date filtering if triggered by orchestrator
         if batch_start_date and str(batch_start_date).strip() != "1":

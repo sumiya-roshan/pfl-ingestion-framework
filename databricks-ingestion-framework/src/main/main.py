@@ -68,6 +68,7 @@ dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Ba
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
+dbutils.widgets.text("batch_id",            "ALL",            "Batch ID (ALL for run 1)")
 dbutils.widgets.text("max_workers",         "4",              "Max parallel workers (lookup + extraction per task)")
 dbutils.widgets.text("dependency_table",    DEPENDENCY_TABLE, "Dependency Table (override)")
 dbutils.widgets.text("silver_notebook_path",    "",           "Workspace path to Silver transformation notebook (blank = skip Silver trigger)")
@@ -107,6 +108,7 @@ landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
 audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
 batch_start_date_raw = dbutils.widgets.get("batch_start_date")     or "1"
+batch_id             = dbutils.widgets.get("batch_id")             or "ALL"
 max_workers          = int(dbutils.widgets.get("max_workers") or "4")
 
 from ingestion.utils.logger import get_logger
@@ -253,6 +255,7 @@ else:
         source_system_id = source_system_id,
         pipeline_name    = pipeline_name,
         batch_start_date = batch_start_date_raw,
+        batch_id         = batch_id,
     )
 
 print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
@@ -328,70 +331,38 @@ def run_one(task: IngestionTaskConfig) -> dict:
 
 results = []
 
-# ── Batch-level parallelism ────────────────────────────────────────────────
-# batch_id  → controls PARALLEL execution: one thread per distinct batch.
-# priority  → controls SEQUENTIAL execution of tables WITHIN a batch (ascending).
-#
-# max_workers is derived dynamically from the distinct batch_id count for this
-# pipeline — NOT hardcoded, NOT taken from the widget/config. Tables are never
-# assigned to their own threads; a batch's tables run one-by-one inside the
-# batch's single thread. Per-table processing (load type, incremental/full,
-# retry, timeout, watermark, …) is unchanged — it all still happens in run_one.
+# ── Intra-Batch Parallelism ────────────────────────────────────────────────
+# Since the Parent Wrapper triggers one job run per batch_id, this job 
+# receives tasks for ONLY ONE batch. We extract all tables in this batch in parallel.
 
-# Group tasks by batch_id, tables inside each batch ordered by priority ascending.
-batches = {}
-for task in sorted(tasks, key=lambda t: t.priority):
-    batches.setdefault(task.batch_id, []).append(task)
+max_workers = tasks[0].max_workers if tasks and getattr(tasks[0], 'max_workers', None) else max_workers
 
-max_workers = len(batches)   # distinct batch_id count for this pipeline
+print(
+    f"\nStarting {len(tasks)} tasks for Batch '{batch_id}' with "
+    f"ThreadPoolExecutor (max_workers={max_workers})..."
+)
 
+# Sort tasks by priority so higher priority tasks are submitted first
+tasks_sorted = sorted(tasks, key=lambda t: t.priority)
 
-def run_batch(batch_id, batch_tasks: list) -> list:
-    """Run every table in one batch sequentially, in priority order."""
-    batch_results = []
-    print(
-        f"[Batch {batch_id}] Starting {len(batch_tasks)} table(s) sequentially: "
-        f"{[t.source_object_name for t in batch_tasks]}"
-    )
-    for task in batch_tasks:
+with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    # Submit all tasks
+    future_to_task = {executor.submit(run_one, task): task for task in tasks_sorted}
+
+    for future in as_completed(future_to_task):
+        task = future_to_task[future]
         try:
-            batch_results.append(run_one(task))
+            res = future.result()
+            results.append(res)
         except Exception as exc:
             print(f"Task {task.source_object_name} (Config ID: {task.config_id}) failed with exception: {exc}")
-            batch_results.append({
+            results.append({
                 "config_id": task.config_id,
                 "run_id":   None,
                 "status":   AUDIT_STATUS_FAILED,
                 "rows_read": 0,
                 "error":    str(exc),
             })
-    return batch_results
-
-
-print(
-    f"\nStarting {len(tasks)} tasks across {len(batches)} batch(es) with "
-    f"ThreadPoolExecutor (max_workers={max_workers})..."
-)
-with ThreadPoolExecutor(max_workers=max_workers) as executor:
-    future_to_batch = {
-        executor.submit(run_batch, batch_id, batch_tasks): batch_id
-        for batch_id, batch_tasks in batches.items()
-    }
-
-    for future in as_completed(future_to_batch):
-        batch_id = future_to_batch[future]
-        try:
-            results.extend(future.result())
-        except Exception as exc:
-            print(f"Batch {batch_id} failed with exception: {exc}")
-            for task in batches[batch_id]:
-                results.append({
-                    "config_id": task.config_id,
-                    "run_id":   None,
-                    "status":   AUDIT_STATUS_FAILED,
-                    "rows_read": 0,
-                    "error":    str(exc),
-                })
 
 # COMMAND ----------
 
