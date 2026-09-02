@@ -36,6 +36,7 @@ from .audit import AuditLogger
 from .dependency_logger import DependencyLogger
 from ..connectors.factory import get_connector
 from ..connectors.jdbc_connector import JdbcConnector
+from ..connectors.federated_connector import FederatedConnector
 from .writers.s3_writer import S3RawWriter
 from .writers.bronze_writer import BronzeWriter
 from .logger import get_logger
@@ -252,32 +253,46 @@ class IngestionOrchestrator:
             # Staging_Flag=1 → pull ALL primary-key rows from source (unfiltered)
             # and land them in s3. Same flat rewrite as the lookup probe, just
             # without the row-limit clause (row_limit=False).
-            if ingest_obj.staging_flag == 1 and isinstance(connector, JdbcConnector):
+            if ingest_obj.staging_flag == 1 and isinstance(connector, (JdbcConnector, FederatedConnector)):
                 if not landing_volume_path:
                     raise ValueError(
                         f"Staging_Flag=1 for config_id={ingest_obj.config_id}, "
                         "but landing_volume_path is not configured."
                     )
 
-                key_query = build_lookup_query(
-                    connector._base_sql(),
-                    ", ".join(ingest_obj.primary_key_list) if ingest_obj.primary_key_list else "*",
-                    "full", row_limit=False,
+                key_col = ", ".join(ingest_obj.primary_key_list) if ingest_obj.primary_key_list else "*"
+                is_federated = isinstance(connector, FederatedConnector)
+
+                base_sql = (
+                    connector._base_sql(connector._foreign_catalog())
+                    if is_federated
+                    else connector._base_sql()
                 )
+
+                key_query = build_lookup_query(base_sql, key_col, "full", row_limit=False)
                 self.logger.info(f"[{run_id}] PK staging query → {key_query}")
 
-                pk_df = retry_on_failure(
-                    lambda: (
-                        self.spark.read.format("jdbc")
-                        .options(**connector._read_options())
-                        .option("query", key_query)
-                        .load()
-                    ),
-                    max_retries    = int(source_sys.retry_count or 0),
-                    retry_interval = int(source_sys.retry_interval or 0),
-                    logger         = self.logger,
-                    description    = f"[{run_id}] primary-key extract config_id={ingest_obj.config_id} object='{ingest_obj.source_object_name}'",
-                )
+                if is_federated:
+                    pk_df = retry_on_failure(
+                        lambda: self.spark.sql(key_query),
+                        max_retries    = int(source_sys.retry_count or 0),
+                        retry_interval = int(source_sys.retry_interval or 0),
+                        logger         = self.logger,
+                        description    = f"[{run_id}] primary-key extract config_id={ingest_obj.config_id} object='{ingest_obj.source_object_name}'",
+                    )
+                else:
+                    pk_df = retry_on_failure(
+                        lambda: (
+                            self.spark.read.format("jdbc")
+                            .options(**connector._read_options())
+                            .option("query", key_query)
+                            .load()
+                        ),
+                        max_retries    = int(source_sys.retry_count or 0),
+                        retry_interval = int(source_sys.retry_interval or 0),
+                        logger         = self.logger,
+                        description    = f"[{run_id}] primary-key extract config_id={ingest_obj.config_id} object='{ingest_obj.source_object_name}'",
+                    )
 
                 pk_rows = pk_df.count()
                 fmt = ingest_obj.file_format or "parquet"

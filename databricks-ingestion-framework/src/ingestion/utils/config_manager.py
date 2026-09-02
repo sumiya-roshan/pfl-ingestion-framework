@@ -73,6 +73,10 @@ class SourceSystemConfig:
     # JdbcConnector._read_options(). None → no timeout applied.
     query_timeout: Optional[str] = None
 
+    # Unity Catalog "Connection" object name
+    # Used only by FederatedConnector
+    uc_connection_name: Optional[str] = None
+
     def to_dict(self) -> dict:
         import decimal
         res = {}
@@ -244,6 +248,7 @@ class ConfigManager:
             retry_count             = r.get("retry_count"),
             retry_interval          = r.get("retry_interval"),
             query_timeout           = r.get("query_timeout"),
+            uc_connection_name      = r.get("uc_connection_name"),
         )
 
     @staticmethod

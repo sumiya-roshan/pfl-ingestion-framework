@@ -15,6 +15,7 @@ from lookup.lookup_query_builder import build_lookup_query, detect_pattern_type
 from ingestion.connectors.factory import get_connector
 from ingestion.connectors.jdbc_connector import JdbcConnector
 from ingestion.connectors.mongo_connector import MongoConnector
+from ingestion.connectors.federated_connector import FederatedConnector
 
 class LookupExecutor:
     """
@@ -79,6 +80,53 @@ class LookupExecutor:
             pattern_type=detect_pattern_type(source_query),
         )
 
+    @staticmethod
+    def _build_federated_probe_query(source_sys, task) -> str:
+        """
+        The single place the Lakehouse Federation row-presence query is
+        constructed — the Federation equivalent of _build_jdbc_probe_query().
+
+        Built directly in plain Spark SQL rather than routed through
+        lookup_query_builder.build_lookup_query(): that helper exists to
+        paper over per-source SQL dialect differences (Postgres/MySQL/MSSQL/
+        Oracle LIMIT vs. TOP vs. FETCH FIRST) for raw JDBC pushdown queries.
+        Federation reads run through spark.sql() against the Unity Catalog
+        foreign catalog instead of a raw JDBC connection, so there's exactly
+        one dialect to handle here — Spark SQL — and LIMIT applies uniformly
+        no matter which database is federated underneath. Same FULL/
+        INCREMENTAL predicate shape as _build_jdbc_probe_query, and the same
+        catalog resolution (config_source_system.database_name) that
+        FederatedConnector.extract() uses.
+        """
+        catalog = source_sys.database_name
+        if not catalog:
+            raise ValueError(
+                f"No foreign catalog configured for source_id={source_sys.source_id} "
+                f"(source_name='{source_sys.source_name}'). Set "
+                f"config_source_system.database_name to the Unity Catalog "
+                f"foreign catalog name."
+            )
+
+        if task.custom_query:
+            source_query = task.custom_query
+        else:
+            schema = task.source_schema or "public"
+            source_query = f"SELECT * FROM {catalog}.{schema}.{task.source_object_name}"
+
+        key_col = ", ".join(task.primary_key_list) if task.primary_key_list else "1"
+        predicates = []
+
+        if task.load_type == "INCREMENTAL" and task.incremental_column:
+            cutoff = resolve_watermark(task)
+            if cutoff is not None:
+                predicate = f"{task.incremental_column} >= '{cutoff}'"
+                if task.delta_column_2:
+                    predicate = f"({predicate} OR {task.delta_column_2} >= '{cutoff}')"
+                predicates.append(predicate)
+
+        where_clause = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+        return f"SELECT {key_col} FROM ({source_query}) _src_wrapped{where_clause} LIMIT 1"
+
     # ── Strategy: JDBC ───────────────────────────────────────────────────────
 
     def _lookup_jdbc(self, connector, resolved_query: str) -> int:
@@ -99,6 +147,23 @@ class LookupExecutor:
             .load()
         )
         row = df.collect()
+        if not row:
+            return 0
+        return 1
+
+    # ── Strategy: Lakehouse Federation ──────────────────────────────────────
+
+    def _lookup_federated(self, resolved_query: str) -> int:
+        """
+        Run the resolved probe query via spark.sql() against the Unity
+        Catalog foreign catalog and return 1 if any row is collected (data
+        exists), or 0 if no row is collected. Unlike _lookup_jdbc, there's
+        no separate options/query step — resolved_query is already a
+        complete, runnable Spark SQL statement (see
+        _build_federated_probe_query()), so no connector object is needed
+        here at all.
+        """
+        row = self.spark.sql(resolved_query).collect()
         if not row:
             return 0
         return 1
@@ -137,8 +202,8 @@ class LookupExecutor:
         """
         Run a presence check for one ingestion task — the entry point used by
         IngestionOrchestrator.run() to gate extraction. Dispatches to the JDBC,
-        MongoDB, or file-based strategy. Retries on the source system's
-        retry_count/retry_interval.
+        MongoDB, Lakehouse Federation, or file-based strategy. Retries on the
+        source system's retry_count/retry_interval.
         """
         config_id      = task.config_id
         object_name    = task.source_object_name
@@ -161,6 +226,11 @@ class LookupExecutor:
                 elif isinstance(connector, MongoConnector):
                     # find_one() probes the collection directly — no query template needed.
                     count = self._lookup_mongo(connector)
+
+                elif isinstance(connector, FederatedConnector):
+                    resolved_query = self._build_federated_probe_query(source_sys, task)
+                    self.logger.debug(f"[LookupExecutor] Lookup query generated: {resolved_query}")
+                    count = self._lookup_federated(resolved_query)
 
                 else:
                     # File-based (S3, SFTP, etc.) — always included
