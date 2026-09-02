@@ -412,7 +412,6 @@ def trigger_eligible_jobs(trigger_time_str: str) -> None:
                     "source_name":      source_name,
                     "config_master_id": str(cmid),
                     "source_system_id": str(source_sys_id),
-                    "child_job_name":   job_name,
                     "secret_scope":     secret_scope,
                     "secret_key_pat":   secret_key_pat
                 },
