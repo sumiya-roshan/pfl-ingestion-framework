@@ -405,7 +405,7 @@ def trigger_eligible_jobs(trigger_time_str: str) -> None:
         source_sys_id = row["Source_System_ID"]
         try:
             run_id = job_trigger.run_now_by_name(
-                job_name        = f"{job_name}_launcher",
+                job_name        = f"{job_name}",
                 notebook_params = {
                     "batch_start_date": trigger_time_str,
                     "pipeline_name":    pipeline_name,
@@ -418,7 +418,7 @@ def trigger_eligible_jobs(trigger_time_str: str) -> None:
                 },
             )
             logger.info(
-                f"[MultiRefresh] Triggered launcher job '{job_name}_launcher' for Config_Master_ID={cmid} "
+                f"[MultiRefresh] Triggered launcher job '{job_name}' for Config_Master_ID={cmid} "
                 f"pipeline={pipeline_name} source_name={source_name} → run_id={run_id}  batch_start_date={trigger_time_str}"
             )
         except Exception as exc:
