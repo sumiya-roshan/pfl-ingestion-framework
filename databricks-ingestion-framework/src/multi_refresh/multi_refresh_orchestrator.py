@@ -67,6 +67,7 @@ DEP_MASTER_TABLE     = f"{CFG_SCHEMA}.dependency_master_config"
 RDBMS_CFG_TABLE      = f"{CFG_SCHEMA}.rdbms_ingestion_config"
 CONFIG_MASTER_TABLE  = f"{CFG_SCHEMA}.config_master"
 ELIGIBLE_TEMP_TABLE  = f"{TEMP_SCHEMA}.tb_eligible_objects"
+SOURCE_SYSTEM_TABLE  = f"{CFG_SCHEMA}.config_source_system"
 
 IST = pytz.timezone("Asia/Kolkata")
 logger = get_logger(environment=environment)
