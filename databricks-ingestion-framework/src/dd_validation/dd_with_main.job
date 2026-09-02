@@ -1,0 +1,69 @@
+resources:
+  jobs:
+    test_PL_dd_check_v2:
+      name: test_PL_dd_check_v2
+      tasks:
+        - task_key: is_dd_validation_enabled
+          notebook_task:
+            notebook_path: /Workspace/Shared/pfl-ingestion-framework-dd-check/databricks-ingestion-framework/src/dd_validation/check_dd_validation_enable
+            base_parameters:
+              source_system_id: "1"
+              batch_start_date: "{{job.parameters.batch_start_date}}"
+            source: WORKSPACE
+        - task_key: check_dd_validation_enabled
+          depends_on:
+            - task_key: is_dd_validation_enabled
+          condition_task:
+            op: EQUAL_TO
+            left: "{{tasks.is_dd_validation_enabled.values.dd_enabled}}"
+            right: "1"
+        - task_key: DD_Validation
+          depends_on:
+            - task_key: check_dd_validation_enabled
+              outcome: "true"
+          run_job_task:
+            job_id: 798040266409737
+            job_parameters:
+              source_name: "{{tasks.is_dd_validation_enabled.values.source_name}}"
+        - task_key: get_table_details
+          depends_on:
+            - task_key: DD_Validation
+            - task_key: check_dd_validation_enabled
+              outcome: "false"
+          run_if: AT_LEAST_ONE_SUCCESS
+          notebook_task:
+            notebook_path: /Workspace/Shared/pfl-ingestion-framework-sumiya/databricks-ingestion-framework/src/lookup/get_tasks
+            base_parameters:
+              config_master_id: "1"
+              source_system_id: "1"
+              pipeline_name: bronze_pipeline
+              target_catalog: migration_x_catalog
+              batch_start_date: "{{job.parameters.batch_start_date}}"
+            source: WORKSPACE
+          environment_key: Default
+        - task_key: run_source_ingestion
+          depends_on:
+            - task_key: get_table_details
+          notebook_task:
+            notebook_path: /Workspace/Shared/pfl-ingestion-framework-sumiya/databricks-ingestion-framework/src/main/main
+            base_parameters:
+              config_master_id: "1"
+              source_system_id: "1"
+              target_catalog: migration_x_catalog
+              pipeline_name: bronze_pipeline
+              landing_volume_path: s3://pfl-test/pfl_test_folder/
+              job_run_id: "{{job.run_id}}"
+              job_id: "{{job.id}}"
+              batch_start_date: "{{job.parameters.batch_start_date}}"
+            source: WORKSPACE
+          environment_key: Default
+      queue:
+        enabled: true
+      parameters:
+        - name: batch_start_date
+          default: "1"
+      environments:
+        - environment_key: Default
+          spec:
+            environment_version: "5"
+      performance_target: PERFORMANCE_OPTIMIZED
