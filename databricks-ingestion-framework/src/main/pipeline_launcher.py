@@ -14,6 +14,8 @@ dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (e.
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date / Trigger Time")
 dbutils.widgets.text("target_catalog",      "hive_metastore", "Target Catalog (where config tables live)")
 dbutils.widgets.text("child_job_name",      "",               "Name of the child job to trigger (e.g. CCA_Ingestion_Job)")
+dbutils.widgets.text("secret_scope",        "kv-pfl-scope",   "Secret scope for Databricks PAT token")
+dbutils.widgets.text("secret_key_pat",      "databricks-pat-token", "Secret key for Databricks PAT token")
 
 # COMMAND ----------
 
@@ -23,9 +25,14 @@ pipeline_name        = dbutils.widgets.get("pipeline_name")
 batch_start_date     = dbutils.widgets.get("batch_start_date") or "1"
 target_catalog       = dbutils.widgets.get("target_catalog") or "hive_metastore"
 child_job_name       = dbutils.widgets.get("child_job_name")
+secret_scope         = dbutils.widgets.get("secret_scope")
+secret_key_pat       = dbutils.widgets.get("secret_key_pat")
 
 if not config_master_id_raw or not source_system_id_raw or not pipeline_name or not child_job_name:
     dbutils.notebook.exit("Error: config_master_id, source_system_id, pipeline_name, and child_job_name are required.")
+
+if not secret_scope:
+    dbutils.notebook.exit("Error: secret_scope widget is required (needed for REST API PAT token).")
 
 config_master_id = int(config_master_id_raw)
 
@@ -78,7 +85,16 @@ print(f"Found {len(active_batches)} eligible batch(es): {active_batches}")
 # COMMAND ----------
 
 # 3. Trigger concurrent child jobs (one per batch_id)
-job_trigger = JobTrigger(dbutils)
+workspace_url = (
+    dbutils.notebook.entry_point
+    .getDbutils()
+    .notebook()
+    .getContext()
+    .apiUrl()
+    .get()
+)
+pat_token = dbutils.secrets.get(scope=secret_scope, key=secret_key_pat)
+job_trigger = JobTrigger(workspace_url=workspace_url, token=pat_token)
 
 for batch_id in active_batches:
     print(f"Triggering child job '{child_job_name}' for Batch ID: {batch_id}")
