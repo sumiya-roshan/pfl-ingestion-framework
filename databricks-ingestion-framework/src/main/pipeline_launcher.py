@@ -12,7 +12,7 @@ dbutils.widgets.text("config_master_id",    "",               "Config Master ID"
 dbutils.widgets.text("source_system_id",    "",               "Source System ID")
 dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (e.g. CCA)")
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date / Trigger Time")
-dbutils.widgets.text("target_catalog",      "hive_metastore", "Target Catalog (where config tables live)")
+dbutils.widgets.text("target_catalog",      "migration_x_catalog", "Target Catalog (where config tables live)")
 dbutils.widgets.text("child_job_name",      "",               "Name of the child job to trigger (e.g. CCA_Ingestion_Job)")
 dbutils.widgets.text("secret_scope",        "kv-pfl-scope",   "Secret scope for Databricks PAT token")
 dbutils.widgets.text("secret_key_pat",      "databricks-pat-token", "Secret key for Databricks PAT token")
