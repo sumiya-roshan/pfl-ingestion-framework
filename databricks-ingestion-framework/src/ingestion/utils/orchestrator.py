@@ -211,7 +211,7 @@ class IngestionOrchestrator:
             table_name          = ingest_obj.source_object_name,
             pipeline_name       = pipeline_name,
             job_run_id          = audit_context.get("job_run_id"),
-            business_date       = business_date,
+            business_date       = business_date or run_start_time.date(),
             pipeline_start_time = audit_context.get("pipeline_start_time") or datetime.now(timezone.utc),
         )
 
@@ -304,7 +304,7 @@ class IngestionOrchestrator:
                     source_object_name  = ingest_obj.source_object_name,
                     file_format         = fmt,
                     file_prefix         = 'all_key',
-                    file_timestamp      = sink_batch_started_date,
+                    file_timestamp      = sink_batch_started_date or run_start_time,
                 )
 
                 self.logger.info(
@@ -320,10 +320,9 @@ class IngestionOrchestrator:
             landing_path  = None
             silver_result = None
             fmt = ingest_obj.file_format or "parquet"
+            write_start_time = time.time()
             if landing_volume_path:
                 stage = "RAW_WRITE"
-                import time
-                write_start_time = time.time()
                 landing_path = self.s3_writer.write(
                     df,
                     landing_volume_path = landing_volume_path,
@@ -331,7 +330,7 @@ class IngestionOrchestrator:
                     source_schema       = ingest_obj.source_schema,
                     source_object_name  = ingest_obj.source_object_name,
                     file_format         = fmt,
-                    file_timestamp      = sink_batch_started_date,
+                    file_timestamp      = sink_batch_started_date or run_start_time,
                 )
                 self.logger.info(
                     f"[{run_id}] Landing write → {landing_path} ({rows_read} rows, format={fmt})"

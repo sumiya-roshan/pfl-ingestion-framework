@@ -79,7 +79,10 @@ if not config_master_id_raw or not source_system_id_raw:
 config_master_id     = int(config_master_id_raw)
 source_system_id     = int(source_system_id_raw)
 pipeline_name        = dbutils.widgets.get("pipeline_name")        or None
-job_id               = dbutils.widgets.get("job_id")           or None
+try:
+    job_id           = dbutils.widgets.get("job_id")           or None
+except Exception:
+    job_id           = None
 job_run_id           = dbutils.widgets.get("job_run_id")           or None
 
 if not pipeline_name:
@@ -130,7 +133,10 @@ def get_databricks_job_context():
         except Exception:
             return None
     databricks_url = get_context_value("apiUrl")
-    job_id         = dbutils.widgets.get("job_id")
+    try:
+        job_id     = dbutils.widgets.get("job_id")
+    except Exception:
+        job_id     = None
     databricks_url = (
         f"{databricks_url}/#job/{job_id}"
         if databricks_url and job_id
@@ -272,7 +278,7 @@ def run_one(task: IngestionTaskConfig) -> dict:
 
     return orchestrator.run(
         source_sys          = source_sys,
-        task                = task,
+        ingest_obj          = task,
         config_master_id    = config_master_id,   # ← routing table ID from widget
         landing_volume_path = resolved_landing_path,
         trigger_id          = trigger_id,
