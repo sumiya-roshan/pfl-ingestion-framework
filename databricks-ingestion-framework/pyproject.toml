@@ -1,0 +1,8 @@
+[tool.ruff.lint]
+ignore = [
+    "BLE001", # broad `except Exception` is used deliberately throughout this
+               # codebase for fallback/best-effort paths (secret resolution,
+               # notebook task-value plumbing, audit/status writebacks) where
+               # narrowing to specific exception types would be brittle across
+               # heterogeneous connectors (JDBC/S3/SFTP/Mongo/federated).
+]

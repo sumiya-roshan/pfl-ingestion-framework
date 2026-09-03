@@ -11,28 +11,28 @@ The environment value is passed from the notebook widget into IngestionOrchestra
 which passes it to get_logger(). Falls back to INFO if the .env file is missing
 or dotenv is not installed.
 """
+
+import atexit
 import logging
 import os
-import sys
-import atexit
 import shutil
+import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 _LOG_LEVEL_MAP = {
-    "DEBUG":    logging.DEBUG,
-    "INFO":     logging.INFO,
-    "WARNING":  logging.WARNING,
-    "ERROR":    logging.ERROR,
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
     "CRITICAL": logging.CRITICAL,
 }
 
-_LOCAL_LOG_FILE: Optional[str] = None
-_S3_LOG_PATH:    Optional[str] = None
+_LOCAL_LOG_FILE: str | None = None
+_S3_LOG_PATH: str | None = None
 
 
-def _find_env_file(environment: str, repo_root: Optional[str] = None) -> Optional[Path]:
+def _find_env_file(environment: str, repo_root: str | None = None) -> Path | None:
     """
     Locate  config/.env.<environment>  relative to the repo root.
     Walks up from this file's location if repo_root is not given.
@@ -44,8 +44,8 @@ def _find_env_file(environment: str, repo_root: Optional[str] = None) -> Optiona
         return candidate if candidate.exists() else None
 
     # Walk up from src/ingestion/utils/ looking for a config/ sibling of src/
-    here = Path(__file__).resolve().parent          # utils/
-    for _ in range(6):                              # walk up at most 6 levels
+    here = Path(__file__).resolve().parent  # utils/
+    for _ in range(6):  # walk up at most 6 levels
         candidate = here / "config" / filename
         if candidate.exists():
             return candidate
@@ -53,7 +53,7 @@ def _find_env_file(environment: str, repo_root: Optional[str] = None) -> Optiona
     return None
 
 
-def _read_env_log_level(environment: str, repo_root: Optional[str] = None) -> int:
+def _read_env_log_level(environment: str, repo_root: str | None = None) -> int:
     """
     Load the .env.<environment> file with dotenv and return the numeric log level.
     Falls back to INFO on any error (missing file, dotenv not installed, etc.).
@@ -63,9 +63,10 @@ def _read_env_log_level(environment: str, repo_root: Optional[str] = None) -> in
         return logging.INFO
 
     try:
-        from dotenv import dotenv_values          # python-dotenv
+        from dotenv import dotenv_values  # python-dotenv
+
         values = dotenv_values(env_file)
-        raw    = values.get("LOG_LEVEL", "").strip().upper()
+        raw = values.get("LOG_LEVEL", "").strip().upper()
         return _LOG_LEVEL_MAP.get(raw, logging.INFO)
     except ImportError:
         # dotenv not installed — parse manually as a last resort
@@ -76,10 +77,10 @@ def _read_env_log_level(environment: str, repo_root: Optional[str] = None) -> in
                     if line.startswith("LOG_LEVEL"):
                         _, _, value = line.partition("=")
                         return _LOG_LEVEL_MAP.get(value.strip().upper(), logging.INFO)
-        except Exception:
-            pass
-    except Exception:
-        pass
+        except OSError as exc:
+            print(f"[Logger] Could not read '{env_file}' ({exc}) — defaulting to INFO.")
+    except Exception as exc:
+        print(f"[Logger] Failed to load '{env_file}' via dotenv ({exc}) — defaulting to INFO.")
 
     return logging.INFO
 
@@ -87,7 +88,7 @@ def _read_env_log_level(environment: str, repo_root: Optional[str] = None) -> in
 def get_logger(
     name: str = "ingestion_framework",
     environment: str = "dev",
-    repo_root: Optional[str] = None,
+    repo_root: str | None = None,
 ) -> logging.Logger:
     """
     Returns a configured logger whose level is read from
@@ -102,7 +103,7 @@ def get_logger(
     logger = logging.getLogger(name)
 
     if not logger.handlers:
-        handler   = logging.StreamHandler(sys.stdout)
+        handler = logging.StreamHandler(sys.stdout)
         formatter = logging.Formatter(
             "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
@@ -125,16 +126,16 @@ def _upload_on_exit() -> None:
     Idempotent — safe to call multiple times; only uploads once.
     Uses dbutils.fs.cp() (same IAM creds as Spark) when available.
     """
-    global _LOCAL_LOG_FILE, _S3_LOG_PATH, _DBUTILS
+    global _LOCAL_LOG_FILE, _S3_LOG_PATH
     if not _LOCAL_LOG_FILE or not _S3_LOG_PATH:
         return
 
     # Capture and clear so any second call (e.g. atexit) is a no-op
     local_file = _LOCAL_LOG_FILE
-    dest       = _S3_LOG_PATH
-    dbutils    = _DBUTILS
+    dest = _S3_LOG_PATH
+    dbutils = _DBUTILS
     _LOCAL_LOG_FILE = None
-    _S3_LOG_PATH    = None
+    _S3_LOG_PATH = None
 
     # Flush every known handler so nothing is lost before upload
     for lname in [""] + list(logging.root.manager.loggerDict.keys()):
@@ -142,8 +143,8 @@ def _upload_on_exit() -> None:
         for h in lgr.handlers:
             try:
                 h.flush()
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[Logger] Failed to flush handler for '{lname}': {exc}")
 
     if not os.path.exists(local_file) or os.path.getsize(local_file) == 0:
         print("[Logger] Log file is empty — skipping upload.")
@@ -168,9 +169,10 @@ def _upload_on_exit() -> None:
         else:
             # No dbutils and S3 path — last resort: boto3
             import boto3
+
             path_parts = dest[5:].split("/", 1)
             bucket = path_parts[0]
-            key    = path_parts[1] if len(path_parts) > 1 else ""
+            key = path_parts[1] if len(path_parts) > 1 else ""
             if not key or key.endswith("/"):
                 key = f"{key}{os.path.basename(local_file)}"
             boto3.client("s3").upload_file(local_file, bucket, key)
@@ -197,7 +199,7 @@ def configure_s3_logging(
     """
     global _LOCAL_LOG_FILE, _S3_LOG_PATH, _DBUTILS
     _S3_LOG_PATH = s3_log_path
-    _DBUTILS     = dbutils
+    _DBUTILS = dbutils
 
     _LOCAL_LOG_FILE = os.path.join(
         tempfile.gettempdir(),
@@ -208,14 +210,18 @@ def configure_s3_logging(
 
     # Avoid adding a duplicate FileHandler
     for h in lgr.handlers:
-        if isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(_LOCAL_LOG_FILE):
+        if isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(
+            _LOCAL_LOG_FILE
+        ):
             return
 
     fh = logging.FileHandler(_LOCAL_LOG_FILE, mode="w", encoding="utf-8")
-    fh.setFormatter(logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
+    fh.setFormatter(
+        logging.Formatter(
+            "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
     lgr.addHandler(fh)
 
     atexit.register(_upload_on_exit)

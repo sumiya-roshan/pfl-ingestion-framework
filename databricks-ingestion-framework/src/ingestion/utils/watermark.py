@@ -1,8 +1,7 @@
-from typing import Optional
 from .config_manager import IngestionTaskConfig
 
 
-def resolve_watermark(ingest_obj: IngestionTaskConfig) -> Optional[str]:
+def resolve_watermark(ingest_obj: IngestionTaskConfig) -> str | None:
     """
     Resolves the incremental watermark for extraction: Silver_Last_Sink_Date -
     Lookback_Hours, formatted 'YYYY-MM-DD HH:MM:SS'. Also used as the cutoff
@@ -25,9 +24,13 @@ def resolve_watermark(ingest_obj: IngestionTaskConfig) -> Optional[str]:
     ):
         return None
 
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
-    last_sink_str = str(ingest_obj.silver_last_sink_date).replace("T", " ").split(".")[0]
-    last_sink = datetime.strptime(last_sink_str, "%Y-%m-%d %H:%M:%S")
+    last_sink_str = (
+        str(ingest_obj.silver_last_sink_date).replace("T", " ").split(".")[0]
+    )
+    last_sink = datetime.strptime(last_sink_str, "%Y-%m-%d %H:%M:%S").replace(
+        tzinfo=timezone.utc
+    )
     cutoff = last_sink - timedelta(hours=int(ingest_obj.lookback_hours or 3))
     return cutoff.strftime("%Y-%m-%d %H:%M:%S")

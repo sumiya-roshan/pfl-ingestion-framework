@@ -28,14 +28,16 @@ Examples (input -> output)
     SELECT * FROM t WHERE x IN (SELECT ... )                      # existing WHERE
  -> SELECT id FROM t FETCH NEXT 1 ROWS ONLY                       # stripped
 """
+
 import re
 
 __all__ = ["build_lookup_query", "detect_pattern_type"]
 
 # "SELECT <list> FROM": g1 = SELECT + ws, g2 = optional "alias." on the first
 # item, g3 = FROM + ws. Non-greedy so a nested "(SELECT ... FROM ...)" is left be.
-_SELECT_RE = re.compile(r"(SELECT\s+)((?:\w+\.)?)(?:\*|.+?)(\s+FROM\s+)",
-                        re.IGNORECASE | re.DOTALL)
+_SELECT_RE = re.compile(
+    r"(SELECT\s+)((?:\w+\.)?)(?:\*|.+?)(\s+FROM\s+)", re.IGNORECASE | re.DOTALL
+)
 
 # special_trigger_time predicate: two to_date('trigger_time', <fmt>) calls ORed.
 # g1 = col1, g2 = shared date format, g3 = col2 (2nd to_date fully consumed).
@@ -47,16 +49,26 @@ _TRIGGER_RE = re.compile(
 
 
 def detect_pattern_type(source_query):
-    """"special_trigger_time" if the query structurally matches the dual
+    """ "special_trigger_time" if the query structurally matches the dual
     to_date('trigger_time', ...) OR ... predicate (not a mere substring), else
     "generic" — so a column/table named trigger_time_log or a literal
     STATUS = 'trigger_time' stays generic."""
-    return "special_trigger_time" if _TRIGGER_RE.search(source_query or "") else "generic"
+    return (
+        "special_trigger_time" if _TRIGGER_RE.search(source_query or "") else "generic"
+    )
 
 
-def build_lookup_query(source_query, key_col, load_type,
-                       cutoff=None, delta_col=None, delta_col_2=None,
-                       dialect="postgres", pattern_type="generic", row_limit=True):
+def build_lookup_query(
+    source_query,
+    key_col,
+    load_type,
+    cutoff=None,
+    delta_col=None,
+    delta_col_2=None,
+    dialect="postgres",
+    pattern_type="generic",
+    row_limit=True,
+):
     """
     Build a row-presence lookup query from source_query.
 
@@ -73,19 +85,25 @@ def build_lookup_query(source_query, key_col, load_type,
     """
     load_type = (load_type or "").strip().lower()
     if load_type not in ("full", "incremental", "incremental-append"):
-        raise ValueError(f"load_type must be 'full' or 'incremental', got {load_type!r}")
+        raise ValueError(
+            f"load_type must be 'full' or 'incremental', got {load_type!r}"
+        )
 
     # ── SELECT list -> key_col (keep the first item's "alias." prefix) ──────
-    query, n = _SELECT_RE.subn(
-        lambda m: f"{m.group(1)}{m.group(2)}{key_col}{m.group(3)}", source_query, count=1
+    query, _n = _SELECT_RE.subn(
+        lambda m: f"{m.group(1)}{m.group(2)}{key_col}{m.group(3)}",
+        source_query,
+        count=1,
     )
 
     if pattern_type == "special_trigger_time":
-
-        query, n = _TRIGGER_RE.subn(
-            lambda m: (f"({m.group(1)} >= to_date('{cutoff}','{m.group(2)}') "
-                       f"OR {m.group(3)} >= to_date('{cutoff}','{m.group(2)}')"),
-            query, count=1,
+        query, _n = _TRIGGER_RE.subn(
+            lambda m: (
+                f"({m.group(1)} >= to_date('{cutoff}','{m.group(2)}') "
+                f"OR {m.group(3)} >= to_date('{cutoff}','{m.group(2)}')"
+            ),
+            query,
+            count=1,
         )
 
         result = f"{query.strip()} FETCH NEXT 1 ROWS ONLY"
@@ -93,9 +111,10 @@ def build_lookup_query(source_query, key_col, load_type,
     elif pattern_type == "generic":
         # Existing WHERE (at any nesting) is dropped — existence checks need no
         # trailing ORDER BY / GROUP BY, so splitting on the first WHERE is enough.
-        query = re.split(r"\bWHERE\b", query, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        query = re.split(r"\bWHERE\b", query, maxsplit=1, flags=re.IGNORECASE)[
+            0
+        ].strip()
         if load_type == "incremental":
-
             pred = f"{delta_col} >= '{cutoff}'"
             if delta_col_2:
                 pred = f"({pred} OR {delta_col_2} >= '{cutoff}')"

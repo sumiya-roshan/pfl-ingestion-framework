@@ -15,19 +15,19 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 import sys
+
 sys.path.append("..")
 
-import json
-import time
-import random
-import logging
 import datetime
+import random
+import time
+
+import pytz
 from pyspark.sql import Window
 from pyspark.sql.functions import col, row_number
-import pytz
 
-from multi_refresh.job_trigger import JobTrigger
 from ingestion.utils.logger import get_logger
+from multi_refresh.job_trigger import JobTrigger
 
 # COMMAND ----------
 
@@ -36,42 +36,49 @@ from ingestion.utils.logger import get_logger
 
 # COMMAND ----------
 
-dbutils.widgets.text("admin_catalog_name",    "",      "Admin Catalog Name (e.g. migration_x_catalog)")
-dbutils.widgets.text("environment",           "dev",   "Environment: dev | uat | prod")
-dbutils.widgets.text("job_run_id",            "",      "Job Run ID - set to {{job.run_id}}")
-dbutils.widgets.text("max_iterations",        "200",   "Safety: max loop iterations before exit")
-dbutils.widgets.text("secret_scope",          "",      "Secret scope for Databricks PAT token")
-dbutils.widgets.text("secret_key_pat",        "databricks-pat-token", "Secret key for Databricks PAT token")
-dbutils.widgets.text("s3_log_path",           "",      "S3 Log Path (e.g. s3://bucket/logs/)")
+dbutils.widgets.text(
+    "admin_catalog_name", "", "Admin Catalog Name (e.g. migration_x_catalog)"
+)
+dbutils.widgets.text("environment", "dev", "Environment: dev | uat | prod")
+dbutils.widgets.text("job_run_id", "", "Job Run ID - set to {{job.run_id}}")
+dbutils.widgets.text("max_iterations", "200", "Safety: max loop iterations before exit")
+dbutils.widgets.text("secret_scope", "", "Secret scope for Databricks PAT token")
+dbutils.widgets.text(
+    "secret_key_pat", "databricks-pat-token", "Secret key for Databricks PAT token"
+)
+dbutils.widgets.text("s3_log_path", "", "S3 Log Path (e.g. s3://bucket/logs/)")
 
 # COMMAND ----------
 
 admin_catalog_name = dbutils.widgets.get("admin_catalog_name") or None
-environment        = dbutils.widgets.get("environment")        or "dev"
-job_run_id         = dbutils.widgets.get("job_run_id")         or "MANUAL"
-max_iterations     = int(dbutils.widgets.get("max_iterations") or "200")
-secret_scope       = dbutils.widgets.get("secret_scope")       or None
-secret_key_pat     = dbutils.widgets.get("secret_key_pat")     or "databricks-pat-token"
-s3_log_path        = dbutils.widgets.get("s3_log_path")        or None
+environment = dbutils.widgets.get("environment") or "dev"
+job_run_id = dbutils.widgets.get("job_run_id") or "MANUAL"
+max_iterations = int(dbutils.widgets.get("max_iterations") or "200")
+secret_scope = dbutils.widgets.get("secret_scope") or None
+secret_key_pat = dbutils.widgets.get("secret_key_pat") or "databricks-pat-token"
+s3_log_path = dbutils.widgets.get("s3_log_path") or None
 
 if not admin_catalog_name:
     dbutils.notebook.exit("Error: admin_catalog_name widget is required.")
 if not secret_scope:
-    dbutils.notebook.exit("Error: secret_scope widget is required (needed for REST API PAT token).")
+    dbutils.notebook.exit(
+        "Error: secret_scope widget is required (needed for REST API PAT token)."
+    )
 
 # Fully-qualified schema configurations
-CFG_SCHEMA           = f"{admin_catalog_name}.pfl_x_schema"
-TEMP_SCHEMA          = f"{admin_catalog_name}.temp"
-BATCH_RUN_CFG_TABLE  = f"{CFG_SCHEMA}.tb_report_batch_run_config"
-DEP_MASTER_TABLE     = f"{CFG_SCHEMA}.dependency_master_config"
-RDBMS_CFG_TABLE      = f"{CFG_SCHEMA}.rdbms_ingestion_config"
-CONFIG_MASTER_TABLE  = f"{CFG_SCHEMA}.config_master"
-ELIGIBLE_TEMP_TABLE  = f"{TEMP_SCHEMA}.tb_eligible_objects"
+CFG_SCHEMA = f"{admin_catalog_name}.pfl_x_schema"
+TEMP_SCHEMA = f"{admin_catalog_name}.temp"
+BATCH_RUN_CFG_TABLE = f"{CFG_SCHEMA}.tb_report_batch_run_config"
+DEP_MASTER_TABLE = f"{CFG_SCHEMA}.dependency_master_config"
+RDBMS_CFG_TABLE = f"{CFG_SCHEMA}.rdbms_ingestion_config"
+CONFIG_MASTER_TABLE = f"{CFG_SCHEMA}.config_master"
+ELIGIBLE_TEMP_TABLE = f"{TEMP_SCHEMA}.tb_eligible_objects"
 
 IST = pytz.timezone("Asia/Kolkata")
 logger = get_logger(environment=environment)
 if s3_log_path:
     from ingestion.utils.logger import configure_s3_logging
+
     configure_s3_logging(f"{s3_log_path.rstrip('/')}/multi_refresh_{job_run_id}.log")
 
 print(f"admin_catalog_name : {admin_catalog_name}")
@@ -80,17 +87,13 @@ print(f"max_iterations     : {max_iterations}")
 
 # Workspace URL and PAT token for job triggers
 workspace_url = (
-    dbutils.notebook.entry_point
-    .getDbutils()
-    .notebook()
-    .getContext()
-    .apiUrl()
-    .get()
+    dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiUrl().get()
 )
 pat_token = dbutils.secrets.get(scope=secret_scope, key=secret_key_pat)
 job_trigger = JobTrigger(workspace_url=workspace_url, token=pat_token)
 
 # COMMAND ----------
+
 
 def merge_with_retry(statement: str, max_retries: int = 5) -> None:
     """Execute a Spark SQL write statement with retries on Delta conflicts."""
@@ -100,7 +103,10 @@ def merge_with_retry(statement: str, max_retries: int = 5) -> None:
             return
         except Exception as e:
             err_msg = str(e)
-            if any(term in err_msg for term in ["MetadataChangedException", "ConcurrentAppendException"]):
+            if any(
+                term in err_msg
+                for term in ["MetadataChangedException", "ConcurrentAppendException"]
+            ):
                 if attempt == max_retries:
                     raise
                 sleep_duration = random.uniform(1, 5)
@@ -112,6 +118,7 @@ def merge_with_retry(statement: str, max_retries: int = 5) -> None:
             else:
                 raise
 
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -119,18 +126,21 @@ def merge_with_retry(statement: str, max_retries: int = 5) -> None:
 
 # COMMAND ----------
 
-def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str, trigger_time_str) -> int:
+
+def process_rdbms_multi_refresh(
+    multi_refresh_df, trigger_hhmm, trigger_date_str, trigger_time_str
+) -> int:
     """
     Process RDBMS (Config_Master_ID = 1) schedules.
     Left joins child config + dependency config, saves to temp table, and executes MERGE updates.
     Returns the number of eligible tables found.
     """
     # 1. Filter schedule rows for Config_Master_ID = 1 and keep the latest schedule time per table
-    win_spec = Window.partitionBy(col('Config_Master_ID'), col('Config_ID')).orderBy(col('Curent_Refresh_Time').desc())
-    table_refresh_df = (
-        multi_refresh_df
-        .filter("Config_Master_ID = 1")
-        .withColumn("row_num", row_number().over(win_spec))
+    win_spec = Window.partitionBy(col("Config_Master_ID"), col("Config_ID")).orderBy(
+        col("Curent_Refresh_Time").desc()
+    )
+    table_refresh_df = multi_refresh_df.filter("Config_Master_ID = 1").withColumn(
+        "row_num", row_number().over(win_spec)
     )
     table_refresh_df = table_refresh_df.filter(col("row_num") == 1).drop("row_num")
     table_refresh_df.createOrReplaceTempView("table_refresh_df")
@@ -175,7 +185,7 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
         r_dict = r.asDict()
         res = spark.sql(f"""
             SELECT Pipeline_Name, Source_Name FROM {RDBMS_CFG_TABLE}
-            WHERE Config_Master_ID = {r['Config_Master_ID']} AND Config_ID = {r['Config_ID']}
+            WHERE Config_Master_ID = {r["Config_Master_ID"]} AND Config_ID = {r["Config_ID"]}
             LIMIT 1
         """).collect()
         if res:
@@ -183,17 +193,16 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
             r_dict["Source_Name"] = res[0]["Source_Name"]
             result_rows.append(r_dict)
 
-
     if not result_rows:
         return 0
 
     eligible_df = spark.createDataFrame(result_rows)
     eligible_count = eligible_df.count()
     logger.info(f"[MultiRefresh][RDBMS] {eligible_count} eligible tables found.")
-    
+
     # Write to temp table for SQL MERGE operations
     eligible_df.write.format("delta").mode("overwrite").saveAsTable(ELIGIBLE_TEMP_TABLE)
-    
+
     # MERGE 1: Update status to 'In Progress' in child config table
     merge_with_retry(f"""
         MERGE INTO {RDBMS_CFG_TABLE} t
@@ -251,6 +260,7 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
 
     return eligible_count
 
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -258,17 +268,22 @@ def process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str
 
 # COMMAND ----------
 
-def process_email_delivery_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str, trigger_time_str) -> int:
+
+def process_email_delivery_multi_refresh(
+    multi_refresh_df, trigger_hhmm, trigger_date_str, trigger_time_str
+) -> int:
     """
     Process Email Delivery (Config_Master_ID = 15) schedules.
     """
-    win_spec = Window.partitionBy(col('Config_Master_ID'), col('Config_ID')).orderBy(col('Curent_Refresh_Time').desc())
-    email_data_refresh_df = (
-        multi_refresh_df
-        .filter("Config_Master_ID = 15")
-        .withColumn("row_num", row_number().over(win_spec))
+    win_spec = Window.partitionBy(col("Config_Master_ID"), col("Config_ID")).orderBy(
+        col("Curent_Refresh_Time").desc()
     )
-    email_data_refresh_df = email_data_refresh_df.filter(col("row_num") == 1).drop("row_num")
+    email_data_refresh_df = multi_refresh_df.filter("Config_Master_ID = 15").withColumn(
+        "row_num", row_number().over(win_spec)
+    )
+    email_data_refresh_df = email_data_refresh_df.filter(col("row_num") == 1).drop(
+        "row_num"
+    )
     email_data_refresh_df.createOrReplaceTempView("email_data_refresh_df")
 
     eligible_count = email_data_refresh_df.count()
@@ -276,7 +291,7 @@ def process_email_delivery_multi_refresh(multi_refresh_df, trigger_hhmm, trigger
         return 0
 
     logger.info(f"[MultiRefresh][Email] {eligible_count} eligible tables found.")
-    
+
     # Merge INTO Email delivery config table
     merge_with_retry(f"""
         MERGE INTO {CFG_SCHEMA}.tb_sourcedb_email_delivery t
@@ -300,12 +315,14 @@ def process_email_delivery_multi_refresh(multi_refresh_df, trigger_hhmm, trigger
 
     return eligible_count
 
+
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ### Job Trigger and API Dispatcher
 
 # COMMAND ----------
+
 
 def _resolve_child_table_fqn(config_master_id: int) -> str:
     """
@@ -320,7 +337,9 @@ def _resolve_child_table_fqn(config_master_id: int) -> str:
         .collect()
     )
     if not master_rows:
-        raise ValueError(f"No entry in {CONFIG_MASTER_TABLE} for config_id={config_master_id}")
+        raise ValueError(
+            f"No entry in {CONFIG_MASTER_TABLE} for config_id={config_master_id}"
+        )
     m_row = master_rows[0].asDict()
     return f"{m_row.get('config_catalog_name')}.{m_row.get('config_schema_name')}.{m_row.get('config_table_name')}"
 
@@ -334,7 +353,7 @@ def _active_pipeline_names(child_table_fqn: str) -> set:
     """
     df = spark.table(child_table_fqn)
     pipeline_col = next((c for c in df.columns if c.lower() == "pipeline_name"), None)
-    active_col   = next((c for c in df.columns if c.lower() == "is_active"), None)
+    active_col = next((c for c in df.columns if c.lower() == "is_active"), None)
     if not pipeline_col or not active_col:
         logger.warning(
             f"[MultiRefresh] {child_table_fqn} has no Pipeline_Name/Is_Active "
@@ -342,12 +361,7 @@ def _active_pipeline_names(child_table_fqn: str) -> set:
         )
         return set()
 
-    rows = (
-        df.filter(f"{active_col} = 1")
-        .select(pipeline_col)
-        .distinct()
-        .collect()
-    )
+    rows = df.filter(f"{active_col} = 1").select(pipeline_col).distinct().collect()
     return {r[pipeline_col] for r in rows}
 
 
@@ -366,7 +380,9 @@ def trigger_eligible_jobs(trigger_time_str: str) -> None:
         return
 
     eligible_df = spark.table(ELIGIBLE_TEMP_TABLE)
-    config_master_ids = [r[0] for r in eligible_df.select("Config_Master_ID").distinct().collect()]
+    config_master_ids = [
+        r[0] for r in eligible_df.select("Config_Master_ID").distinct().collect()
+    ]
 
     job_cfg_rows = []
     for cmid in config_master_ids:
@@ -374,37 +390,40 @@ def trigger_eligible_jobs(trigger_time_str: str) -> None:
             child_table_fqn = _resolve_child_table_fqn(cmid)
             active_pipelines = _active_pipeline_names(child_table_fqn)
         except Exception as exc:
-            logger.error(f"[MultiRefresh] Could not resolve child config table for Config_Master_ID={cmid}: {exc}")
+            logger.error(
+                f"[MultiRefresh] Could not resolve child config table for Config_Master_ID={cmid}: {exc}"
+            )
             continue
 
         rows = (
-            eligible_df
-            .filter(f"Config_Master_ID = {int(cmid)}")
+            eligible_df.filter(f"Config_Master_ID = {int(cmid)}")
             .select("Config_Master_ID", "Pipeline_Name", "Source_Name")
             .distinct()
             .collect()
         )
         for row in rows:
             if row["Pipeline_Name"] in active_pipelines:
-                job_cfg_rows.append({
-                    "Databricks_Job_Name": row["Pipeline_Name"],
-                    "Config_Master_ID":    row["Config_Master_ID"],
-                    "Pipeline_Name":       row["Pipeline_Name"],
-                    "Source_Name":         row["Source_Name"],
-                })
+                job_cfg_rows.append(
+                    {
+                        "Databricks_Job_Name": row["Pipeline_Name"],
+                        "Config_Master_ID": row["Config_Master_ID"],
+                        "Pipeline_Name": row["Pipeline_Name"],
+                        "Source_Name": row["Source_Name"],
+                    }
+                )
 
     for row in job_cfg_rows:
-        job_name      = row["Databricks_Job_Name"]
-        cmid          = row["Config_Master_ID"]
+        job_name = row["Databricks_Job_Name"]
+        cmid = row["Config_Master_ID"]
         pipeline_name = row["Pipeline_Name"]
-        source_name   = row["Source_Name"]
+        source_name = row["Source_Name"]
         try:
             run_id = job_trigger.run_now_by_name(
-                job_name        = job_name,
-                notebook_params = {
+                job_name=job_name,
+                notebook_params={
                     "batch_start_date": trigger_time_str,
-                    "pipeline_name":    pipeline_name,
-                    "source_name":      source_name
+                    "pipeline_name": pipeline_name,
+                    "source_name": source_name,
                 },
             )
             logger.info(
@@ -416,6 +435,7 @@ def trigger_eligible_jobs(trigger_time_str: str) -> None:
                 f"[MultiRefresh] Failed to trigger job '{job_name}' "
                 f"for Config_Master_ID={cmid} pipeline={pipeline_name}: {exc}"
             )
+
 
 # COMMAND ----------
 
@@ -429,7 +449,7 @@ logger.info(f"[MultiRefresh] Orchestrator starting. max_iterations={max_iteratio
 
 while iteration < max_iterations:
     iteration += 1
-    
+
     triggerTime = datetime.datetime.now(IST).replace(tzinfo=None)
 
     trigger_hhmm = triggerTime.strftime("%H:%M")
@@ -437,10 +457,10 @@ while iteration < max_iterations:
     trigger_time_str = triggerTime.strftime("%Y-%m-%d %H:%M:%S")
 
     logger.info(
-        f"\n{'='*60}\n"
+        f"\n{'=' * 60}\n"
         f"[MultiRefresh] Iteration {iteration}/{max_iterations} | "
         f"triggerTime = {triggerTime} (IST)\n"
-        f"{'='*60}"
+        f"{'=' * 60}"
     )
 
     # -- Step 1: Query multi-refresh report config IDs (Schedule scan) ----------
@@ -476,8 +496,12 @@ while iteration < max_iterations:
         email_count = 0
     else:
         # -- Step 2 & 3: Run RDBMS & Email Multi Refresh Processors ------------
-        rdbms_count = process_rdbms_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str, trigger_time_str)
-        email_count = process_email_delivery_multi_refresh(multi_refresh_df, trigger_hhmm, trigger_date_str, trigger_time_str)
+        rdbms_count = process_rdbms_multi_refresh(
+            multi_refresh_df, trigger_hhmm, trigger_date_str, trigger_time_str
+        )
+        email_count = process_email_delivery_multi_refresh(
+            multi_refresh_df, trigger_hhmm, trigger_date_str, trigger_time_str
+        )
 
         # -- Step 4: Dispatch job triggers if any RDBMS tables were processed --
         if rdbms_count > 0:
@@ -486,8 +510,8 @@ while iteration < max_iterations:
         # Cleanup temp table
         try:
             spark.sql(f"DROP TABLE IF EXISTS {ELIGIBLE_TEMP_TABLE}")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[MultiRefresh] Could not drop temp table: {exc}")
 
     # -- Step 5: Check completion and wait time -------------------------------
     # 1. wait_second_flag (Any incomplete runs from past windows?)
@@ -529,9 +553,13 @@ while iteration < max_iterations:
         WHERE Refresh_Time > '{trigger_hhmm}'
           AND Is_Active = 1
     """).collect()
-    
-    wait_time_raw = wait_time_rows[0]['difference_in_seconds'] if wait_time_rows else None
-    wait_time = 1 if wait_time_raw is None or wait_second_flag == 1 else int(wait_time_raw)
+
+    wait_time_raw = (
+        wait_time_rows[0]["difference_in_seconds"] if wait_time_rows else None
+    )
+    wait_time = (
+        1 if wait_time_raw is None or wait_second_flag == 1 else int(wait_time_raw)
+    )
     wait_time = max(wait_time, 1)
 
     logger.info(f"[MultiRefresh] is_completed={is_completed}  wait_time={wait_time}s")
@@ -549,9 +577,15 @@ while iteration < max_iterations:
         dbutils.notebook.exit("Day boundary crossed - orchestrator exiting.")
 
     if max_iterations > 1:
-        logger.info(f"[MultiRefresh] Sleeping {wait_time}s until next refresh window...")
+        logger.info(
+            f"[MultiRefresh] Sleeping {wait_time}s until next refresh window..."
+        )
         time.sleep(wait_time)
 
 # -- Safety exit after max_iterations ------------------------------------------
-logger.warning(f"[MultiRefresh] Reached max_iterations={max_iterations}. Force-exiting.")
-dbutils.notebook.exit(f"Multi-refresh orchestrator exited after max_iterations={max_iterations}.")
+logger.warning(
+    f"[MultiRefresh] Reached max_iterations={max_iterations}. Force-exiting."
+)
+dbutils.notebook.exit(
+    f"Multi-refresh orchestrator exited after max_iterations={max_iterations}."
+)

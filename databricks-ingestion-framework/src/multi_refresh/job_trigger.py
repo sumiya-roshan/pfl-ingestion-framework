@@ -21,14 +21,13 @@ Usage:
         notebook_params = {"batch_start_date": "2026-08-20 09:00:00"},
     )
 """
+
 from __future__ import annotations
 
 import json
 import logging
-from typing import Dict, Optional
-
-import urllib.request
 import urllib.error
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
@@ -44,18 +43,20 @@ class JobTrigger:
         self.workspace_url = workspace_url.rstrip("/")
         self._headers = {
             "Authorization": f"Bearer {token}",
-            "Content-Type":  "application/json",
+            "Content-Type": "application/json",
         }
         # Cache: job_name -> job_id, populated lazily
-        self._job_name_cache: Dict[str, int] = {}
+        self._job_name_cache: dict[str, int] = {}
 
     # -- Private helpers ------------------------------------------------------
 
-    def _api(self, method: str, path: str, body: Optional[dict] = None) -> dict:
+    def _api(self, method: str, path: str, body: dict | None = None) -> dict:
         """Make a JSON REST call, return parsed response dict."""
         url = f"{self.workspace_url}{path}"
         data = json.dumps(body).encode("utf-8") if body else None
-        req = urllib.request.Request(url, data=data, headers=self._headers, method=method)
+        req = urllib.request.Request(
+            url, data=data, headers=self._headers, method=method
+        )
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode("utf-8"))
@@ -73,7 +74,7 @@ class JobTrigger:
         if job_name in self._job_name_cache:
             return self._job_name_cache[job_name]
 
-        page_token: Optional[str] = None
+        page_token: str | None = None
         while True:
             params = {"limit": 25, "name": job_name}
             # Build query string
@@ -86,7 +87,9 @@ class JobTrigger:
                 if job.get("settings", {}).get("name") == job_name:
                     job_id = int(job["job_id"])
                     self._job_name_cache[job_name] = job_id
-                    logger.info(f"[JobTrigger] Resolved job '{job_name}' ? job_id={job_id}")
+                    logger.info(
+                        f"[JobTrigger] Resolved job '{job_name}' ? job_id={job_id}"
+                    )
                     return job_id
 
             if resp.get("has_more") and resp.get("next_page_token"):
@@ -104,7 +107,7 @@ class JobTrigger:
     def run_now_by_name(
         self,
         job_name: str,
-        notebook_params: Optional[Dict[str, str]] = None,
+        notebook_params: dict[str, str] | None = None,
     ) -> int:
         """
         Trigger a job by NAME (fire-and-forget).

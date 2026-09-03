@@ -34,19 +34,17 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 import sys
+
 sys.path.append("..")
 
 import json
-from ingestion.utils.config_manager import (
-    ConfigManager,
-    SourceSystemConfig,
-    IngestionTaskConfig,
-    SOURCE_SYSTEM_TABLE,
-    CONFIG_MASTER_TABLE,
-    AUDIT_TABLE,
-    AUDIT_STATUS_SKIPPED,
-)
+
 from ingestion.utils.audit import AuditLogger
+from ingestion.utils.config_manager import (
+    AUDIT_TABLE,
+    IngestionTaskConfig,
+    SourceSystemConfig,
+)
 from ingestion.utils.logger import get_logger
 from ingestion.utils.secrets import SecretResolver
 from lookup.lookup_executor import LookupExecutor
@@ -58,18 +56,26 @@ from lookup.lookup_executor import LookupExecutor
 
 # COMMAND ----------
 
-PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT = "migration_x_catalog.pfl_x_schema.pipeline_lookup_config"
+PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT = (
+    "migration_x_catalog.pfl_x_schema.pipeline_lookup_config"
+)
 
-dbutils.widgets.text("config_master_id",             "",                                   "Config Master ID")
-dbutils.widgets.text("source_system_id",              "",                                   "Source System ID")
-dbutils.widgets.text("target_catalog",                "hive_metastore",                     "Target Catalog")
-dbutils.widgets.text("pipeline_name",                 "",                                   "Pipeline Name")
-dbutils.widgets.text("job_run_id",                 "",                                  "Job Run ID — set to {{job.run_id}}")
-dbutils.widgets.text("job_id",                     "",                                  "Job ID — set to {{job.id}}")
-dbutils.widgets.text("environment",                "dev",                               "Environment: dev | uat | prod")
-dbutils.widgets.text("audit_table",                AUDIT_TABLE,                         "Audit Table (override)")
-dbutils.widgets.text("pipeline_lookup_config_table", PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT, "pipeline_lookup_config FQN")
-dbutils.widgets.text("tasks_metadata_task_name",    "get_tasks",                          "Task name for active tasks metadata")
+dbutils.widgets.text("config_master_id", "", "Config Master ID")
+dbutils.widgets.text("source_system_id", "", "Source System ID")
+dbutils.widgets.text("target_catalog", "hive_metastore", "Target Catalog")
+dbutils.widgets.text("pipeline_name", "", "Pipeline Name")
+dbutils.widgets.text("job_run_id", "", "Job Run ID — set to {{job.run_id}}")
+dbutils.widgets.text("job_id", "", "Job ID — set to {{job.id}}")
+dbutils.widgets.text("environment", "dev", "Environment: dev | uat | prod")
+dbutils.widgets.text("audit_table", AUDIT_TABLE, "Audit Table (override)")
+dbutils.widgets.text(
+    "pipeline_lookup_config_table",
+    PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT,
+    "pipeline_lookup_config FQN",
+)
+dbutils.widgets.text(
+    "tasks_metadata_task_name", "get_tasks", "Task name for active tasks metadata"
+)
 
 # COMMAND ----------
 
@@ -81,27 +87,29 @@ source_system_id_raw = dbutils.widgets.get("source_system_id") or None
 if not config_master_id_raw or not source_system_id_raw:
     dbutils.notebook.exit("Error: config_master_id and source_system_id are required.")
 
-config_master_id  = int(config_master_id_raw)
-source_system_id  = int(source_system_id_raw)
-target_catalog    = dbutils.widgets.get("target_catalog")   or "hive_metastore"
-pipeline_name     = dbutils.widgets.get("pipeline_name")    or None
+config_master_id = int(config_master_id_raw)
+source_system_id = int(source_system_id_raw)
+target_catalog = dbutils.widgets.get("target_catalog") or "hive_metastore"
+pipeline_name = dbutils.widgets.get("pipeline_name") or None
 try:
-    job_run_id    = dbutils.widgets.get("job_run_id")       or "MANUAL"
+    job_run_id = dbutils.widgets.get("job_run_id") or "MANUAL"
 except Exception:
-    job_run_id    = "MANUAL"
+    job_run_id = "MANUAL"
 
 try:
-    job_id        = dbutils.widgets.get("job_id")           or "MANUAL"
+    job_id = dbutils.widgets.get("job_id") or "MANUAL"
 except Exception:
-    job_id        = "MANUAL"
+    job_id = "MANUAL"
 
-environment       = dbutils.widgets.get("environment")      or "dev"
-audit_table       = dbutils.widgets.get("audit_table")      or AUDIT_TABLE
-lookup_cfg_table  = (
+environment = dbutils.widgets.get("environment") or "dev"
+audit_table = dbutils.widgets.get("audit_table") or AUDIT_TABLE
+lookup_cfg_table = (
     dbutils.widgets.get("pipeline_lookup_config_table")
     or PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT
 )
-tasks_metadata_task_name = dbutils.widgets.get("tasks_metadata_task_name") or "get_tasks"
+tasks_metadata_task_name = (
+    dbutils.widgets.get("tasks_metadata_task_name") or "get_tasks"
+)
 
 if not pipeline_name:
     dbutils.notebook.exit("Error: pipeline_name widget is required.")
@@ -128,22 +136,28 @@ loaded_from_metadata = False
 # Try reading from upstream Task 0 metadata
 try:
     active_tasks_raw = dbutils.jobs.taskValues.get(
-        taskKey    = tasks_metadata_task_name,
-        key        = "active_tasks_metadata",
-        default    = None,
-        debugValue = None,
+        taskKey=tasks_metadata_task_name,
+        key="active_tasks_metadata",
+        default=None,
+        debugValue=None,
     )
     if active_tasks_raw and active_tasks_raw.strip():
         payload = json.loads(active_tasks_raw)
         source_sys = SourceSystemConfig.from_dict(payload["source_sys"])
         tasks = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
         loaded_from_metadata = True
-        print(f"Loaded active tasks metadata from upstream task: {tasks_metadata_task_name}")
+        print(
+            f"Loaded active tasks metadata from upstream task: {tasks_metadata_task_name}"
+        )
 except Exception as l_exc:
-    print(f"[INFO] Failed to fetch metadata from taskValues ({l_exc}) — falling back to database query.")
+    print(
+        f"[INFO] Failed to fetch metadata from taskValues ({l_exc}) — falling back to database query."
+    )
 
 if not loaded_from_metadata:
-    raise Exception("Testing Error: Failed to load task configurations from upstream get_tasks metadata!")
+    raise RuntimeError(
+        "Testing Error: Failed to load task configurations from upstream get_tasks metadata!"
+    )
 
 print(f"\nResolved source : {source_sys.source_name} ({source_sys.source_type})")
 print(f"Active tasks    : {len(tasks)}")
@@ -152,8 +166,8 @@ if not tasks:
     print("No active tasks — publishing empty active_config_ids and exiting.")
     try:
         dbutils.jobs.taskValues.set(key="active_config_ids", value="")
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[INFO] taskValues not available (standalone mode): {exc}")
     dbutils.notebook.exit("No active ingestion tasks found.")
 
 # COMMAND ----------
@@ -167,9 +181,9 @@ if not tasks:
 
 # COMMAND ----------
 
-lookup_query_template: str = None   # None → auto-generate per table
+lookup_query_template: str = None  # None → auto-generate per table
 max_workers_raw = None
-query_timeout_raw = None   # 'HH:mm:ss' — None → no source query timeout applied
+query_timeout_raw = None  # 'HH:mm:ss' — None → no source query timeout applied
 
 try:
     cfg_df = spark.table(lookup_cfg_table)
@@ -190,7 +204,7 @@ try:
             f"AND is_active = true"
         )
         .select(*select_cols)
-        .limit(1)      # one row per pipeline (enforced by UNIQUE constraint)
+        .limit(1)  # one row per pipeline (enforced by UNIQUE constraint)
         .collect()
     )
 
@@ -230,16 +244,16 @@ except Exception as e:
 
 # COMMAND ----------
 
-logger  = get_logger(environment=environment)
+logger = get_logger(environment=environment)
 secrets = SecretResolver(dbutils)
-audit   = AuditLogger(spark, audit_table=audit_table)
+audit = AuditLogger(spark, audit_table=audit_table)
 
 # LookupExecutor receives the pipeline-level template and applies it per table
 executor = LookupExecutor(
-    spark                 = spark,
-    secrets               = secrets,
-    logger                = logger,
-    lookup_query_template = lookup_query_template,   # None → auto-gen
+    spark=spark,
+    secrets=secrets,
+    logger=logger,
+    lookup_query_template=lookup_query_template,  # None → auto-gen
 )
 
 # Route max_workers to max_workers_raw if configured in DB, else default to 4
@@ -247,9 +261,9 @@ lookup_max_workers = int(max_workers_raw) if max_workers_raw is not None else 4
 print(f"Starting lookup checks with {lookup_max_workers} worker threads.")
 
 lookup_results = executor.run_all(
-    source_sys  = source_sys,
-    tasks       = tasks,
-    max_workers = lookup_max_workers,
+    source_sys=source_sys,
+    tasks=tasks,
+    max_workers=lookup_max_workers,
 )
 
 # COMMAND ----------
@@ -259,20 +273,16 @@ lookup_results = executor.run_all(
 
 # COMMAND ----------
 
+
 def get_databricks_job_context():
-    context = (
-        dbutils.notebook.entry_point
-        .getDbutils()
-        .notebook()
-        .getContext()
-    )
+    context = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
 
     def get_context_value(method_name):
         try:
             return getattr(context, method_name)().get()
         except Exception:
             return None
-            
+
     databricks_url = get_context_value("apiUrl")
     try:
         job_id = dbutils.widgets.get("job_id")
@@ -280,9 +290,7 @@ def get_databricks_job_context():
         job_id = None
 
     databricks_url = (
-        f"{databricks_url}/#job/{job_id}"
-        if databricks_url and job_id
-        else None
+        f"{databricks_url}/#job/{job_id}" if databricks_url and job_id else None
     )
     return {
         "job_id": get_context_value("jobId"),
@@ -294,19 +302,20 @@ def get_databricks_job_context():
         "trigger_name": get_context_value("triggerName"),
     }
 
+
 job_context = get_databricks_job_context()
 job_context["job_run_id"] = job_run_id
 
-active_config_ids = []   # config_ids with count > 0 (passed to main.py)
-skipped_count     = 0
-error_count       = 0
+active_config_ids = []  # config_ids with count > 0 (passed to main.py)
+skipped_count = 0
+error_count = 0
 
 for result in lookup_results:
-    config_id    = result["config_id"]
-    object_name  = result["source_object_name"]
-    count        = result["count"]
-    included     = result["included"]
-    error        = result["error"]
+    config_id = result["config_id"]
+    object_name = result["source_object_name"]
+    count = result["count"]
+    included = result["included"]
+    error = result["error"]
     resolved_qry = result["resolved_query"]
 
     if error and count == -1:
@@ -329,15 +338,12 @@ for result in lookup_results:
         if task_obj:
             try:
                 audit.log_skipped_row(
-                    task             = task_obj,
-                    source_sys       = source_sys,
-                    job_context      = job_context,
-                    pipeline_name    = pipeline_name,
-                    config_master_id = config_master_id,
-                    reason           = (
-                        f"Source lookup returned 0 rows. "
-                        f"Query: {resolved_qry}"
-                    ),
+                    task=task_obj,
+                    source_sys=source_sys,
+                    job_context=job_context,
+                    pipeline_name=pipeline_name,
+                    config_master_id=config_master_id,
+                    reason=(f"Source lookup returned 0 rows. Query: {resolved_qry}"),
                 )
             except Exception as audit_exc:
                 logger.error(
@@ -355,36 +361,36 @@ for result in lookup_results:
 
 # COMMAND ----------
 
-print(f"\n{'='*85}")
+print(f"\n{'=' * 85}")
 print(f"{'CONF ID':>8}  {'OBJECT':<30}  {'COUNT':>10}  {'STATUS':<12}  ERROR")
-print(f"{'='*85}")
+print(f"{'=' * 85}")
 
 for result in sorted(lookup_results, key=lambda x: x["config_id"]):
-    conf_id  = result["config_id"]
+    conf_id = result["config_id"]
     obj_name = result["source_object_name"][:30]
-    count    = result["count"]
-    error    = (result.get("error") or "")[:35]
+    count = result["count"]
+    error = (result.get("error") or "")[:35]
 
     if count == -1:
-        status    = "ERROR"
+        status = "ERROR"
         count_str = "ERROR"
     elif result["included"]:
-        status    = "INCLUDED"
+        status = "INCLUDED"
         count_str = str(count)
     else:
-        status    = "SKIPPED"
+        status = "SKIPPED"
         count_str = "0"
 
     print(f"{conf_id:>8}  {obj_name:<30}  {count_str:>10}  {status:<12}  {error}")
 
-print(f"{'='*85}")
+print(f"{'=' * 85}")
 print(
     f"Total: {len(lookup_results)} | "
     f" Included: {len(active_config_ids)} | "
     f" Skipped: {skipped_count} | "
     f" Errors (fail-safe included): {error_count}"
 )
-print(f"{'='*85}\n")
+print(f"{'=' * 85}\n")
 
 # COMMAND ----------
 
@@ -409,7 +415,9 @@ filtered_payload_str = json.dumps(filtered_payload)
 
 try:
     dbutils.jobs.taskValues.set(key="active_config_ids", value=active_ids_str)
-    dbutils.jobs.taskValues.set(key="filtered_tasks_metadata", value=filtered_payload_str)
+    dbutils.jobs.taskValues.set(
+        key="filtered_tasks_metadata", value=filtered_payload_str
+    )
     print("taskValues.set() succeeded.")
 except Exception as e:
     # Running outside a job (standalone notebook run) — not an error.

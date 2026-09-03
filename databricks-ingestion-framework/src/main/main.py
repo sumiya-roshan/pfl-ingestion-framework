@@ -33,22 +33,24 @@
 
 # COMMAND ----------
 
+import json
 import sys
-from datetime import date, datetime
+from datetime import datetime, timezone
 sys.path.append("..")
-
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ingestion.utils.config_manager import (
     AUDIT_STATUS_FAILED,
-    AUDIT_STATUS_SUCCESS,
     AUDIT_STATUS_SKIPPED,
+    AUDIT_STATUS_SUCCESS,
+    AUDIT_TABLE,
+    CONFIG_MASTER_TABLE,
+    DEPENDENCY_TABLE,
+    SOURCE_SYSTEM_TABLE,
     ConfigManager,
     IngestionTaskConfig,
-    SOURCE_SYSTEM_TABLE,
-    CONFIG_MASTER_TABLE,
-    AUDIT_TABLE,
-    DEPENDENCY_TABLE,
+    SourceSystemConfig,
 )
+from ingestion.utils.logger import _upload_on_exit, configure_s3_logging, get_logger
 from ingestion.utils.orchestrator import IngestionOrchestrator
 
 # COMMAND ----------
@@ -60,70 +62,44 @@ from ingestion.utils.orchestrator import IngestionOrchestrator
 
 dbutils.widgets.text("config_master_id",    "",               "Config Master ID (int — routes to correct child config table)")
 dbutils.widgets.text("source_system_id",    "",               "Source System ID (int — fetches credentials + source_name)")
-dbutils.widgets.text("target_catalog",      "",               "Target Catalog (e.g. main, hive_metastore)")
 dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (required)")
 dbutils.widgets.text("job_run_id",          "",               "Job Run ID (required) — set to {{job.run_id}} in job config")
-# dbutils.widgets.text("trigger_type",        "",               "Trigger Type (required) — SCHEDULED | MANUAL | EVENT")
-dbutils.widgets.text("landing_volume_path", "",               "Landing Volume Base Path (blank = skip landing write)")
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
-dbutils.widgets.text("audit_table",         AUDIT_TABLE,      "Audit Table (override)")
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
-dbutils.widgets.text("max_workers",         "4",              "Max parallel workers (lookup + extraction per task)")
-dbutils.widgets.text("dependency_table",    DEPENDENCY_TABLE, "Dependency Table (override)")
 dbutils.widgets.text("silver_notebook_path",    "",           "Workspace path to Silver transformation notebook (blank = skip Silver trigger)")
 dbutils.widgets.text("silver_notebook_timeout", "3600",       "Max seconds to wait for each Silver notebook run")
 
 # COMMAND ----------
 
-process_timestamp = datetime.utcnow()
-print(f"Using process_timestamp for this ingestion batch: {process_timestamp}")
-
 config_master_id_raw = dbutils.widgets.get("config_master_id") or None
 source_system_id_raw = dbutils.widgets.get("source_system_id") or None
-
 if not config_master_id_raw or not source_system_id_raw:
     dbutils.notebook.exit("Error: config_master_id and source_system_id are required.")
 
 config_master_id     = int(config_master_id_raw)
 source_system_id     = int(source_system_id_raw)
-
-target_catalog       = dbutils.widgets.get("target_catalog")       or "hive_metastore"
 pipeline_name        = dbutils.widgets.get("pipeline_name")        or None
-try:
-    job_id              = dbutils.widgets.get("job_id")           or None
-except Exception:
-    job_id              = None
+job_id               = dbutils.widgets.get("job_id")           or None
 job_run_id           = dbutils.widgets.get("job_run_id")           or None
-# trigger_type         = dbutils.widgets.get("trigger_type")         or None
 
 if not pipeline_name:
     dbutils.notebook.exit("Error: pipeline_name widget is required and cannot be empty.")
 if not job_run_id:
     dbutils.notebook.exit("Error: job_run_id widget is required and cannot be empty.")
-# if not trigger_type:
-#     dbutils.notebook.exit("Error: trigger_type widget is required and cannot be empty.")
 
-landing_volume_path  = dbutils.widgets.get("landing_volume_path")  or None
 environment          = dbutils.widgets.get("environment")          or "dev"
-audit_table          = dbutils.widgets.get("audit_table")          or AUDIT_TABLE
 batch_start_date_raw = dbutils.widgets.get("batch_start_date")     or "1"
-max_workers          = int(dbutils.widgets.get("max_workers") or "4")
-
-from ingestion.utils.logger import get_logger
-logger = get_logger(environment=environment)
+logger               = get_logger(environment=environment)
 
 # Parse batch_start_date_raw to datetime object if it is from the orchestrator
-from datetime import datetime
 parsed_batch_start_date = None
 if batch_start_date_raw and str(batch_start_date_raw).strip() != "1":
     try:
         clean_dt = str(batch_start_date_raw).replace("T", " ").split(".")[0]
-        parsed_batch_start_date = datetime.strptime(clean_dt, "%Y-%m-%d %H:%M:%S")
+        parsed_batch_start_date = datetime.strptime(clean_dt, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
         print(f"Using parsed batch_start_date: {parsed_batch_start_date}")
     except Exception as parse_err:
         print(f"[Warning] Failed to parse batch_start_date '{batch_start_date_raw}': {parse_err}")
-dependency_table     = dbutils.widgets.get("dependency_table")     or DEPENDENCY_TABLE
-
 silver_notebook_path    = dbutils.widgets.get("silver_notebook_path")    or None
 silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
 
@@ -154,11 +130,7 @@ def get_databricks_job_context():
         except Exception:
             return None
     databricks_url = get_context_value("apiUrl")
-    try:
-        job_id = dbutils.widgets.get("job_id")
-    except Exception:
-        job_id = None
-
+    job_id         = dbutils.widgets.get("job_id")
     databricks_url = (
         f"{databricks_url}/#job/{job_id}"
         if databricks_url and job_id
@@ -167,7 +139,7 @@ def get_databricks_job_context():
     return {
         "job_id": get_context_value("jobId"),
         "job_name": get_context_value("jobName"),
-        "notebook_name": get_context_value("notebookPath"),
+        "notebook_name": get_context_value("notebookPath"), #Can change it to point silver notebook path later
         "databricks_url": databricks_url,
         "trigger_type": get_context_value("triggerType"),
         "trigger_id": get_context_value("triggerId"),
@@ -176,19 +148,14 @@ def get_databricks_job_context():
 
 
 job_context = get_databricks_job_context()
-
-# ── job_run_id and trigger_type from widget values ──
-print(f"job_run_id   : {job_run_id}")
-# print(f"trigger_type : {trigger_type}")
-
 job_context["job_run_id"]   = job_run_id
-# job_context["trigger_type"] = trigger_type
 
 # pipeline_start_time is job-level — captured ONCE here, before the table
 # fan-out below, and threaded through job_context so every table's
 # DependencyLogger row uses the same value (see orchestrator.run()).
-pipeline_start_time = datetime.utcnow()
+pipeline_start_time = datetime.now(timezone.utc)
 job_context["pipeline_start_time"] = pipeline_start_time
+
 print(f"pipeline_start_time (job-level): {pipeline_start_time}")
 
 # COMMAND ----------
@@ -214,9 +181,6 @@ print(f"pipeline_name from widget: '{pipeline_name}'")
 
 # COMMAND ----------
 
-import json
-from ingestion.utils.config_manager import SourceSystemConfig, IngestionTaskConfig
-
 payload_str = None
 try:
     payload_str = dbutils.jobs.taskValues.get(
@@ -225,8 +189,8 @@ try:
         default   = None,
         debugValue = None,
     )
-except Exception:
-    pass  # taskValues not available in standalone mode
+except Exception as exc:
+    print(f"[INFO] taskValues not available (standalone mode): {exc}")
 
 # config_mgr is needed regardless of mode — IngestionOrchestrator uses it
 # later for Silver_Last_Sink_Date bookkeeping (see orchestrator.run()), even
@@ -236,7 +200,6 @@ config_mgr = ConfigManager(
     spark,
     source_system_table = SOURCE_SYSTEM_TABLE,
     config_master_table = CONFIG_MASTER_TABLE,
-    target_catalog      = target_catalog,
 )
 
 if payload_str:
@@ -259,10 +222,9 @@ print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
 print(f"Active tasks    : {len(tasks)}")
 
 # Configure S3/Volume logging dynamically
-resolved_landing_path = landing_volume_path or source_sys.landing_volume_path
+resolved_landing_path = source_sys.landing_volume_path
 if resolved_landing_path:
     s3_log_path = f"{resolved_landing_path.rstrip('/')}/logs/{pipeline_name}_{job_run_id}.log"
-    from ingestion.utils.logger import configure_s3_logging
     configure_s3_logging(s3_log_path, dbutils=dbutils)
 
 logger.info(f"Pipeline started for source: {source_sys.source_name} ({source_sys.source_type})")
@@ -271,9 +233,7 @@ if not tasks:
     dbutils.notebook.exit("No active ingestion tasks found for this pipeline.")
 
 # NOTE: max_workers is now derived dynamically from the distinct batch_id count
-# for this pipeline in the execution section below. The widget / config
-# Max_Workers value is no longer used to size the thread pool.
-
+# for this pipeline in the execution section below.
 # COMMAND ----------
 
 # MAGIC %md
@@ -285,13 +245,11 @@ if not tasks:
 trigger_id = job_run_id
 job_context["trigger_id"] = trigger_id
 
-job_context["trigger_id"] = trigger_id
-
 orchestrator = IngestionOrchestrator(
     spark,
     dbutils,
-    audit_table             = audit_table,
-    dependency_table        = dependency_table,
+    audit_table             = AUDIT_TABLE,
+    dependency_table        = DEPENDENCY_TABLE,
     pipeline_name           = pipeline_name,
     environment             = environment,
     silver_notebook_path    = silver_notebook_path,
@@ -299,7 +257,7 @@ orchestrator = IngestionOrchestrator(
     config_mgr              = config_mgr,
 )
 
-import threading
+
 
 def run_one(task: IngestionTaskConfig) -> dict:
     logger.info(f"Processing table {task.source_object_name}")
@@ -316,12 +274,10 @@ def run_one(task: IngestionTaskConfig) -> dict:
         source_sys          = source_sys,
         task                = task,
         config_master_id    = config_master_id,   # ← routing table ID from widget
-        landing_volume_path = landing_volume_path,
+        landing_volume_path = resolved_landing_path,
         trigger_id          = trigger_id,
-        # trigger_type        = trigger_type,
         job_context          = job_context,
         sink_batch_started_date = parsed_batch_start_date,
-        process_timestamp     = process_timestamp,
     )
 
 
@@ -419,7 +375,7 @@ orchestrator.dependency.complete_job(job_run_id)
 # MAGIC "silver_result" — no separate wait step needed.
 
 # COMMAND ----------
-
+# optional can be removed 
 STATUS_ICONS = {
     AUDIT_STATUS_SUCCESS: "✅",
     AUDIT_STATUS_SKIPPED: "⏭️",
@@ -461,7 +417,6 @@ print(
 
 # COMMAND ----------
 
-from ingestion.utils.logger import _upload_on_exit
 
 if failed:
     failed_ids = [r["config_id"] for r in failed]
@@ -471,7 +426,7 @@ if failed:
         f"Failed Config IDs: {failed_ids}"
         f"{len(silver_failed)} of {len(silver_results)} Silver trigger(s) FAILED "
         f"(Config IDs: {silver_failed_ids}). "
-        f"Check the audit table and logs above for details."       
+        f"Check the audit table and logs above for details."
     )
     _upload_on_exit()
 
@@ -483,5 +438,4 @@ dbutils.notebook.exit(
 )
 
 # COMMAND ----------
-
 

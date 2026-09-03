@@ -3,8 +3,10 @@ Generic retry helper for source-connection operations (e.g. the initial
 `select *` pull from a JDBC/Mongo/SFTP/S3 source). Not intended for writes
 or transformations — those should fail fast rather than silently repeat.
 """
+
 import time
-from typing import Callable, Optional, TypeVar
+from collections.abc import Callable
+from typing import TypeVar
 
 T = TypeVar("T")
 

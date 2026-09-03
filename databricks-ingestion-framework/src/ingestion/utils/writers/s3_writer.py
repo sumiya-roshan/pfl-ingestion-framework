@@ -16,28 +16,26 @@ Output path structure
 Supported formats (driven by ingestion_config.file_format):
   parquet (default) | delta | csv | json
 """
-from datetime import datetime
-from typing import Optional
 
+from datetime import datetime
+
+from databricks.sdk.runtime import dbutils
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
-from databricks.sdk.runtime import dbutils
-
 
 class S3RawWriter:
-
     def write(
         self,
         df: DataFrame,
         landing_volume_path: str,
         source_name: str,
-        source_schema: Optional[str],
+        source_schema: str | None,
         source_object_name: str,
         file_format: str = "parquet",
         mode: str = "append",
-        file_prefix: Optional[str] = None,
-        file_timestamp: Optional[datetime] = None,
+        file_prefix: str | None = None,
+        file_timestamp: datetime | None = None,
     ) -> str:
         """
         Write *df* to the landing path and return the full target path.
@@ -81,7 +79,7 @@ class S3RawWriter:
         source_object_name: str,
         timestamp: str,
         file_format: str,
-        filename_prefix: Optional[str],
+        filename_prefix: str | None,
     ) -> str:
         base = f"{source_object_name}_{timestamp}.{file_format}"
         return f"{filename_prefix}_{base}" if filename_prefix else base
@@ -98,7 +96,9 @@ class S3RawWriter:
 
         part_files = [f for f in files if f.name.startswith("part-")]
         if not part_files:
-            raise FileNotFoundError(f"No part-* file found under {target_path} to rename")
+            raise FileNotFoundError(
+                f"No part-* file found under {target_path} to rename"
+            )
 
         part_file = part_files[0].path
         dbutils.fs.mv(part_file, f"{target_path}/{final_filename}")

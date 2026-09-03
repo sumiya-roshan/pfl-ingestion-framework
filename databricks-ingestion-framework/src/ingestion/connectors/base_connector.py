@@ -4,16 +4,15 @@ Common interface every connector implements.
 The orchestrator only ever talks to this interface, so adding a new source
 type means adding one new connector class + one line in connectors/factory.py.
 """
+
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
 
 from pyspark.sql import DataFrame
 
-from ..utils.config_manager import SourceSystemConfig, IngestionTaskConfig
+from ..utils.config_manager import IngestionTaskConfig, SourceSystemConfig
 
 
 class BaseConnector(ABC):
-
     def __init__(
         self,
         spark,
@@ -22,12 +21,12 @@ class BaseConnector(ABC):
         secrets,
     ):
         self.spark = spark
-        self.source_system = source_system   # config_source_system row
-        self.ingest_obj = ingest_obj         # ingestion_config row
-        self.secrets = secrets               # SecretResolver instance
+        self.source_system = source_system  # config_source_system row
+        self.ingest_obj = ingest_obj  # ingestion_config row
+        self.secrets = secrets  # SecretResolver instance
 
     @abstractmethod
-    def extract(self, watermark_start: Optional[str]) -> Tuple[DataFrame, Optional[str]]:
+    def extract(self, watermark_start: str | None) -> tuple[DataFrame, str | None]:
         """
         Extract data from the source and return (DataFrame, max_watermark_or_None).
 

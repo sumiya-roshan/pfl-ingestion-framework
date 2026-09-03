@@ -12,6 +12,7 @@ to look any of it up again.
 dbutils is passed in from the calling notebook since it is a notebook-level
 object and cannot be imported as a module.
 """
+
 import logging
 
 log = logging.getLogger("ingestion_framework")
@@ -31,9 +32,9 @@ class SilverProcessor:
     """
 
     def __init__(self, dbutils, silver_notebook_path: str, timeout_seconds: int = 3600):
-        self.dbutils               = dbutils
-        self.silver_notebook_path  = silver_notebook_path
-        self.timeout_seconds       = timeout_seconds
+        self.dbutils = dbutils
+        self.silver_notebook_path = silver_notebook_path
+        self.timeout_seconds = timeout_seconds
 
     def trigger(
         self,
@@ -79,17 +80,17 @@ class SilverProcessor:
             self.silver_notebook_path,
             self.timeout_seconds,
             {
-                "config_id":          str(config_id),
-                "source_system_id":   str(source_system_id),
-                "landing_path":       landing_path,
-                "file_format":        file_format or "parquet",
-                "silver_catalog":     silver_catalog or "",
-                "silver_schema":      silver_schema or "",
-                "silver_table":       silver_table or "",
-                "source_schema":      source_schema or "",
+                "config_id": str(config_id),
+                "source_system_id": str(source_system_id),
+                "landing_path": landing_path,
+                "file_format": file_format or "parquet",
+                "silver_catalog": silver_catalog or "",
+                "silver_schema": silver_schema or "",
+                "silver_table": silver_table or "",
+                "source_schema": source_schema or "",
                 "source_object_name": source_object_name or "",
-                "load_type":          load_type or "",
-                "primary_key_cols":   primary_key_cols or "",
+                "load_type": load_type or "",
+                "primary_key_cols": primary_key_cols or "",
             },
         )
 
@@ -98,9 +99,9 @@ class SilverProcessor:
             f"exit_value='{exit_value}'"
         )
         return {
-            "config_id":  config_id,
-            "target":     target,
-            "status":     "SUCCESS",
+            "config_id": config_id,
+            "target": target,
+            "status": "SUCCESS",
             "exit_value": exit_value,
-            "error":      None,
+            "error": None,
         }

@@ -14,15 +14,13 @@ Schema evolution (driven by ingestion_config.schema_evolution_mode):
 Serverless compatibility:
   Uses DataFrameWriterV2 (writeTo) API throughout — no saveAsTable/PERSIST TABLE.
 """
-from typing import List, Optional
 
+from delta.tables import DeltaTable
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
-from delta.tables import DeltaTable
 
 
 class BronzeWriter:
-
     def __init__(self, spark):
         self.spark = spark
 
@@ -33,9 +31,9 @@ class BronzeWriter:
         schema: str,
         table: str,
         write_mode: str = "append",
-        merge_keys: Optional[List[str]] = None,
-        schema_evolution_mode: Optional[str] = None,
-        partition_column: Optional[str] = None,
+        merge_keys: list[str] | None = None,
+        schema_evolution_mode: str | None = None,
+        partition_column: str | None = None,
     ) -> str:
         full_table_name = f"{catalog}.{schema}.{table}"
         evo = (schema_evolution_mode or "none").lower()
@@ -99,9 +97,7 @@ class BronzeWriter:
                         df = df.withColumn(col, F.lit(None))
 
             target = DeltaTable.forName(self.spark, full_table_name)
-            condition = " AND ".join(
-                [f"target.{k} = source.{k}" for k in merge_keys]
-            )
+            condition = " AND ".join([f"target.{k} = source.{k}" for k in merge_keys])
             (
                 target.alias("target")
                 .merge(df.alias("source"), condition)

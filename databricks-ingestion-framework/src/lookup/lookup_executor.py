@@ -8,14 +8,16 @@ whether data is present. Tables with zero rows are excluded from ingestion
 and logged to the audit table as SKIPPED — without ever calling extract().
 
 """
+
 from __future__ import annotations
-from typing import Dict
-from ingestion.utils.watermark import resolve_watermark
-from lookup.lookup_query_builder import build_lookup_query, detect_pattern_type
+
 from ingestion.connectors.factory import get_connector
+from ingestion.connectors.federated_connector import FederatedConnector
 from ingestion.connectors.jdbc_connector import JdbcConnector
 from ingestion.connectors.mongo_connector import MongoConnector
-from ingestion.connectors.federated_connector import FederatedConnector
+from ingestion.utils.watermark import resolve_watermark
+from lookup.lookup_query_builder import build_lookup_query, detect_pattern_type
+
 
 class LookupExecutor:
     """
@@ -33,11 +35,9 @@ class LookupExecutor:
     """
 
     def __init__(self, spark, secrets, logger):
-        self.spark   = spark
+        self.spark = spark
         self.secrets = secrets
-        self.logger  = logger
-
-
+        self.logger = logger
 
     # ── Probe query construction ────────────────────────────────────────────
 
@@ -125,7 +125,9 @@ class LookupExecutor:
                 predicates.append(predicate)
 
         where_clause = f" WHERE {' AND '.join(predicates)}" if predicates else ""
-        return f"SELECT {key_col} FROM ({source_query}) _src_wrapped{where_clause} LIMIT 1"
+        return (
+            f"SELECT {key_col} FROM ({source_query}) _src_wrapped{where_clause} LIMIT 1"
+        )
 
     # ── Strategy: JDBC ───────────────────────────────────────────────────────
 
@@ -176,7 +178,7 @@ class LookupExecutor:
         Reuses the connector's solved URI, database, and collection properties.
         """
         try:
-            import pymongo  # noqa: PLC0415
+            import pymongo
         except ImportError:
             self.logger.warning(
                 "[LookupExecutor] pymongo not available — including MongoDB "
@@ -184,8 +186,8 @@ class LookupExecutor:
             )
             return 1
 
-        uri        = connector._build_connection_uri()
-        database   = connector._resolve_database()
+        uri = connector._build_connection_uri()
+        database = connector._resolve_database()
         collection = connector._resolve_collection()
 
         client = pymongo.MongoClient(uri)
@@ -195,23 +197,21 @@ class LookupExecutor:
         finally:
             client.close()
 
-
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def check_presence(self, source_sys, task) -> Dict:
+    def check_presence(self, source_sys, task) -> dict:
         """
         Run a presence check for one ingestion task — the entry point used by
         IngestionOrchestrator.run() to gate extraction. Dispatches to the JDBC,
         MongoDB, Lakehouse Federation, or file-based strategy. Retries on the
         source system's retry_count/retry_interval.
         """
-        config_id      = task.config_id
-        object_name    = task.source_object_name
+        config_id = task.config_id
+        object_name = task.source_object_name
         resolved_query = None
 
-        max_retries    = int(getattr(source_sys, "retry_count", 0) or 0)
+        max_retries = int(getattr(source_sys, "retry_count", 0) or 0)
         retry_interval = int(getattr(source_sys, "retry_interval", 0) or 0)
-
 
         attempt = 0
         while True:
@@ -220,7 +220,9 @@ class LookupExecutor:
 
                 if isinstance(connector, JdbcConnector):
                     resolved_query = self._build_jdbc_probe_query(source_sys, task)
-                    self.logger.debug(f"[LookupExecutor] Lookup query generated: {resolved_query}")
+                    self.logger.debug(
+                        f"[LookupExecutor] Lookup query generated: {resolved_query}"
+                    )
                     count = self._lookup_jdbc(connector, resolved_query)
 
                 elif isinstance(connector, MongoConnector):
@@ -229,7 +231,9 @@ class LookupExecutor:
 
                 elif isinstance(connector, FederatedConnector):
                     resolved_query = self._build_federated_probe_query(source_sys, task)
-                    self.logger.debug(f"[LookupExecutor] Lookup query generated: {resolved_query}")
+                    self.logger.debug(
+                        f"[LookupExecutor] Lookup query generated: {resolved_query}"
+                    )
                     count = self._lookup_federated(resolved_query)
 
                 else:
@@ -246,12 +250,12 @@ class LookupExecutor:
                     f"count={count}  included={included}"
                 )
                 return {
-                    "config_id":          config_id,
+                    "config_id": config_id,
                     "source_object_name": object_name,
-                    "resolved_query":     resolved_query,
-                    "count":              count,
-                    "included":           included,
-                    "error":              None,
+                    "resolved_query": resolved_query,
+                    "count": count,
+                    "included": included,
+                    "error": None,
                 }
 
             except Exception as exc:
@@ -261,12 +265,12 @@ class LookupExecutor:
                         f"({object_name}) after {attempt} retries: {exc}. Including table (fail-safe)."
                     )
                     return {
-                        "config_id":          config_id,
+                        "config_id": config_id,
                         "source_object_name": object_name,
-                        "resolved_query":     resolved_query or "N/A",
-                        "count":              -1,
-                        "included":           True,
-                        "error":              str(exc),
+                        "resolved_query": resolved_query or "N/A",
+                        "count": -1,
+                        "included": True,
+                        "error": str(exc),
                     }
 
                 attempt += 1
@@ -276,4 +280,5 @@ class LookupExecutor:
                 )
                 if retry_interval > 0:
                     import time
+
                     time.sleep(retry_interval)

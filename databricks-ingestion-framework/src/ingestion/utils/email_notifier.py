@@ -17,31 +17,30 @@ both retries is logged and swallowed, never propagated — a notification
 failure must never fail the table's actual ingestion/Silver run, so callers
 do not need their own try/except around it.
 """
+
 import threading
 import time
-from typing import List, Optional
 
 import requests
 
 from .secrets import SecretResolver
 
-_TOKEN_URL_TEMPLATE     = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+_TOKEN_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 _SEND_MAIL_URL_TEMPLATE = "https://graph.microsoft.com/v1.0/users/{mailbox}/sendMail"
-_GRAPH_SCOPE            = "https://graph.microsoft.com/.default"
-_MAX_ATTEMPTS           = 2   
-_RETRY_DELAY_SEC        = 2
+_GRAPH_SCOPE = "https://graph.microsoft.com/.default"
+_MAX_ATTEMPTS = 2
+_RETRY_DELAY_SEC = 2
 
 # Where the Graph API app-registration credentials live — a single secret
 # holding {"tenant_id": "...", "client_id": "...", "client_secret": "..."}.
 GRAPH_SECRET_SCOPE = "graph-secrets-scope"
-GRAPH_SECRET_KEY   = "graph-secrets"
+GRAPH_SECRET_KEY = "graph-secrets"
 
 # Mailbox the app sends as — needs Mail.Send app permission for this mailbox.
 SENDER_MAILBOX = "siriki.prasanthi@ganitinc.com"
 
 
 class GraphMailNotifier:
-
     def __init__(
         self,
         dbutils=None,
@@ -49,11 +48,11 @@ class GraphMailNotifier:
         secret_scope: str = GRAPH_SECRET_SCOPE,
         secret_key: str = GRAPH_SECRET_KEY,
     ):
-        self.logger       = logger
-        self.secrets      = SecretResolver(dbutils)
+        self.logger = logger
+        self.secrets = SecretResolver(dbutils)
         self.secret_scope = secret_scope
-        self.secret_key   = secret_key
-        self._token: Optional[str] = None
+        self.secret_key = secret_key
+        self._token: str | None = None
         self._token_expires_at: float = 0.0
         self._token_lock = threading.Lock()
 
@@ -67,23 +66,25 @@ class GraphMailNotifier:
                 return self._token
 
             creds = self.secrets.get_json(self.secret_scope, self.secret_key)
-            last_exc: Optional[Exception] = None
+            last_exc: Exception | None = None
             for attempt in range(_MAX_ATTEMPTS):
                 try:
                     resp = requests.post(
                         _TOKEN_URL_TEMPLATE.format(tenant_id=creds["tenant_id"]),
                         data={
-                            "grant_type":    "client_credentials",
-                            "client_id":     creds["client_id"],
+                            "grant_type": "client_credentials",
+                            "client_id": creds["client_id"],
                             "client_secret": creds["client_secret"],
-                            "scope":         _GRAPH_SCOPE,
+                            "scope": _GRAPH_SCOPE,
                         },
                         timeout=30,
                     )
                     resp.raise_for_status()
                     payload = resp.json()
                     self._token = payload["access_token"]
-                    self._token_expires_at = time.time() + int(payload.get("expires_in", 3600))
+                    self._token_expires_at = time.time() + int(
+                        payload.get("expires_in", 3600)
+                    )
                     return self._token
                 except Exception as exc:
                     last_exc = exc
@@ -93,7 +94,9 @@ class GraphMailNotifier:
 
     # ── 2. Send — next step in the flow, needs a token from step 1 ───────────
 
-    def _post_send_mail(self, token: str, to_recipients: List[str], subject: str, body: str) -> None:
+    def _post_send_mail(
+        self, token: str, to_recipients: list[str], subject: str, body: str
+    ) -> None:
         """Retries once on failure. Raises if both attempts fail — caught by
         send_email(), the only public entry point."""
         url = _SEND_MAIL_URL_TEMPLATE.format(mailbox=SENDER_MAILBOX)
@@ -101,16 +104,21 @@ class GraphMailNotifier:
             "message": {
                 "subject": subject,
                 "body": {"contentType": "Text", "content": body},
-                "toRecipients": [{"emailAddress": {"address": addr}} for addr in to_recipients],
+                "toRecipients": [
+                    {"emailAddress": {"address": addr}} for addr in to_recipients
+                ],
             },
             "saveToSentItems": "false",
         }
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         for attempt in range(_MAX_ATTEMPTS):
             try:
                 resp = requests.post(
                     url,
-                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
                     json=message,
                     timeout=30,
                 )
@@ -128,8 +136,8 @@ class GraphMailNotifier:
         self,
         subject: str,
         body: str,
-        recipients: Optional[List[str]],
-        config_id: Optional[int] = None,
+        recipients: list[str] | None,
+        config_id: int | None = None,
     ) -> None:
         """
         Single entry point for both success and failure mail — build the
@@ -140,7 +148,9 @@ class GraphMailNotifier:
         configured is skipped rather than notifying anyone. Never raises.
         """
         if not recipients:
-            self._log_warning(f"No recipients configured for config_id={config_id} — skipping email.")
+            self._log_warning(
+                f"No recipients configured for config_id={config_id} — skipping email."
+            )
             return
         try:
             token = self._get_access_token()

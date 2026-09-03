@@ -81,7 +81,6 @@
 #         return username, password
 
 
-
 """
 Thin wrapper around Databricks secrets so the rest of the codebase never
 touches dbutils directly (makes unit testing outside a notebook possible).
@@ -106,12 +105,12 @@ Use the interactive prompt to avoid shell quoting issues:
 Or on Linux/macOS only:
     databricks secrets put-secret <scope> <key> --string-value '{"username":"x","password":"y"}'
 """
+
 import json
 import os
-from typing import Optional, Tuple
+
 
 class SecretResolver:
-
     def __init__(self, dbutils=None):
         """
         dbutils : pass in the notebook's ``dbutils`` object at runtime.
@@ -126,7 +125,7 @@ class SecretResolver:
     def get(self, scope: str, key: str) -> str:
         """
         Return the raw string value of a secret.
-        
+
         If scope is 'aws' or 'aws-secrets-manager', retrieves from AWS Secrets Manager.
         Otherwise, retrieves from Databricks Secret Scopes.
         """
@@ -137,15 +136,17 @@ class SecretResolver:
             env_key = f"{scope}__{key}".upper().replace("-", "_")
             if env_key in os.environ:
                 return os.environ[env_key]
-            
+
             try:
                 import boto3
+
                 client = boto3.client("secretsmanager")
                 response = client.get_secret_value(SecretId=key)
                 if "SecretString" in response:
                     return response["SecretString"]
                 else:
                     import base64
+
                     return base64.b64decode(response["SecretBinary"]).decode("utf-8")
             except Exception as e:
                 raise ValueError(
@@ -154,9 +155,9 @@ class SecretResolver:
 
         if self._dbutils is not None:
             return self._dbutils.secrets.get(scope=scope, key=key)
-            
+
         env_key = f"{scope}__{key}".upper().replace("-", "_")
-        value: Optional[str] = os.environ.get(env_key)
+        value: str | None = os.environ.get(env_key)
         if value is None:
             raise ValueError(
                 f"Secret not found for scope='{scope}' key='{key}' "
@@ -166,7 +167,7 @@ class SecretResolver:
 
     # ── High-level: parse JSON credential blob ────────────────────────────────
 
-    def get_credentials(self, scope: str, key: str) -> Tuple[str, str]:
+    def get_credentials(self, scope: str, key: str) -> tuple[str, str]:
         """
         Retrieve and parse a JSON credential secret.
 
@@ -202,8 +203,8 @@ class SecretResolver:
         except json.JSONDecodeError as exc:
             raise ValueError(
                 f"Secret scope='{scope}' key='{key}' must be a valid JSON object "
-                f"(e.g. {{\"username\": \"x\", \"password\": \"y\"}}). "
-                f"Received (first 120 chars): {repr(raw[:120])}. "
+                f'(e.g. {{"username": "x", "password": "y"}}). '
+                f"Received (first 120 chars): {raw[:120]!r}. "
                 f"JSON parse error: {exc}"
             ) from exc
 
@@ -238,6 +239,6 @@ class SecretResolver:
         except json.JSONDecodeError as exc:
             raise ValueError(
                 f"Secret scope='{scope}' key='{key}' must be a valid JSON object. "
-                f"Received (first 120 chars): {repr(raw[:120])}. "
+                f"Received (first 120 chars): {raw[:120]!r}. "
                 f"JSON parse error: {exc}"
             ) from exc

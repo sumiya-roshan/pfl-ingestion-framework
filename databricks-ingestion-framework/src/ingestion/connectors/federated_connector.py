@@ -57,7 +57,6 @@ Insert a config_source_system row with:
   database_name  = '<the foreign catalog name you created in Unity Catalog>'
 No host/port/credentials/driver_class needed — see above.
 """
-from typing import Optional, Tuple
 
 from pyspark.sql import DataFrame
 
@@ -65,7 +64,6 @@ from .base_connector import BaseConnector
 
 
 class FederatedConnector(BaseConnector):
-
     # ── Internal helpers ─────────────────────────────────────────────────────
 
     def _foreign_catalog(self) -> str:
@@ -95,9 +93,9 @@ class FederatedConnector(BaseConnector):
         schema = io.source_schema or "public"
         return f"SELECT * FROM {catalog}.{schema}.{io.source_object_name}"
 
-    def _build_source_query(self, catalog: str, watermark_start: Optional[str]) -> str:
+    def _build_source_query(self, catalog: str, watermark_start: str | None) -> str:
         """
-        Constructs the SQL sent to spark.sql() 
+        Constructs the SQL sent to spark.sql()
           - incremental (load_type = INCREMENTAL): incremental_column > watermark,
             OR id with delta_column_2 when configured
           - source_filter (additional static predicate from config)
@@ -106,8 +104,10 @@ class FederatedConnector(BaseConnector):
         predicates = []
 
         if io.load_type == "INCREMENTAL" and io.incremental_column:
-            wm = watermark_start if watermark_start is not None else getattr(
-                io, "incremental_end_value", None
+            wm = (
+                watermark_start
+                if watermark_start is not None
+                else getattr(io, "incremental_end_value", None)
             )
             if wm is not None:
                 predicate = f"{io.incremental_column} > '{wm}'"
@@ -123,7 +123,7 @@ class FederatedConnector(BaseConnector):
 
     # ── Public extract ───────────────────────────────────────────────────────
 
-    def extract(self, watermark_start: Optional[str]) -> Tuple[DataFrame, Optional[str]]:
+    def extract(self, watermark_start: str | None) -> tuple[DataFrame, str | None]:
         """
         Retries are handled by the caller (orchestrator.py wraps this whole
         call in retry_on_failure(max_retries=source_sys.retry_count,
@@ -135,7 +135,7 @@ class FederatedConnector(BaseConnector):
         query = self._build_source_query(catalog, watermark_start)
         df = self.spark.sql(query)
 
-        max_watermark: Optional[str] = None
+        max_watermark: str | None = None
         io = self.ingest_obj
         if io.load_type == "INCREMENTAL" and io.incremental_column:
             max_row = df.agg({io.incremental_column: "max"}).collect()

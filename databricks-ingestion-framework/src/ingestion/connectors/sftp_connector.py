@@ -33,32 +33,28 @@ Processed files are moved to  <remote_dir>/archive/  after download.
 This is enabled by default; to disable, set source_filter = 'no_archive'
 (a convention until a dedicated boolean column is added to ingestion_config).
 """
+
 import fnmatch
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Tuple
+from io import StringIO
 
+import paramiko
 from pyspark.sql import DataFrame
 
 from .base_connector import BaseConnector
-from io import StringIO
-import paramiko
+
 
 class SftpConnector(BaseConnector):
-
     def _get_sftp_client(self):
         ss = self.source_system
         username, private_key = self.secrets.get_credentials(
-            ss.secret_scope,
-            ss.secret_key_credentials
+            ss.secret_scope, ss.secret_key_credentials
         )
         key_file = StringIO(private_key)
         pkey = paramiko.RSAKey.from_private_key(key_file)
         transport = paramiko.Transport((ss.host, ss.port or 22))
-        transport.connect(
-            username=username,
-            pkey=pkey
-        )
+        transport.connect(username=username, pkey=pkey)
         sftp = paramiko.SFTPClient.from_transport(transport)
         return sftp, transport
 
@@ -72,7 +68,7 @@ class SftpConnector(BaseConnector):
         root = (ss.sftp_root_path or "/").rstrip("/")
         if io.source_schema:
             return f"{root}/{io.source_schema.strip('/')}"
-        print('root:',root)
+        print("root:", root)
         return root
 
     def _resolve_file_pattern(self) -> str:
@@ -82,13 +78,12 @@ class SftpConnector(BaseConnector):
         otherwise sftp_file_pattern from the source system is used.
         """
         io = self.ingest_obj
-        ss = self.source_system
         obj_name = io.source_object_name or ""
-        print('obj_name:',obj_name)
+        print("obj_name:", obj_name)
         glob_chars = {"*", "?", "[", "]"}
         if any(c in obj_name for c in glob_chars):
             return obj_name
-        print('obj_name:',obj_name)
+        print("obj_name:", obj_name)
         return "*"
 
     def _resolve_staging_dir(self) -> str:
@@ -96,17 +91,18 @@ class SftpConnector(BaseConnector):
         ss = self.source_system
         io = self.ingest_obj
         root = ss.landing_volume_path.rstrip("/")
-        print('_resolve_staging_dir:',root,io.ingestion_object_id)
+        print("_resolve_staging_dir:", root, io.ingestion_object_id)
         return os.path.join(root, str(io.ingestion_object_id))
 
-    def _list_matching_files(self,sftp,remote_dir: str,pattern: str) -> List[str]:
+    def _list_matching_files(self, sftp, remote_dir: str, pattern: str) -> list[str]:
         return [
             entry.filename
-            for entry in sftp.listdir_iter(remote_dir) if fnmatch.fnmatch(entry.filename, pattern)
+            for entry in sftp.listdir_iter(remote_dir)
+            if fnmatch.fnmatch(entry.filename, pattern)
         ]
 
-    def _download_one_file(self,remote_dir: str,filename: str,local_dir: str) -> str:
-        
+    def _download_one_file(self, remote_dir: str, filename: str, local_dir: str) -> str:
+
         sftp, transport = self._get_sftp_client()
         try:
             remote_path = f"{remote_dir.rstrip('/')}/{filename}"
@@ -117,37 +113,34 @@ class SftpConnector(BaseConnector):
             sftp.close()
             transport.close()
 
-    def _download_files(self, remote_dir: str, filenames: List[str], local_dir: str) -> List[str]:
-        
+    def _download_files(
+        self, remote_dir: str, filenames: list[str], local_dir: str
+    ) -> list[str]:
+
         os.makedirs(local_dir, exist_ok=True)
         max_workers = min(4, len(filenames))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
-                    self._download_one_file,
-                    remote_dir,
-                    filename,
-                    local_dir
+                    self._download_one_file, remote_dir, filename, local_dir
                 )
                 for filename in filenames
             ]
 
-            local_paths = [
-                future.result()
-                for future in futures
-            ]
+            local_paths = [future.result() for future in futures]
 
         return local_paths
 
-    def _load_files(self, local_paths: List[str]) -> DataFrame:
+    def _load_files(self, local_paths: list[str]) -> DataFrame:
         """Load downloaded files into a Spark DataFrame based on file_format."""
-        fmt = (self.ingest_obj.file_format or self.source_system.sftp_file_format or "csv").lower()
+        fmt = (
+            self.ingest_obj.file_format or self.source_system.sftp_file_format or "csv"
+        ).lower()
         reader = self.spark.read
 
         if fmt == "csv":
             return (
-                reader
-                .option("header", "true")
+                reader.option("header", "true")
                 .option("inferSchema", "true")
                 .csv(local_paths)
             )
@@ -158,8 +151,7 @@ class SftpConnector(BaseConnector):
         if fmt in ("fixed_width", "fixedwidth"):
             # Fixed-width files require a schema; use inferSchema as a best-effort default.
             return (
-                reader
-                .option("header", "false")
+                reader.option("header", "false")
                 .option("inferSchema", "true")
                 .csv(local_paths)
             )
@@ -168,7 +160,7 @@ class SftpConnector(BaseConnector):
             f"Supported: csv, json, parquet, fixed_width."
         )
 
-    def _archive_files(self, sftp, remote_dir: str, filenames: List[str]) -> None:
+    def _archive_files(self, sftp, remote_dir: str, filenames: list[str]) -> None:
         """Move processed files into <remote_dir>/archive/ on the SFTP server."""
         archive_dir = f"{remote_dir.rstrip('/')}/archive"
         try:
@@ -181,18 +173,18 @@ class SftpConnector(BaseConnector):
                 f"{archive_dir}/{filename}",
             )
 
-    def extract(self, watermark_start: Optional[str]) -> Tuple[DataFrame, Optional[str]]:
+    def extract(self, watermark_start: str | None) -> tuple[DataFrame, str | None]:
         sftp, transport = self._get_sftp_client()
-        remote_dir  = self._resolve_remote_dir()
-        pattern     = self._resolve_file_pattern()
-        local_dir   = self._resolve_staging_dir()
+        remote_dir = self._resolve_remote_dir()
+        pattern = self._resolve_file_pattern()
+        local_dir = self._resolve_staging_dir()
         try:
             matched = self._list_matching_files(sftp, remote_dir, pattern)
             if not matched:
                 raise FileNotFoundError(
                     f"No files matched pattern='{pattern}' in remote_dir='{remote_dir}'"
                 )
-            local_paths = self._download_files(remote_dir,matched,local_dir)
+            local_paths = self._download_files(remote_dir, matched, local_dir)
             df = self._load_files(local_paths)
             self._archive_files(sftp, remote_dir, matched)
             return df, None

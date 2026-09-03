@@ -8,5 +8,6 @@ def __getattr__(name):
     # LookupExecutor (and the whole connector factory) as a side effect.
     if name == "LookupExecutor":
         from .lookup_executor import LookupExecutor
+
         return LookupExecutor
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

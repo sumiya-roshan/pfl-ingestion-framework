@@ -34,7 +34,6 @@ watermark=None. load_type / write_mode on the ingestion object (derived from
 key_column) still control how the bronze writer applies the result —
 append for plain loads, merge on key_column when one is configured.
 """
-from typing import Optional, Tuple
 
 from pyspark.sql import DataFrame
 
@@ -42,14 +41,13 @@ from .base_connector import BaseConnector
 
 
 class S3Connector(BaseConnector):
-
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _resolve_source_path(self) -> str:
         io = self.ingest_obj
 
         external_path = (io.s3_external_path or "").strip()
-        if external_path.startswith("s3://") or external_path.startswith("s3a://"):
+        if external_path.startswith(("s3://", "s3a://")):
             return external_path
 
         bucket = io.s3_source_bucket_name
@@ -85,7 +83,7 @@ class S3Connector(BaseConnector):
 
     # ── Public extract ────────────────────────────────────────────────────────
 
-    def extract(self, watermark_start: Optional[str]) -> Tuple[DataFrame, Optional[str]]:
+    def extract(self, watermark_start: str | None) -> tuple[DataFrame, str | None]:
         io = self.ingest_obj
 
         self._apply_credentials()
@@ -95,8 +93,7 @@ class S3Connector(BaseConnector):
         header = io.s3_first_row_header if io.s3_first_row_header is not None else True
 
         df = (
-            self.spark.read
-            .option("header", str(bool(header)).lower())
+            self.spark.read.option("header", str(bool(header)).lower())
             .option("delimiter", delimiter)
             .option("inferSchema", "true")
             .csv(path)
@@ -104,4 +101,3 @@ class S3Connector(BaseConnector):
 
         # File-batch source: no column-based watermark to push down.
         return df, None
- 

@@ -21,31 +21,34 @@ Key behaviours
 """
 import threading
 from datetime import date, datetime
-from typing import Optional
 
+from lookup.lookup_executor import LookupExecutor
+from lookup.lookup_query_builder import build_lookup_query
+from silver.silver_processor import SilverProcessor
+
+from ..connectors.factory import get_connector
+from ..connectors.federated_connector import FederatedConnector
+from ..connectors.jdbc_connector import JdbcConnector
+from .audit import AuditLogger
 from .config_manager import (
     AUDIT_STATUS_FAILED,
-    AUDIT_STATUS_SUCCESS,
     AUDIT_STATUS_SKIPPED,
+    AUDIT_STATUS_SUCCESS,
     ConfigManager,
     IngestionTaskConfig,
     SourceSystemConfig,
 )
-from .watermark import resolve_watermark
-from .audit import AuditLogger
 from .dependency_logger import DependencyLogger
-from ..connectors.factory import get_connector
-from ..connectors.jdbc_connector import JdbcConnector
-from ..connectors.federated_connector import FederatedConnector
-from .writers.s3_writer import S3RawWriter
-from .writers.bronze_writer import BronzeWriter
-from .logger import get_logger
-from .secrets import SecretResolver
-from .retry import retry_on_failure
-from lookup.lookup_executor import LookupExecutor
-from lookup.lookup_query_builder import build_lookup_query
 from .email_notifier import GraphMailNotifier
-from silver.silver_processor import SilverProcessor
+from .logger import get_logger
+from .retry import retry_on_failure
+from .secrets import SecretResolver
+from .watermark import resolve_watermark
+from .writers.bronze_writer import BronzeWriter
+from .writers.s3_writer import S3RawWriter
+from datetime import datetime, timezone
+import time
+
 
 
 class IngestionOrchestrator:
@@ -65,15 +68,15 @@ class IngestionOrchestrator:
     def __init__(
         self,
         spark,
-        dbutils=None,
-        audit_table: str   = "migration_x_catalog.pfl_x_schema.data_pipeline_execution_master",
-        dependency_table: str = "migration_x_catalog.pfl_x_schema.dependency_master_config",
-        pipeline_name: str = "ingestion_framework",
+        dbutils,
+        audit_table: str,
+        dependency_table: str ,
+        pipeline_name: str,
         environment: str   = "dev",
         department_id: int = 0,
-        silver_notebook_path: Optional[str] = None,
+        silver_notebook_path: str | None = None,
         silver_notebook_timeout: int        = 3600,
-        config_mgr: Optional[ConfigManager] = None,
+        config_mgr: ConfigManager | None = None,
     ):
         self.spark         = spark
         self.dbutils       = dbutils
@@ -98,23 +101,22 @@ class IngestionOrchestrator:
             SilverProcessor(dbutils, silver_notebook_path, silver_notebook_timeout)
             if silver_notebook_path else None
         )
-        if self.silver_processor:
-            print(f"[SILVER] ready (coupled, inline) — notebook='{silver_notebook_path}'")
+        # if self.silver_processor:
+        #     print(f"[SILVER] ready (coupled, inline) — notebook='{silver_notebook_path}'")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def run(
         self,
         source_sys: SourceSystemConfig,
-        task: IngestionTaskConfig,
-        config_master_id: Optional[int]    = None,
-        landing_volume_path: Optional[str] = None,
-        trigger_id: Optional[str]          = None,
+        ingest_obj: IngestionTaskConfig,
+        config_master_id: int | None    = None,
+        landing_volume_path: str | None = None,
+        trigger_id: str | None          = None,
         # trigger_type: Optional[str]        = None,
-        business_date: Optional[date]      = None,
-        job_context: Optional[dict]        = None,
-        sink_batch_started_date: Optional[datetime] = None,
-        process_timestamp: Optional[datetime] = None,
+        business_date: date | None      = None,
+        job_context: dict | None        = None,
+        sink_batch_started_date: datetime | None = None,
     ) -> dict:
         """
         Execute a single ingestion object end-to-end.
@@ -137,10 +139,8 @@ class IngestionOrchestrator:
         Returns
         -------
         """
-        from datetime import datetime
-        run_start_time = datetime.utcnow()
-        ingest_obj = task
-
+        
+        run_start_time = datetime.now(timezone.utc)
         # pipeline_name and delta_layer come from config table, with fallbacks
         pipeline_name = ingest_obj.pipeline_name or self.pipeline_name
         delta_layer   = ingest_obj.effective_delta_layer   # property: config → fallback 'BRONZE'
@@ -161,6 +161,7 @@ class IngestionOrchestrator:
                 f"[Lookup] config_id={ingest_obj.config_id} ({ingest_obj.source_object_name}) "
                 f"— 0 rows in source. Skipping extraction."
             )
+            #check the dependency table also
             skip_context = dict(job_context or {})
             skip_context.setdefault("trigger_id", trigger_id)
             try:
@@ -203,17 +204,15 @@ class IngestionOrchestrator:
         # Dependency row: inserted BEFORE the audit row, per requirement.
         # pipeline_start_time is job-level (same value for every table in this
         # job_run_id) — set once in main.py and threaded through job_context.
-        job_run_id_value  = audit_context.get("job_run_id")
-        resolved_business_date = business_date or datetime.utcnow().date()
         dep_run = self.dependency.start_table(
             config_master_id    = config_master_id if config_master_id is not None else ingest_obj.config_id,
             source_system_id    = source_sys.source_id,
             config_id           = ingest_obj.config_id,
             table_name          = ingest_obj.source_object_name,
             pipeline_name       = pipeline_name,
-            job_run_id          = job_run_id_value,
-            business_date       = resolved_business_date,
-            pipeline_start_time = audit_context.get("pipeline_start_time") or datetime.utcnow(),
+            job_run_id          = audit_context.get("job_run_id"),
+            business_date       = business_date,
+            pipeline_start_time = audit_context.get("pipeline_start_time") or datetime.now(timezone.utc),
         )
 
         # Start audit: insert the INPROGRESS record before any ingestion work.
@@ -241,7 +240,7 @@ class IngestionOrchestrator:
             )
 
             connector = get_connector(self.spark, source_sys, ingest_obj, self.secrets)
-            df, watermark_end = retry_on_failure(
+            df, _watermark_end = retry_on_failure(
                 lambda: connector.extract(watermark_start),
                 max_retries    = int(source_sys.retry_count or 0),
                 retry_interval = int(source_sys.retry_interval or 0),
@@ -305,7 +304,7 @@ class IngestionOrchestrator:
                     source_object_name  = ingest_obj.source_object_name,
                     file_format         = fmt,
                     file_prefix         = 'all_key',
-                    file_timestamp      = sink_batch_started_date or process_timestamp,
+                    file_timestamp      = sink_batch_started_date,
                 )
 
                 self.logger.info(
@@ -323,6 +322,8 @@ class IngestionOrchestrator:
             fmt = ingest_obj.file_format or "parquet"
             if landing_volume_path:
                 stage = "RAW_WRITE"
+                import time
+                write_start_time = time.time()
                 landing_path = self.s3_writer.write(
                     df,
                     landing_volume_path = landing_volume_path,
@@ -330,7 +331,7 @@ class IngestionOrchestrator:
                     source_schema       = ingest_obj.source_schema,
                     source_object_name  = ingest_obj.source_object_name,
                     file_format         = fmt,
-                    file_timestamp      = sink_batch_started_date or process_timestamp,
+                    file_timestamp      = sink_batch_started_date,
                 )
                 self.logger.info(
                     f"[{run_id}] Landing write → {landing_path} ({rows_read} rows, format={fmt})"
@@ -410,22 +411,6 @@ class IngestionOrchestrator:
                                 f"for config_id={ingest_obj.config_id}: {sink_exc}"
                             )
 
-            stage = "BRONZE_WRITE"
-            import time
-            write_start_time = time.time()
-
-            # ── Bronze Delta write ─────────────────────────────────────────────
-            # TEMP: commented out to test Silver in isolation — restore before merging.
-            # target_table = self.bronze_writer.write(
-            #     df,
-            #     catalog               = ingest_obj.target_catalog,
-            #     schema                = ingest_obj.target_schema,
-            #     table                 = ingest_obj.target_table,
-            #     write_mode            = ingest_obj.write_mode,
-            #     merge_keys            = ingest_obj.primary_key_list,
-            #     schema_evolution_mode = ingest_obj.schema_evolution_mode,
-            #     partition_column      = ingest_obj.partition_column,
-            # )
             target_table = f"{ingest_obj.target_catalog}.{ingest_obj.target_schema}.{ingest_obj.target_table}"
             rows_copied = rows_read
             copy_duration_sec = round(time.time() - write_start_time, 2)
@@ -441,20 +426,20 @@ class IngestionOrchestrator:
                 history_df = self.spark.sql(f"DESCRIBE HISTORY {target_table} LIMIT 1")
                 history_row = history_df.select("operationMetrics").collect()[0]
                 metrics = history_row["operationMetrics"] if history_row["operationMetrics"] else {}
-                
+
                 # Extract bytes written
                 bytes_written = (
-                    metrics.get("numOutputBytes") or 
-                    metrics.get("numTargetBytesAdded") or 
+                    metrics.get("numOutputBytes") or
+                    metrics.get("numTargetBytesAdded") or
                     metrics.get("numTargetBytesWritten")
                 )
                 if bytes_written:
                     data_written_bytes = int(bytes_written)
-                
+
                 # Extract bytes read
                 bytes_read = (
-                    metrics.get("numTargetBytesRead") or 
-                    metrics.get("numSourceBytesRead") or 
+                    metrics.get("numTargetBytesRead") or
+                    metrics.get("numSourceBytesRead") or
                     metrics.get("numReadBytes")
                 )
                 if bytes_read:
@@ -479,13 +464,12 @@ class IngestionOrchestrator:
                 throughput_mb_per_sec = throughput_mb_per_sec,
                 copy_duration_sec     = copy_duration_sec,
             )
-# trigger_silver [TO DO]
             if config_master_id is not None:
                 try:
                     self.config_manager.update_sink_metadata(
                         config_master_id=config_master_id,
                         ingest_obj=ingest_obj,
-                        sink_batch_started_date=sink_batch_started_date or run_start_time,
+                        sink_batch_started_date=sink_batch_started_date,
                         rownum=rows_copied,
                         data_size=data_written_bytes,
                     )
@@ -493,7 +477,6 @@ class IngestionOrchestrator:
                 except Exception as sink_exc:
                     self.logger.warning(f"[{run_id}] Could not update sink metadata: {sink_exc}")
 
-            import time
             total_duration_sec = round(time.time() - run_start_time.timestamp(), 2)
             if total_duration_sec >= 60:
                 mins = int(total_duration_sec // 60)
@@ -543,9 +526,8 @@ class IngestionOrchestrator:
             # if hasattr(exc, "getErrorClass"):
             #     error_code_dtl = exc.getErrorClass()
             error_code  = type(exc).__name__
-            self.logger.error(
+            self.logger.exception(
                 f"[{run_id}] Failed to write {ingest_obj.target_table} table due to error: {error_msg}",
-                exc_info=True,
             )
             try:
                 self.audit.fail_run(audit_run=audit_run, error_code = error_code,error_message=error_msg)
@@ -617,9 +599,8 @@ class IngestionOrchestrator:
                 primary_key_cols    = primary_key_cols,
             )
         except Exception as exc:
-            self.logger.error(
-                f"[SILVER] Trigger failed for config_id={config_id} landing_path='{landing_path}': {exc}",
-                exc_info=True,
+            self.logger.exception(
+                f"[SILVER] Trigger failed for config_id={config_id} landing_path='{landing_path}'",
             )
             return {
                 "config_id":    config_id,

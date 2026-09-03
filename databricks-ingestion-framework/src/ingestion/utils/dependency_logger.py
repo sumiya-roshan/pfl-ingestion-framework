@@ -27,18 +27,22 @@ known until every table in the job has finished, so it's stamped onto every
 row touched by this job_run_id in one bulk UPDATE via complete_job(), called
 once at the very end of main.py.
 """
+
 import threading
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any
 
 from pyspark.sql.types import (
-    DateType, IntegerType, StringType,
-    StructField, StructType, TimestampType,
+    DateType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
 )
 
 
 class DependencyLogger:
-
     def __init__(self, spark, dependency_table: str):
         self.spark = spark
         self.table = dependency_table
@@ -56,7 +60,7 @@ class DependencyLogger:
         job_run_id: str,
         business_date,
         pipeline_start_time: datetime,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Upsert the row for one table, called at the start of that table's
         run. (config_id, source_system_id) is the unique key — a table
@@ -64,30 +68,36 @@ class DependencyLogger:
         timestamps reset for the new run) rather than a new row appended;
         a table running for the first time gets inserted.
         """
-        row = [(
-            int(config_master_id),
-            int(source_system_id),
-            int(config_id),
-            str(table_name),
-            str(pipeline_name),
-            str(job_run_id),
-            business_date,
-            pipeline_start_time,
-        )]
-        source_schema = StructType([
-            StructField("config_master_id",    IntegerType(), True),
-            StructField("source_system_id",    IntegerType(), True),
-            StructField("config_id",           IntegerType(), True),
-            StructField("table_name",          StringType(), True),
-            StructField("pipeline_name",       StringType(), True),
-            StructField("job_run_id",          StringType(), True),
-            StructField("business_date",       DateType(), True),
-            StructField("pipeline_start_time", TimestampType(), True),
-        ])
+        row = [
+            (
+                int(config_master_id),
+                int(source_system_id),
+                int(config_id),
+                str(table_name),
+                str(pipeline_name),
+                str(job_run_id),
+                business_date,
+                pipeline_start_time,
+            )
+        ]
+        source_schema = StructType(
+            [
+                StructField("config_master_id", IntegerType(), True),
+                StructField("source_system_id", IntegerType(), True),
+                StructField("config_id", IntegerType(), True),
+                StructField("table_name", StringType(), True),
+                StructField("pipeline_name", StringType(), True),
+                StructField("job_run_id", StringType(), True),
+                StructField("business_date", DateType(), True),
+                StructField("pipeline_start_time", TimestampType(), True),
+            ]
+        )
         source_view = f"__dep_start_source_{config_id}_{source_system_id}"
 
         with self._write_lock:
-            self.spark.createDataFrame(row, schema=source_schema).createOrReplaceTempView(source_view)
+            self.spark.createDataFrame(
+                row, schema=source_schema
+            ).createOrReplaceTempView(source_view)
             self.spark.sql(f"""
                 MERGE INTO {self.table} AS target
                 USING {source_view} AS source
@@ -126,18 +136,18 @@ class DependencyLogger:
             """)
             self.spark.catalog.dropTempView(source_view)
         return {
-            "job_run_id":       str(job_run_id),
-            "config_id":        int(config_id),
+            "job_run_id": str(job_run_id),
+            "config_id": int(config_id),
             "source_system_id": int(source_system_id),
         }
 
-    def mark_source_to_raw_end(self, dep_run: Dict[str, Any]) -> None:
+    def mark_source_to_raw_end(self, dep_run: dict[str, Any]) -> None:
         self._touch(dep_run, "source_to_raw_end_time")
 
-    def mark_raw_to_silver_start(self, dep_run: Dict[str, Any]) -> None:
+    def mark_raw_to_silver_start(self, dep_run: dict[str, Any]) -> None:
         self._touch(dep_run, "raw_to_silver_start_time")
 
-    def mark_raw_to_silver_end(self, dep_run: Dict[str, Any]) -> None:
+    def mark_raw_to_silver_end(self, dep_run: dict[str, Any]) -> None:
         """
         Marks this table's Silver run as finished — and, in the same UPDATE,
         stamps dependency_resolve_time with that same timestamp. That's the
@@ -149,8 +159,8 @@ class DependencyLogger:
                 UPDATE {self.table}
                 SET raw_to_silver_end_time  = current_timestamp(),
                     dependency_resolve_time = current_timestamp()
-                WHERE config_id        = {int(dep_run['config_id'])}
-                  AND source_system_id = {int(dep_run['source_system_id'])}
+                WHERE config_id        = {int(dep_run["config_id"])}
+                  AND source_system_id = {int(dep_run["source_system_id"])}
             """)
 
     def complete_job(self, job_run_id: str) -> None:
@@ -168,14 +178,14 @@ class DependencyLogger:
                 WHERE job_run_id = {self._sql_literal(job_run_id)}
             """)
 
-    def _touch(self, dep_run: Dict[str, Any], column: str) -> None:
+    def _touch(self, dep_run: dict[str, Any], column: str) -> None:
         # (config_id, source_system_id) is the unique key.
         with self._write_lock:
             self.spark.sql(f"""
                 UPDATE {self.table}
                 SET {column} = current_timestamp()
-                WHERE config_id        = {int(dep_run['config_id'])}
-                  AND source_system_id = {int(dep_run['source_system_id'])}
+                WHERE config_id        = {int(dep_run["config_id"])}
+                  AND source_system_id = {int(dep_run["source_system_id"])}
             """)
 
     @staticmethod
