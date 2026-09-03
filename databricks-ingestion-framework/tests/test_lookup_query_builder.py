@@ -68,9 +68,10 @@ def test_case3_special_trigger_time():
         "SELECT ard.ID FROM TAB_NEO_CAS_LMS.LMS_ASSET_REPOSSESSION_DTL ard INNER JOIN "
         "(SELECT ID FROM TAB_NEO_CAS_LMS.LMS_ASSET_REPOSSESSION_HDR WHERE "
         "(CREATION_TIME_STAMP >= to_date('2026-08-28 07:00:00','YYYY-MM-DD HH24:MI:SS') "
-        "OR LAST_UPDATED_TIME_STAMP >= to_date('2026-08-28 07:00:00','YYYY-MM-DD HH24:MI:SS')) "
+        "OR LAST_UPDATED_TIME_STAMP >= to_date('2026-08-28 07:00:00','YYYY-MM-DD HH24:MI:SS'))) "
         "arh ON arh.ID = ard.ASSET_REPO_HDRID FETCH NEXT 1 ROWS ONLY"
     )
+    assert out.count("(") == out.count(")")
     assert "trigger_time" not in out
 
 

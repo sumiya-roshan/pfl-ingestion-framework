@@ -84,7 +84,7 @@ def build_lookup_query(
                    which pulls ALL key rows unfiltered ("SELECT <keys> FROM src").
     """
     load_type = (load_type or "").strip().lower()
-    if load_type not in ("full", "incremental", "incremental-append"):
+    if load_type not in ("full", "incremental"):
         raise ValueError(
             f"load_type must be 'full' or 'incremental', got {load_type!r}"
         )
@@ -97,10 +97,14 @@ def build_lookup_query(
     )
 
     if pattern_type == "special_trigger_time":
+        if not cutoff:
+            raise ValueError(
+                "cutoff is required when pattern_type='special_trigger_time'"
+            )
         query, _n = _TRIGGER_RE.subn(
             lambda m: (
                 f"({m.group(1)} >= to_date('{cutoff}','{m.group(2)}') "
-                f"OR {m.group(3)} >= to_date('{cutoff}','{m.group(2)}')"
+                f"OR {m.group(3)} >= to_date('{cutoff}','{m.group(2)}'))"
             ),
             query,
             count=1,
@@ -115,6 +119,10 @@ def build_lookup_query(
             0
         ].strip()
         if load_type == "incremental":
+            if not delta_col or not cutoff:
+                raise ValueError(
+                    "delta_col and cutoff are required when load_type='incremental'"
+                )
             pred = f"{delta_col} >= '{cutoff}'"
             if delta_col_2:
                 pred = f"({pred} OR {delta_col_2} >= '{cutoff}')"
