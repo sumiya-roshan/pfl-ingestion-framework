@@ -33,9 +33,8 @@ dbutils.widgets.text("batch_start_date", "1", "Batch Start Date")
 
 config_master_id_raw = dbutils.widgets.get("config_master_id") or None
 source_system_id_raw = dbutils.widgets.get("source_system_id") or None
-target_catalog = dbutils.widgets.get("target_catalog") or "hive_metastore"
-pipeline_name = dbutils.widgets.get("pipeline_name") or None
-batch_start_date = dbutils.widgets.get("batch_start_date") or "1"
+pipeline_name        = dbutils.widgets.get("pipeline_name") or None
+batch_start_date     = dbutils.widgets.get("batch_start_date") or "1"
 
 if not config_master_id_raw or not source_system_id_raw:
     dbutils.notebook.exit("Error: config_master_id and source_system_id are required.")
@@ -75,7 +74,6 @@ config_mgr = ConfigManager(
     spark,
     source_system_table=SOURCE_SYSTEM_TABLE,
     config_master_table=CONFIG_MASTER_TABLE,
-    target_catalog=target_catalog,
 )
 
 source_sys, tasks = config_mgr.get_active_tasks(

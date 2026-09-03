@@ -220,14 +220,16 @@ class ConfigManager:
     def __init__(
         self,
         spark,
+        target_catalog: str,
         source_system_table: str = SOURCE_SYSTEM_TABLE,
         config_master_table: str = CONFIG_MASTER_TABLE,
-        target_catalog: str = "hive_metastore",
+        
     ):
         self.spark = spark
+        self.target_catalog = target_catalog
         self.source_system_table = source_system_table
         self.config_master_table = config_master_table
-        self.target_catalog = target_catalog
+        
 
     # ── Row builders ─────────────────────────────────────────────────────────
 
