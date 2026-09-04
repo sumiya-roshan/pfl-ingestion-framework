@@ -7,11 +7,18 @@ every table in a given job_run_id (captured once in main.py, at job start
 and job end). source_to_raw_*/raw_to_silver_* are per-table.
 
 dependency_resolve_time is the signal downstream teams poll: NULL means
-this table's Silver isn't done yet for today; once it has a timestamp, the
-table is safe to consume. It's set to the SAME timestamp as
-raw_to_silver_end_time, at the moment that table's Silver run finishes — not
-a job-level value, and not capped/derived from anything else. A table still
-running (or not yet reached) simply stays NULL until then.
+this table's data for today isn't safe to consume yet; once it has a
+timestamp, it is. It is NOT set automatically alongside raw_to_silver_end_time
+— that column marks the Raw→Silver stage as finished regardless of outcome,
+while dependency_resolve_time is only stamped by mark_dependency_resolved(),
+which the caller (orchestrator.py) invokes solely after confirming that
+table's Silver run actually succeeded. A table still running, not yet
+reached, or whose Silver run failed simply stays NULL. The one exception is
+the source-lookup-returned-0-rows case: there, Silver never runs at all, so
+dependency_resolve_time is instead backfilled from that table's
+Silver_Last_Sink_Date in the config table (see
+mark_resolved_from_silver_last_sink()) — the last time this table actually
+had a successful Silver run.
 
 (config_id, source_system_id) is the unique key for this table — ONE row per
 table, refreshed (not appended) on every run. config_id alone isn't enough:
@@ -149,16 +156,42 @@ class DependencyLogger:
 
     def mark_raw_to_silver_end(self, dep_run: dict[str, Any]) -> None:
         """
-        Marks this table's Silver run as finished — and, in the same UPDATE,
-        stamps dependency_resolve_time with that same timestamp. That's the
-        signal downstream teams poll: NULL = not ready yet, a timestamp =
-        today's data for this table is safe to consume.
+        Marks this table's Silver run as finished — success or failure. Does
+        NOT touch dependency_resolve_time: a failed Silver run must not make
+        downstream think today's data is ready. Call mark_dependency_resolved()
+        separately, only once the caller has confirmed Silver actually
+        succeeded.
         """
+        self._touch(dep_run, "raw_to_silver_end_time")
+
+    def mark_dependency_resolved(self, dep_run: dict[str, Any]) -> None:
+        """
+        Stamps dependency_resolve_time with the current timestamp. That's the
+        signal downstream teams poll: NULL = not ready yet, a timestamp =
+        today's data for this table is safe to consume. Call this only after
+        Silver has actually succeeded for this table's run.
+        """
+        self._touch(dep_run, "dependency_resolve_time")
+
+    def mark_resolved_from_silver_last_sink(
+        self, dep_run: dict[str, Any], silver_last_sink_date
+    ) -> None:
+        """
+        Lookup returned 0 rows for this table today — Source→Raw and
+        Raw→Silver never run, so dependency_resolve_time would otherwise
+        stay NULL forever and block downstream consumers. Instead, stamp it
+        with this table's Silver_Last_Sink_Date from the config table (the
+        previous run's value, since today's job won't update it) so
+        downstream sees the table as resolved using the last data it
+        actually has. No-op if silver_last_sink_date is None (table has
+        never had a successful Silver run yet).
+        """
+        if silver_last_sink_date is None:
+            return
         with self._write_lock:
             self.spark.sql(f"""
                 UPDATE {self.table}
-                SET raw_to_silver_end_time  = current_timestamp(),
-                    dependency_resolve_time = current_timestamp()
+                SET dependency_resolve_time = {self._sql_literal(silver_last_sink_date)}
                 WHERE config_id        = {int(dep_run["config_id"])}
                   AND source_system_id = {int(dep_run["source_system_id"])}
             """)

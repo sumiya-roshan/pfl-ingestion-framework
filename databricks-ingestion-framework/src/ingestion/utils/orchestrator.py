@@ -162,6 +162,30 @@ class IngestionOrchestrator:
             #check the dependency table also
             skip_context = dict(job_context or {})
             skip_context.setdefault("trigger_id", trigger_id)
+
+            # 0 rows in source → Source→Raw/Raw→Silver never run today, so
+            # dependency_resolve_time would otherwise stay NULL forever.
+            # Stamp it from this table's Silver_Last_Sink_Date (last run's
+            # value) so downstream consumers still see it as resolved.
+            try:
+                dep_run = self.dependency.start_table(
+                    config_master_id    = config_master_id if config_master_id is not None else ingest_obj.config_id,
+                    source_system_id    = source_sys.source_id,
+                    config_id           = ingest_obj.config_id,
+                    table_name          = ingest_obj.source_object_name,
+                    pipeline_name       = pipeline_name,
+                    job_run_id          = skip_context.get("job_run_id"),
+                    business_date       = business_date or run_start_time.date(),
+                    pipeline_start_time = skip_context.get("pipeline_start_time") or run_start_time,
+                )
+                self.dependency.mark_resolved_from_silver_last_sink(
+                    dep_run, ingest_obj.silver_last_sink_date
+                )
+            except Exception as dep_exc:
+                self.logger.warning(
+                    f"config_id={ingest_obj.config_id} — failed to set dependency_resolve_time "
+                    f"from silver_last_sink_date: {dep_exc}"
+                )
             try:
                 self.audit.log_skipped_row(
                     task              = ingest_obj,
@@ -194,6 +218,18 @@ class IngestionOrchestrator:
                 f"— lookup failed: {lookup_result['error']}. Marking Failed, skipping extraction."
             )
             self._set_config_status(ingest_obj, "Failed", run_id=None)
+            self.notifier.send_email(
+                subject=f"[FAILURE] LOOKUP — {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
+                body=(
+                    f"Stage failed: LOOKUP\n"
+                    f"Source: {source_sys.source_name}\n"
+                    f"Table: {ingest_obj.source_object_name}\n"
+                    f"Config ID: {ingest_obj.config_id}\n\n"
+                    f"Error:\n{lookup_result['error']}"
+                ),
+                recipients=ingest_obj.recipient_list,
+                config_id=ingest_obj.config_id,
+            )
             return {
                 "config_id": ingest_obj.config_id,
                 "run_id":   None,
@@ -408,21 +444,26 @@ class IngestionOrchestrator:
                             recipients=ingest_obj.recipient_list,
                             config_id=ingest_obj.config_id,
                         )
+                    else:
+                        # Silver actually succeeded — only now is today's data
+                        # safe for downstream to consume.
+                        self.dependency.mark_dependency_resolved(dep_run)
 
-                    # Stamp Silver_Last_Sink_Date in the child config table this
-                    # task came from. Best-effort — a bookkeeping failure here
-                    # must not fail the table's actual ingestion.
-                    if self.config_mgr and ingest_obj.child_table_fqn:
-                        try:
-                            self.config_mgr.update_silver_last_sink_date(
-                                child_table_fqn=ingest_obj.child_table_fqn,
-                                config_id=ingest_obj.config_id,
-                            )
-                        except Exception as sink_exc:
-                            self.logger.warning(
-                                f"[{run_id}] Could not update Silver_Last_Sink_Date "
-                                f"for config_id={ingest_obj.config_id}: {sink_exc}"
-                            )
+                        # Stamp Silver_Last_Sink_Date in the child config table
+                        # this task came from. Best-effort — a bookkeeping
+                        # failure here must not fail the table's actual
+                        # ingestion.
+                        if self.config_mgr and ingest_obj.child_table_fqn:
+                            try:
+                                self.config_mgr.update_silver_last_sink_date(
+                                    child_table_fqn=ingest_obj.child_table_fqn,
+                                    config_id=ingest_obj.config_id,
+                                )
+                            except Exception as sink_exc:
+                                self.logger.warning(
+                                    f"[{run_id}] Could not update Silver_Last_Sink_Date "
+                                    f"for config_id={ingest_obj.config_id}: {sink_exc}"
+                                )
 
             # Raw layer never ran (no landing_volume_path) — nothing was
             # written, so don't report SUCCESS. Mark the config row Skipped.
