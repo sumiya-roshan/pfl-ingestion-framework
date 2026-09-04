@@ -50,7 +50,7 @@ source_system_id = int(source_system_id_raw)
 # sink_batch_started_date ONCE. Generate the UTC timestamp here in Python and
 # pass it as a literal so every matching row gets the exact same value (this is
 # the only place this column is written per run). TODO: move to a batch-init notebook.
-if batch_start_date == 1 :
+if batch_start_date == "1" :
     batch_start_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
     spark.sql(f"""
         UPDATE migration_x_catalog.pfl_x_schema.rdbms_ingestion_config
@@ -58,6 +58,7 @@ if batch_start_date == 1 :
             sink_batch_started_date = TIMESTAMP '{batch_start_date}'
         WHERE Source_Name = 'PG_TEST_RDS'
     """)
+    print("batch_start_date",batch_start_date, type(batch_start_date))
 
 # dbutils.notebook.run(
 #     "./start_batch",  # TODO: point to the actual batch-init notebook
