@@ -20,7 +20,8 @@ Key behaviours
                   simply takes longer when Silver is enabled.
 """
 import threading
-from datetime import date, datetime
+import time
+from datetime import date, datetime, timezone
 
 from lookup.lookup_executor import LookupExecutor
 from lookup.lookup_query_builder import build_lookup_query
@@ -46,9 +47,6 @@ from .secrets import SecretResolver
 from .watermark import resolve_watermark
 from .writers.bronze_writer import BronzeWriter
 from .writers.s3_writer import S3RawWriter
-from datetime import datetime, timezone
-import time
-
 
 
 class IngestionOrchestrator:

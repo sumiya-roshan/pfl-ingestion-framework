@@ -216,6 +216,17 @@ else:
         batch_start_date = batch_start_date,
     )
 
+# batch_start_date arrives as a string — get_tasks.py stamps it as
+# '%Y-%m-%d %H:%M:%S.%f', and the widget default is the sentinel '1'. The
+# orchestrator needs a real datetime (landing-file path + business_date), so
+# parse it once here.
+if isinstance(batch_start_date, str) and batch_start_date.strip() not in ("", "1"):
+    batch_start_date = datetime.fromisoformat(
+        batch_start_date.strip().replace("T", " ")
+    )
+else:
+    batch_start_date = datetime.now(timezone.utc)
+print(type(batch_start_date),batch_start_date)
 print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
 print(f"Active tasks    : {len(tasks)}")
 
