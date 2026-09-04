@@ -64,6 +64,7 @@ class S3RawWriter:
 
         df_out = df.withColumn("_ingested_at", F.current_timestamp())
         df_out.write.format(file_format).mode(mode).save(target_path)
+        print(type(file_timestamp),file_timestamp)
 
         file_timestamp = file_timestamp.strftime("%Y_%m_%d_%H_%M_%S")
 

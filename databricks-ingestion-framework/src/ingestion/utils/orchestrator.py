@@ -304,7 +304,7 @@ class IngestionOrchestrator:
                     source_object_name  = ingest_obj.source_object_name,
                     file_format         = fmt,
                     file_prefix         = 'all_key',
-                    file_timestamp      = sink_batch_started_date or run_start_time,
+                    file_timestamp      = sink_batch_started_date,
                 )
 
                 self.logger.info(
