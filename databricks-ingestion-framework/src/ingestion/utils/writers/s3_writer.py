@@ -51,7 +51,7 @@ class S3RawWriter:
         """
 
         schema_part = f"{source_schema}/" if source_schema else ""
-
+        print(type(file_timestamp),file_timestamp)
         target_path = (
             f"{landing_volume_path.rstrip('/')}/"
             f"{source_name}/"
@@ -64,7 +64,6 @@ class S3RawWriter:
 
         df_out = df.withColumn("_ingested_at", F.current_timestamp())
         df_out.write.format(file_format).mode(mode).save(target_path)
-        print(type(file_timestamp),file_timestamp)
 
         file_timestamp = file_timestamp.strftime("%Y_%m_%d_%H_%M_%S")
 
