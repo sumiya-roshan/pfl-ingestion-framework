@@ -176,7 +176,7 @@ class IngestionTaskConfig:
 
     @property
     def effective_delta_layer(self) -> str:
-        return (self.delta_layer or "BRONZE").upper()
+        return (self.delta_layer or "SILVER").upper()
 
     def to_dict(self) -> dict:
         import decimal

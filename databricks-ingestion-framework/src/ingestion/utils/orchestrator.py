@@ -371,23 +371,17 @@ class IngestionOrchestrator:
                                 f"for config_id={ingest_obj.config_id}: {sink_exc}"
                             )
 
-            stage = "BRONZE_WRITE"
             import time
             write_start_time = time.time()
 
-            # ── Bronze Delta write ─────────────────────────────────────────────
-            # TEMP: commented out to test Silver in isolation — restore before merging.
-            # target_table = self.bronze_writer.write(
-            #     df,
-            #     catalog               = ingest_obj.target_catalog,
-            #     schema                = ingest_obj.target_schema,
-            #     table                 = ingest_obj.target_table,
-            #     write_mode            = ingest_obj.write_mode,
-            #     merge_keys            = ingest_obj.primary_key_list,
-            #     schema_evolution_mode = ingest_obj.schema_evolution_mode,
-            #     partition_column      = ingest_obj.partition_column,
-            # )
-            target_table = f"{ingest_obj.target_catalog}.{ingest_obj.target_schema}.{ingest_obj.target_table}"
+            # ── No Bronze write anymore — Silver is the terminal write for
+            # this table. target_table/status/metrics below all come from
+            # silver_result (set above, or None if Silver was never
+            # triggered — no landing write, or no silver_notebook_path).
+            if silver_result:
+                target_table = silver_result.get("target")
+            else:
+                target_table = f"{ingest_obj.target_catalog}.{ingest_obj.target_schema}.{ingest_obj.target_table}"
             rows_copied = rows_read
             copy_duration_sec = round(time.time() - write_start_time, 2)
 
@@ -395,43 +389,57 @@ class IngestionOrchestrator:
                 self.logger.warning(f"[{run_id}] Source returned zero records for {ingest_obj.source_object_name}")
             self.logger.info(f"[{run_id}] {rows_read:,} records written to {target_table}")
 
-            # Retrieve metrics from Delta table history
+            # Retrieve metrics from Silver's own Delta table history — the
+            # only real write left in this pipeline. Skipped entirely when
+            # Silver wasn't triggered, since there's no table to describe.
             data_read_bytes = 0
             data_written_bytes = 0
-            try:
-                history_df = self.spark.sql(f"DESCRIBE HISTORY {target_table} LIMIT 1")
-                history_row = history_df.select("operationMetrics").collect()[0]
-                metrics = history_row["operationMetrics"] if history_row["operationMetrics"] else {}
-                
-                # Extract bytes written
-                bytes_written = (
-                    metrics.get("numOutputBytes") or 
-                    metrics.get("numTargetBytesAdded") or 
-                    metrics.get("numTargetBytesWritten")
-                )
-                if bytes_written:
-                    data_written_bytes = int(bytes_written)
-                
-                # Extract bytes read
-                bytes_read = (
-                    metrics.get("numTargetBytesRead") or 
-                    metrics.get("numSourceBytesRead") or 
-                    metrics.get("numReadBytes")
-                )
-                if bytes_read:
-                    data_read_bytes = int(bytes_read)
-            except Exception as e:
-                self.logger.warning(f"[{run_id}] Could not retrieve Delta execution metrics: {e}")
+            if silver_result:
+                try:
+                    history_df = self.spark.sql(f"DESCRIBE HISTORY {target_table} LIMIT 1")
+                    history_row = history_df.select("operationMetrics").collect()[0]
+                    metrics = history_row["operationMetrics"] if history_row["operationMetrics"] else {}
+
+                    # Extract bytes written
+                    bytes_written = (
+                        metrics.get("numOutputBytes") or
+                        metrics.get("numTargetBytesAdded") or
+                        metrics.get("numTargetBytesWritten")
+                    )
+                    if bytes_written:
+                        data_written_bytes = int(bytes_written)
+
+                    # Extract bytes read
+                    bytes_read = (
+                        metrics.get("numTargetBytesRead") or
+                        metrics.get("numSourceBytesRead") or
+                        metrics.get("numReadBytes")
+                    )
+                    if bytes_read:
+                        data_read_bytes = int(bytes_read)
+                except Exception as e:
+                    self.logger.warning(f"[{run_id}] Could not retrieve Delta execution metrics: {e}")
 
             # Calculate throughput (MB/sec)
             throughput_mb_per_sec = None
             if copy_duration_sec > 0:
                 throughput_mb_per_sec = round((data_written_bytes / (1024.0 * 1024.0)) / copy_duration_sec, 2)
 
-            # End audit: update the INPROGRESS record with SUCCESS and end time.
+            # End audit: update the INPROGRESS record with end time and a
+            # status that now reflects Silver, not a Bronze write that no
+            # longer happens. No Silver triggered at all → SUCCESS (nothing
+            # else to judge the run by beyond extraction having worked).
+            final_status  = AUDIT_STATUS_SUCCESS
+            error_code    = None
+            error_message = None
+            if silver_result and silver_result.get("status") == "FAILED":
+                final_status  = AUDIT_STATUS_FAILED
+                error_code    = "SILVER_FAILED"
+                error_message = silver_result.get("error") or "Unknown Silver failure"
+
             self.audit.complete_run(
                 audit_run             = audit_run,
-                status                = AUDIT_STATUS_SUCCESS,
+                status                = final_status,
                 rows_read             = rows_read,
                 rows_copied           = rows_copied,
                 rows_deleted          = rows_deleted,
@@ -439,6 +447,8 @@ class IngestionOrchestrator:
                 data_written_bytes    = data_written_bytes,
                 throughput_mb_per_sec = throughput_mb_per_sec,
                 copy_duration_sec     = copy_duration_sec,
+                error_code            = error_code,
+                error_message         = error_message,
             )
 # trigger_silver [TO DO]
             if config_master_id is not None:
@@ -463,22 +473,28 @@ class IngestionOrchestrator:
             else:
                 duration_str = f"{total_duration_sec}s"
             self.logger.info(f"[{run_id}] Pipeline completed in {duration_str}")
-            self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
 
-            self.notifier.send_email(
-                subject=f"[SUCCESS] {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
-                body=(
-                    f"Source: {source_sys.source_name}\n"
-                    f"Table: {ingest_obj.source_object_name}\n"
-                    f"Config ID: {ingest_obj.config_id}\n"
-                    f"Run ID: {run_id}\n"
-                    f"Target: {target_table}\n"
-                    f"Rows read: {rows_read}\n"
-                    f"Rows copied: {rows_copied}\n"
-                ),
-                recipients=ingest_obj.recipient_list,
-                config_id=ingest_obj.config_id,
-            )
+            # Only log/notify SUCCESS when the run actually was one — a
+            # Silver failure already flips final_status to FAILED above and
+            # already sent its own failure email; sending a second
+            # "[SUCCESS]" email for the same run right after would be
+            # contradictory.
+            if final_status == AUDIT_STATUS_SUCCESS:
+                self.logger.info(f"[{run_id}] SUCCESS — {rows_read} records processed.")
+                self.notifier.send_email(
+                    subject=f"[SUCCESS] {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
+                    body=(
+                        f"Source: {source_sys.source_name}\n"
+                        f"Table: {ingest_obj.source_object_name}\n"
+                        f"Config ID: {ingest_obj.config_id}\n"
+                        f"Run ID: {run_id}\n"
+                        f"Target: {target_table}\n"
+                        f"Rows read: {rows_read}\n"
+                        f"Rows copied: {rows_copied}\n"
+                    ),
+                    recipients=ingest_obj.recipient_list,
+                    config_id=ingest_obj.config_id,
+                )
 
             if self.silver_processor and not landing_path:
                 print(
@@ -489,10 +505,10 @@ class IngestionOrchestrator:
             return {
                 "config_id": ingest_obj.config_id,
                 "run_id":   run_id,
-                "status":   AUDIT_STATUS_SUCCESS,
+                "status":   final_status,
                 "rows_read": rows_read,
-                "error_code": None,
-                "error":    None,
+                "error_code": error_code,
+                "error":    error_message,
                 "silver_result": silver_result,
             }
 
