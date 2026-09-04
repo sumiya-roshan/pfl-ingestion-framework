@@ -30,11 +30,6 @@
       "description": "Source System PK (integer) from config_source_system table."
     },
     {
-      "name": "target_catalog",
-      "default": "hive_metastore",
-      "description": "The Databricks target catalog (e.g., main or hive_metastore)."
-    },
-    {
       "name": "pipeline_name",
       "default": "",
       "description": "Pipeline name — used to filter active tasks in the child config table (e.g. rdbms_ingestion_config.Pipeline_Name)."
@@ -94,7 +89,6 @@
         "base_parameters": {
           "config_master_id":       "{{job.parameters.config_master_id}}",
           "source_system_id":       "{{job.parameters.source_system_id}}",
-          "target_catalog":         "{{job.parameters.target_catalog}}",
           "pipeline_name":          "{{job.parameters.pipeline_name}}",
           "job_run_id":             "{{job.run_id}}",
           "landing_volume_path":    "{{job.parameters.landing_volume_path}}",

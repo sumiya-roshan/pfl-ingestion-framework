@@ -183,12 +183,10 @@ class ConfigManager:
     def __init__(
         self,
         spark,
-        target_catalog: str,
         source_system_table: str = SOURCE_SYSTEM_TABLE,
         config_master_table: str = CONFIG_MASTER_TABLE,
     ):
         self.spark = spark
-        self.target_catalog = target_catalog
         self.source_system_table = source_system_table
         self.config_master_table = config_master_table
 
@@ -509,7 +507,11 @@ class ConfigManager:
             load_type=load_type,
             incremental_column=inc_col,
             primary_key_cols=pk_cols,
-            target_catalog=self.target_catalog,
+            target_catalog=(
+                r.get("target_catalog")
+                or r.get("Target_Catalog")
+                or "hive_metastore"
+            ),
             target_schema=target_schema,
             target_table=target_table,
             pipeline_name=r.get("Pipeline_Name") or r.get("pipeline_name"),

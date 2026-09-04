@@ -62,7 +62,6 @@ PIPELINE_LOOKUP_CONFIG_TABLE_DEFAULT = (
 
 dbutils.widgets.text("config_master_id", "", "Config Master ID")
 dbutils.widgets.text("source_system_id", "", "Source System ID")
-dbutils.widgets.text("target_catalog", "hive_metastore", "Target Catalog")
 dbutils.widgets.text("pipeline_name", "", "Pipeline Name")
 dbutils.widgets.text("job_run_id", "", "Job Run ID — set to {{job.run_id}}")
 dbutils.widgets.text("job_id", "", "Job ID — set to {{job.id}}")
@@ -89,7 +88,6 @@ if not config_master_id_raw or not source_system_id_raw:
 
 config_master_id = int(config_master_id_raw)
 source_system_id = int(source_system_id_raw)
-target_catalog = dbutils.widgets.get("target_catalog") or "hive_metastore"
 pipeline_name = dbutils.widgets.get("pipeline_name") or None
 try:
     job_run_id = dbutils.widgets.get("job_run_id") or "MANUAL"

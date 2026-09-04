@@ -25,7 +25,6 @@ from ingestion.utils.config_manager import (
 
 dbutils.widgets.text("config_master_id", "", "Config Master ID")
 dbutils.widgets.text("source_system_id", "", "Source System ID")
-dbutils.widgets.text("target_catalog", "hive_metastore", "Target Catalog")
 dbutils.widgets.text("pipeline_name", "", "Pipeline Name")
 dbutils.widgets.text("batch_start_date", "1", "Batch Start Date")
 
