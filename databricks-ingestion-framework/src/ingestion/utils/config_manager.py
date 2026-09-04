@@ -545,11 +545,6 @@ class ConfigManager:
             lookback_hours=self._to_int(
                 r.get("Lookback_Hours") or r.get("lookback_hours")
             ),
-            # Per-table lookup/presence-check query template — rdbms_ingestion_config.Lookup_Query_Template
-            lookup_query=r.get("Lookup_Query_Template")
-            or r.get("lookup_query_template"),
-            # Pipeline-wide thread pool size — rdbms_ingestion_config.Max_Workers
-            max_workers=self._to_int(r.get("Max_Workers") or r.get("max_workers")),
             # S3-specific fields — present only in s3_config_master rows
             s3_source_bucket_name=r.get("s3_source_bucket_name")
             or r.get("source_bucket_name"),
