@@ -262,6 +262,7 @@ class ConfigManager:
         for r in child_rows:
             task = self._build_ingestion_task(r.asDict())
             task.config_master_id = config_master_id
+            task.child_table_fqn = child_table_fqn
             # If pipeline_name is specified, only include tasks that match it
             if pipeline_name and task.pipeline_name != pipeline_name:
                 continue
