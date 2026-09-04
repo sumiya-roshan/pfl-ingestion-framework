@@ -91,18 +91,9 @@ if not job_run_id:
     dbutils.notebook.exit("Error: job_run_id widget is required and cannot be empty.")
 
 environment          = dbutils.widgets.get("environment")          or "dev"
-batch_start_date_raw = dbutils.widgets.get("batch_start_date")     or "1"
+batch_start_date     = dbutils.widgets.get("batch_start_date")     or "1"
 logger               = get_logger(environment=environment)
 
-# Parse batch_start_date_raw to datetime object if it is from the orchestrator
-parsed_batch_start_date = None
-if batch_start_date_raw and str(batch_start_date_raw).strip() != "1":
-    try:
-        clean_dt = str(batch_start_date_raw).replace("T", " ").split(".")[0]
-        parsed_batch_start_date = datetime.strptime(clean_dt, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        print(f"Using parsed batch_start_date: {parsed_batch_start_date}")
-    except Exception as parse_err:
-        print(f"[Warning] Failed to parse batch_start_date '{batch_start_date_raw}': {parse_err}")
 silver_notebook_path    = dbutils.widgets.get("silver_notebook_path")    or None
 silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
 
@@ -214,6 +205,7 @@ if payload_str:
     payload    = json.loads(payload_str)
     source_sys = SourceSystemConfig.from_dict(payload["source_sys"])
     tasks      = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
+    batch_start_date = payload.get("batch_start_date")
 else:
     # ── Standalone mode: query config tables directly ──────────────────────
     print("[Tasks] taskValues not available — querying config tables directly (standalone mode).")
@@ -221,7 +213,7 @@ else:
         config_master_id = config_master_id,
         source_system_id = source_system_id,
         pipeline_name    = pipeline_name,
-        batch_start_date = batch_start_date_raw,
+        batch_start_date = batch_start_date,
     )
 
 print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
@@ -283,7 +275,7 @@ def run_one(task: IngestionTaskConfig) -> dict:
         landing_volume_path = resolved_landing_path,
         trigger_id          = trigger_id,
         job_context          = job_context,
-        sink_batch_started_date = parsed_batch_start_date,
+        sink_batch_started_date = batch_start_date,
     )
 
 
