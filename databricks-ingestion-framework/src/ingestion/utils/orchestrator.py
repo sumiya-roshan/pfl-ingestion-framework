@@ -176,15 +176,7 @@ class IngestionOrchestrator:
                 self.logger.error(
                     f"config_id={ingest_obj.config_id} — failed to write SKIPPED audit row: {audit_exc}"
                 )
-            if self.config_mgr and ingest_obj.child_table_fqn:
-                try:
-                    self.config_mgr.update_status(
-                        ingest_obj.child_table_fqn, ingest_obj.config_id, "Skipped"
-                    )
-                except Exception as status_exc:
-                    self.logger.warning(
-                        f"config_id={ingest_obj.config_id} — could not set Status=Skipped in config: {status_exc}"
-                    )
+            self._set_config_status(ingest_obj, "Skipped")
             return {
                 "config_id": ingest_obj.config_id,
                 "run_id":   None,
@@ -192,6 +184,23 @@ class IngestionOrchestrator:
                 "rows_read": 0,
                 "error_code": None,
                 "error":    None,
+            }
+
+        # Lookup itself failed (count == -1) — do not attempt extraction; mark
+        # the config row Failed so the batch state reflects it.
+        if lookup_result["count"] == -1:
+            self.logger.warning(
+                f"[Lookup] config_id={ingest_obj.config_id} ({ingest_obj.source_object_name}) "
+                f"— lookup failed: {lookup_result['error']}. Marking Failed, skipping extraction."
+            )
+            self._set_config_status(ingest_obj, "Failed", run_id=None)
+            return {
+                "config_id": ingest_obj.config_id,
+                "run_id":   None,
+                "status":   AUDIT_STATUS_FAILED,
+                "rows_read": 0,
+                "error_code": "LookupFailed",
+                "error":    lookup_result["error"],
             }
 
         # Start audit: insert the INPROGRESS record before any ingestion work.
@@ -369,16 +378,7 @@ class IngestionOrchestrator:
                     # it has to be checked explicitly or it would silently
                     # never trigger a notification (or fail the table at all).
                     if silver_result and silver_result.get("status") == "FAILED":
-                        if self.config_mgr and ingest_obj.child_table_fqn:
-                            try:
-                                self.config_mgr.update_status(
-                                    ingest_obj.child_table_fqn, ingest_obj.config_id, "Failed"
-                                )
-                            except Exception as status_exc:
-                                self.logger.warning(
-                                    f"[{run_id}] Could not set Status=Failed for "
-                                    f"config_id={ingest_obj.config_id}: {status_exc}"
-                                )
+                        self._set_config_status(ingest_obj, "Failed", run_id=run_id)
                         self.notifier.send_email(
                             subject=f"[FAILURE] SILVER — {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
                             body=(
@@ -407,6 +407,31 @@ class IngestionOrchestrator:
                                 f"[{run_id}] Could not update Silver_Last_Sink_Date "
                                 f"for config_id={ingest_obj.config_id}: {sink_exc}"
                             )
+
+            # Raw layer never ran (no landing_volume_path) — nothing was
+            # written, so don't report SUCCESS. Mark the config row Skipped.
+            if not landing_path:
+                self.logger.warning(
+                    f"[{run_id}] config_id={ingest_obj.config_id} — raw layer did not run "
+                    f"(no landing_volume_path). Marking Skipped."
+                )
+                self._set_config_status(ingest_obj, "Skipped", run_id=run_id)
+                try:
+                    self.audit.fail_run(
+                        audit_run=audit_run,
+                        error_code="RawSkipped",
+                        error_message="Raw layer did not run (no landing_volume_path configured).",
+                    )
+                except Exception as audit_exc:
+                    self.logger.error(f"[{run_id}] Could not write audit row: {audit_exc}")
+                return {
+                    "config_id": ingest_obj.config_id,
+                    "run_id":   run_id,
+                    "status":   AUDIT_STATUS_SKIPPED,
+                    "rows_read": rows_read,
+                    "error_code": None,
+                    "error":    None,
+                }
 
             target_table = f"{ingest_obj.target_catalog}.{ingest_obj.target_schema}.{ingest_obj.target_table}"
             rows_copied = rows_read
@@ -530,13 +555,7 @@ class IngestionOrchestrator:
                 self.audit.fail_run(audit_run=audit_run, error_code = error_code,error_message=error_msg)
             except Exception as audit_exc:
                 self.logger.error(f"[{run_id}] Could not write FAILED status to audit: {audit_exc}")
-            if self.config_mgr and ingest_obj.child_table_fqn:
-                try:
-                    self.config_mgr.update_status(
-                        ingest_obj.child_table_fqn, ingest_obj.config_id, "Failed"
-                    )
-                except Exception as status_exc:
-                    self.logger.error(f"[{run_id}] Could not set Status=Failed in config: {status_exc}")
+            self._set_config_status(ingest_obj, "Failed", run_id=run_id)
             self.notifier.send_email(
                 subject=f"[FAILURE] {stage} — {source_sys.source_name}.{ingest_obj.source_object_name} (config_id={ingest_obj.config_id})",
                 body=(
@@ -558,6 +577,25 @@ class IngestionOrchestrator:
                 "error_code": error_code,
                 "error":    error_msg,
             }
+
+    def _set_config_status(self, ingest_obj, status: str, run_id=None) -> None:
+        """
+        Best-effort write of Status (e.g. 'Failed' / 'Skipped') to the child
+        config table row for this task. A bookkeeping failure here must never
+        fail the run, so it is logged and swallowed.
+        """
+        if not (self.config_mgr and ingest_obj.child_table_fqn):
+            return
+        try:
+            self.config_mgr.update_status(
+                ingest_obj.child_table_fqn, ingest_obj.config_id, status
+            )
+        except Exception as status_exc:
+            prefix = f"[{run_id}] " if run_id else ""
+            self.logger.warning(
+                f"{prefix}config_id={ingest_obj.config_id} — could not set "
+                f"Status={status} in config: {status_exc}"
+            )
 
     # ── Silver trigger ───────────────────────────────────────────────────────
 
