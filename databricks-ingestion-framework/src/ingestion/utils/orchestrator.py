@@ -343,6 +343,22 @@ class IngestionOrchestrator:
                     f"[{run_id}] Landing write → {landing_path} ({rows_read} rows, format={fmt})"
                 )
                 self.dependency.mark_source_to_raw_end(dep_run)
+
+                # Mirror that same Source→Raw completion moment onto the child
+                # config table's Raw_Last_Sink_Time. Best-effort — a bookkeeping
+                # failure here must not fail the table's actual ingestion.
+                if self.config_mgr and ingest_obj.child_table_fqn:
+                    try:
+                        self.config_mgr.update_raw_last_sink_time(
+                            child_table_fqn=ingest_obj.child_table_fqn,
+                            config_id=ingest_obj.config_id,
+                        )
+                    except Exception as sink_exc:
+                        self.logger.warning(
+                            f"[{run_id}] Could not update Raw_Last_Sink_Time "
+                            f"for config_id={ingest_obj.config_id}: {sink_exc}"
+                        )
+
                 stage = "SILVER"
 
                 # ── Trigger Silver, coupled — right after the S3 write, on this

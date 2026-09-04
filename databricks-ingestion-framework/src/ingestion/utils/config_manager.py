@@ -363,6 +363,28 @@ class ConfigManager:
             WHERE {config_id_col} = {int(config_id)}
         """)
 
+    def update_raw_last_sink_time(
+        self, child_table_fqn: str, config_id: int
+    ) -> None:
+        """
+        Stamps Raw_Last_Sink_Time = current_timestamp() on this table's row in
+        its child config table — called right after the Source→Raw stage
+        finishes for that table (see IngestionOrchestrator.run()), the same
+        moment the dependency table's source_to_raw_end_time is set. Column/PK
+        names are resolved case-insensitively since child config tables vary
+        (Config_ID vs config_id, Raw_Last_Sink_Time vs raw_last_sink_time).
+        """
+        columns = self.spark.table(child_table_fqn).columns
+        config_id_col = self._resolve_col(columns, "config_id", "Config_ID")
+        sink_time_col = self._resolve_col(
+            columns, "raw_last_sink_time", "Raw_Last_Sink_Time"
+        )
+        self.spark.sql(f"""
+            UPDATE {child_table_fqn}
+            SET {sink_time_col} = current_timestamp()
+            WHERE {config_id_col} = {int(config_id)}
+        """)
+
     def update_status(self, child_table_fqn: str, config_id: int, status: str) -> None:
         """
         Sets Status on this table's row in its child config table — called by
