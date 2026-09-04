@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Reads config_source_system and dynamically routes to child ingestion config tables
 via the config_master table. Returns typed config objects.
@@ -14,6 +12,10 @@ Default table locations
   CONFIG_MASTER_TABLE = migration_x_catalog.pfl_x_schema.config_master
   AUDIT_TABLE         = migration_x_catalog.pfl_x_schema.data_pipeline_execution_master
 """
+
+from __future__ import annotations
+
+import decimal
 import json
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -35,8 +37,27 @@ AUDIT_STATUS_SKIPPED = "SKIPPED"  # Used by source_lookup when a table has 0 row
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class _DictSerializable:
+    """Shared dict (de)serialisation for the config dataclasses."""
+
+    def to_dict(self) -> dict:
+        res = {}
+        for k, v in self.__dict__.items():
+            if k.startswith("_"):
+                continue
+            if isinstance(v, decimal.Decimal):
+                res[k] = int(v) if v % 1 == 0 else float(v)
+            else:
+                res[k] = v
+        return res
+
+    @classmethod
+    def from_dict(cls, d: dict):
+        return cls(**d)
+
+
 @dataclass
-class SourceSystemConfig:
+class SourceSystemConfig(_DictSerializable):
     """One row per physical source system → config_source_system."""
 
     source_id: int
@@ -69,36 +90,12 @@ class SourceSystemConfig:
 
     retry_count: int | None
     retry_interval: int | None
-
-    # Source query timeout, format 'HH:mm:ss' (e.g. '12:00:00'). Applied to the
-    # JDBC statement so the source DB cancels the query itself on expiry — see
-    # JdbcConnector._read_options(). None → no timeout applied.
     query_timeout: str | None = None
-
-    # Unity Catalog "Connection" object name
-    # Used only by FederatedConnector
     uc_connection_name: str | None = None
-
-    def to_dict(self) -> dict:
-        import decimal
-
-        res = {}
-        for k, v in self.__dict__.items():
-            if k.startswith("_"):
-                continue
-            if isinstance(v, decimal.Decimal):
-                res[k] = int(v) if v % 1 == 0 else float(v)
-            else:
-                res[k] = v
-        return res
-
-    @classmethod
-    def from_dict(cls, d: dict) -> SourceSystemConfig:
-        return cls(**d)
 
 
 @dataclass
-class IngestionTaskConfig:
+class IngestionTaskConfig(_DictSerializable):
     """Unified configuration for a single ingestion task, reading from flattened child config tables."""
 
     config_id: int
@@ -131,35 +128,18 @@ class IngestionTaskConfig:
 
     staging_flag: int | None = None
 
-    # config_master routing ID this task was loaded under — set by
-    # ConfigManager.get_active_tasks().
     config_master_id: int | None = None
 
-    # Watermark date for incremental lookup query generation
     silver_last_sink_date: str | None = None
-    # Secondary delta column (OR condition in lookup WHERE clause)
     delta_column_2: str | None = None
-    # Hours to look back from silver_last_sink_date when building the
-    # dynamic lookup/key-extraction watermark predicate (default 3 if unset).
-    # See JdbcConnector._lookback_predicates().
-    lookback_hours: int | None = None
-    # Per-table lookup/presence-check query template, read from
-    # rdbms_ingestion_config.Lookup_Query_Template. Supports {schema}/{table}/
-    # {key_column} placeholders — see LookupExecutor._resolve_query_for_task.
-    # Required for JDBC sources — LookupExecutor raises if unset.
-    lookup_query: str | None = None
 
-    # Thread-pool size for the whole pipeline run, read from
-    # rdbms_ingestion_config.Max_Workers — same value repeated on every row for
-    # a given pipeline. main.py reads it off the first loaded task.
-    max_workers: int | None = None
+    lookback_hours: int | None = None
+
     child_table_fqn: str | None = (
         None  # the config_master-resolved child table this task came from
     )
 
-    # JSON array string, e.g. ["a@x.com","b@x.com"] — config table's own
-    # failure-notification recipients for this table, overriding the
-    # notifier's fixed default list when present. See notifier.py.
+    # JSON array string, e.g. ["a@x.com","b@x.com"] 
     recipients: str | None = None
 
     @property
@@ -188,23 +168,6 @@ class IngestionTaskConfig:
     def effective_delta_layer(self) -> str:
         return (self.delta_layer or "BRONZE").upper()
 
-    def to_dict(self) -> dict:
-        import decimal
-
-        res = {}
-        for k, v in self.__dict__.items():
-            if k.startswith("_"):
-                continue
-            if isinstance(v, decimal.Decimal):
-                res[k] = int(v) if v % 1 == 0 else float(v)
-            else:
-                res[k] = v
-        return res
-
-    @classmethod
-    def from_dict(cls, d: dict) -> IngestionTaskConfig:
-        return cls(**d)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ConfigManager
@@ -223,15 +186,245 @@ class ConfigManager:
         target_catalog: str,
         source_system_table: str = SOURCE_SYSTEM_TABLE,
         config_master_table: str = CONFIG_MASTER_TABLE,
-        
     ):
         self.spark = spark
         self.target_catalog = target_catalog
         self.source_system_table = source_system_table
         self.config_master_table = config_master_table
-        
 
-    # ── Row builders ─────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # Public API
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_source_system(self, source_system_id: int) -> SourceSystemConfig:
+        rows = (
+            self.spark.table(self.source_system_table)
+            .filter(f"source_id = {source_system_id} AND is_active = 1")
+            .collect()
+        )
+        if not rows:
+            raise ValueError(
+                f"No active row in {self.source_system_table} for source_id={source_system_id}"
+            )
+        return self._build_source_system(rows[0].asDict())
+
+    def get_active_tasks(
+        self,
+        config_master_id: int,
+        source_system_id: int,
+        pipeline_name: str | None = None,
+        batch_start_date: str | None = None,
+    ) -> tuple[SourceSystemConfig, list[IngestionTaskConfig]]:
+        """
+        1. Fetch Source System by source_system_id to get credentials & source_name.
+        2. Fetch the specific child config table location from config_master.
+        3. Query the child config table for active tasks for this source_name,
+           filtering by pipeline_name if provided.
+        4. If batch_start_date is provided and not '1', filter by sink_batch_started_date.
+        """
+
+        # 1. Resolve source system
+        source_sys = self.get_source_system(source_system_id)
+        source_name = source_sys.source_name
+
+        # 2. Find child config table location from master
+        child_table_fqn = self._child_table_fqn(config_master_id)
+
+        # 3. Query the child config table
+        child_df = self.spark.table(child_table_fqn)
+
+        # Case-insensitive column resolution
+        src_col = self._resolve_col(child_df.columns, "source_name", "Source_Name")
+        active_col = self._resolve_col(child_df.columns, "is_active", "Is_Active")
+
+        # Basic filtering by source system and active status
+        filtered_df = child_df.filter(
+            f"{src_col} = '{source_name}' AND {active_col} = 1"
+        )
+
+        # Apply multi-refresh batch start date filtering if triggered by orchestrator
+        if batch_start_date and str(batch_start_date).strip() != "1":
+            date_col = self._resolve_col(child_df.columns, "sink_batch_started_date")
+            if date_col:
+                clean_date = str(batch_start_date).replace("T", " ").split(".")[0]
+                print(
+                    f"[ConfigManager] Filtering active tasks by {date_col} = '{clean_date}'"
+                )
+                filtered_df = filtered_df.filter(
+                    f"date_format(from_utc_timestamp({date_col}, 'UTC'), 'yyyy-MM-dd HH:mm:ss') = '{clean_date}'"
+                )
+            else:
+                print(
+                    f"[ConfigManager] Warning: {child_table_fqn} has no sink_batch_started_date column. Skipping filter."
+                )
+
+        child_rows = filtered_df.orderBy("priority").collect()
+
+        tasks = []
+        for r in child_rows:
+            task = self._build_ingestion_task(r.asDict())
+            task.config_master_id = config_master_id
+            # If pipeline_name is specified, only include tasks that match it
+            if pipeline_name and task.pipeline_name != pipeline_name:
+                continue
+            tasks.append(task)
+
+        return source_sys, tasks
+
+    def update_sink_metadata(
+        self,
+        config_master_id: int,
+        ingest_obj: IngestionTaskConfig,
+        sink_batch_started_date,
+        rownum: int,
+        data_size: int,
+    ) -> None:
+        """
+        Updates status, business_date, raw_last_sink_date, rownum, and data_size
+        on the child config table row for this task.
+
+        sink_batch_started_date is NOT written here — it is stamped once at batch
+        start (see get_tasks.py) and must stay constant for the whole run. The
+        param is still used to derive business_date.
+
+        Only called from the SUCCESS path in IngestionOrchestrator.run(), so
+        status is written as AUDIT_STATUS_SUCCESS unconditionally.
+
+        silver_last_sink_date is intentionally left untouched here — it belongs
+        to the (separately coupled) Silver pipeline; see the
+        `# trigger_silver [TO DO]` note in orchestrator.py.
+        """
+        child_table_fqn = self._child_table_fqn(config_master_id)
+
+        business_date = sink_batch_started_date.date()
+
+        # deltacolumn_1 = the source's incremental/watermark column, read from
+        # the bronze table just written (not the config table itself). Best-effort:
+        # a missing bronze table or a misconfigured Delta_Column_1 (uuid/text id)
+        # is skipped so it can't fail the whole UPDATE and leave the row stuck at
+        # 'In Progress'.
+        raw_last_sink_date = None
+        if ingest_obj.incremental_column:
+            try:
+                max_val = (
+                    self.spark.table(ingest_obj.full_target_table)
+                    .agg({ingest_obj.incremental_column: "max"})
+                    .collect()[0][0]
+                )
+            except Exception as exc:
+                max_val = None
+                print(
+                    f"[ConfigManager] config_id={ingest_obj.config_id}: could not read "
+                    f"MAX({ingest_obj.incremental_column}) from {ingest_obj.full_target_table}: {exc}"
+                )
+            if isinstance(max_val, (date, datetime)):
+                raw_last_sink_date = max_val
+            elif max_val is not None:
+                print(
+                    f"[ConfigManager] config_id={ingest_obj.config_id}: "
+                    f"Delta_Column_1 '{ingest_obj.incremental_column}' MAX() is "
+                    f"{max_val!r} (not a date/timestamp) — leaving raw_last_sink_date unchanged."
+                )
+
+        set_clauses = [
+            f"status        = {self._sql_literal(AUDIT_STATUS_SUCCESS)}",
+            f"business_date  = {self._sql_literal(business_date)}",
+            f"rownum         = {int(rownum )}",
+            f"data_size      = {int(data_size)}",
+        ]
+        if raw_last_sink_date is not None:
+            set_clauses.append(
+                f"raw_last_sink_date = {self._sql_literal(raw_last_sink_date)}"
+            )
+
+        self.spark.sql(f"""
+            UPDATE {child_table_fqn}
+            SET {", ".join(set_clauses)}
+            WHERE config_id = {int(ingest_obj.config_id)}
+        """)
+
+    def update_silver_last_sink_date(
+        self, child_table_fqn: str, config_id: int
+    ) -> None:
+        """
+        Stamps Silver_Last_Sink_Date = current_timestamp() on this table's row
+        in its child config table — called right after Silver completes for
+        that table (see IngestionOrchestrator.run()). Column/PK names are
+        resolved case-insensitively since child config tables vary
+        (Config_ID vs config_id, Silver_Last_Sink_Date vs silver_last_sink_date).
+        """
+        columns = self.spark.table(child_table_fqn).columns
+        config_id_col = self._resolve_col(columns, "config_id", "Config_ID")
+        sink_date_col = self._resolve_col(
+            columns, "silver_last_sink_date", "Silver_Last_Sink_Date"
+        )
+        self.spark.sql(f"""
+            UPDATE {child_table_fqn}
+            SET {sink_date_col} = current_timestamp()
+            WHERE {config_id_col} = {int(config_id)}
+        """)
+
+    def update_status(self, child_table_fqn: str, config_id: int, status: str) -> None:
+        """
+        Sets Status on this table's row in its child config table — called by
+        IngestionOrchestrator.run() to flag 'Failed' when the raw or silver
+        layer fails. Column/PK names are resolved case-insensitively.
+        """
+        columns = self.spark.table(child_table_fqn).columns
+        config_id_col = self._resolve_col(columns, "config_id", "Config_ID")
+        status_col = self._resolve_col(columns, "status", "Status")
+        self.spark.sql(f"""
+            UPDATE {child_table_fqn}
+            SET {status_col} = '{status}'
+            WHERE {config_id_col} = {int(config_id)}
+        """)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Internal helpers — value coercion / name resolution
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _sql_literal(value) -> str:
+        return "NULL" if value is None else "'" + str(value).replace("'", "''") + "'"
+
+    @staticmethod
+    def _to_int(value) -> int | None:
+        """
+        Coerces a config-table numeric value to int. Decimal-typed columns
+        (e.g. data_size DECIMAL(10,2)) come back from Spark as Python Decimal
+        ('3866.00'), which str()'s to a non-integer literal and breaks JDBC
+        options like fetchsize that require a plain integer string.
+        """
+        if value is None:
+            return None
+        return int(float(value))
+
+    @staticmethod
+    def _resolve_col(columns, name: str, default: str | None = None) -> str | None:
+        """Case-insensitive lookup of `name` among `columns`, else `default`."""
+        return next((c for c in columns if c.lower() == name.lower()), default)
+
+    def _child_table_fqn(self, config_master_id: int) -> str:
+        """Resolve the child config table FQN routed to by a config_master id."""
+        rows = (
+            self.spark.table(self.config_master_table)
+            .filter(f"config_id = {config_master_id}")
+            .collect()
+        )
+        if not rows:
+            raise ValueError(
+                f"No entry in {self.config_master_table} for config_id={config_master_id}"
+            )
+        m = rows[0].asDict()
+        return (
+            f"{m.get('config_catalog_name')}."
+            f"{m.get('config_schema_name')}."
+            f"{m.get('config_table_name')}"
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Internal helpers — row → dataclass builders
+    # ─────────────────────────────────────────────────────────────────────────
 
     @staticmethod
     def _build_source_system(r: dict) -> SourceSystemConfig:
@@ -260,18 +453,6 @@ class ConfigManager:
             query_timeout=r.get("query_timeout"),
             uc_connection_name=r.get("uc_connection_name"),
         )
-
-    @staticmethod
-    def _to_int(value) -> int | None:
-        """
-        Coerces a config-table numeric value to int. Decimal-typed columns
-        (e.g. data_size DECIMAL(10,2)) come back from Spark as Python Decimal
-        ('3866.00'), which str()'s to a non-integer literal and breaks JDBC
-        options like fetchsize that require a plain integer string.
-        """
-        if value is None:
-            return None
-        return int(float(value))
 
     def _build_ingestion_task(
         self, r: dict, child_table_fqn: str | None = None
@@ -382,232 +563,3 @@ class ConfigManager:
             child_table_fqn=child_table_fqn,
             recipients=r.get("recipients") or r.get("Recipients"),
         )
-
-    # ── Database Operations ───────────────────────────────────────────────────
-
-    def get_source_system(self, source_system_id: int) -> SourceSystemConfig:
-        rows = (
-            self.spark.table(self.source_system_table)
-            .filter(f"source_id = {source_system_id} AND is_active = 1")
-            .collect()
-        )
-        if not rows:
-            raise ValueError(
-                f"No active row in {self.source_system_table} for source_id={source_system_id}"
-            )
-        return self._build_source_system(rows[0].asDict())
-
-    def get_active_tasks(
-        self,
-        config_master_id: int,
-        source_system_id: int,
-        pipeline_name: str | None = None,
-        batch_start_date: str | None = None,
-    ) -> tuple[SourceSystemConfig, list[IngestionTaskConfig]]:
-        """
-        1. Fetch Source System by source_system_id to get credentials & source_name.
-        2. Fetch the specific child config table location from config_master.
-        3. Query the child config table for active tasks for this source_name,
-           filtering by pipeline_name if provided.
-        4. If batch_start_date is provided and not '1', filter by sink_batch_started_date.
-        """
-
-        # 1. Resolve source system
-        source_sys = self.get_source_system(source_system_id)
-        source_name = source_sys.source_name
-        print(source_sys)
-        print(source_name)
-
-        # 2. Find child config table location from master
-        master_rows = (
-            self.spark.table(self.config_master_table)
-            .filter(f"config_id = {config_master_id}")
-            .collect()
-        )
-        print(master_rows)
-        if not master_rows:
-            raise ValueError(
-                f"No entry in {self.config_master_table} for config_id={config_master_id}"
-            )
-
-        m_row = master_rows[0].asDict()
-        catalog = m_row.get("config_catalog_name")
-        schema = m_row.get("config_schema_name")
-        table = m_row.get("config_table_name")
-
-        child_table_fqn = f"{catalog}.{schema}.{table}"
-
-        # 3. Query the child config table
-        child_df = self.spark.table(child_table_fqn)
-
-        # Case-insensitive column resolution
-        src_col = next(
-            (c for c in child_df.columns if c.lower() == "source_name"), "Source_Name"
-        )
-        active_col = next(
-            (c for c in child_df.columns if c.lower() == "is_active"), "Is_Active"
-        )
-
-        # Basic filtering by source system and active status
-        filtered_df = child_df.filter(
-            f"{src_col} = '{source_name}' AND {active_col} = 1"
-        )
-
-        # Apply multi-refresh batch start date filtering if triggered by orchestrator
-        if batch_start_date and str(batch_start_date).strip() != "1":
-            date_col = next(
-                (c for c in child_df.columns if c.lower() == "sink_batch_started_date"),
-                None,
-            )
-            if date_col:
-                clean_date = str(batch_start_date).replace("T", " ").split(".")[0]
-                print(
-                    f"[ConfigManager] Filtering active tasks by {date_col} = '{clean_date}'"
-                )
-                filtered_df = filtered_df.filter(
-                    f"date_format(from_utc_timestamp({date_col}, 'UTC'), 'yyyy-MM-dd HH:mm:ss') = '{clean_date}'"
-                )
-            else:
-                print(
-                    f"[ConfigManager] Warning: {child_table_fqn} has no sink_batch_started_date column. Skipping filter."
-                )
-
-        child_rows = filtered_df.orderBy("priority").collect()
-
-        tasks = []
-        for r in child_rows:
-            task = self._build_ingestion_task(r.asDict())
-            task.config_master_id = config_master_id
-            # If pipeline_name is specified, only include tasks that match it
-            if pipeline_name and task.pipeline_name != pipeline_name:
-                continue
-            tasks.append(task)
-
-        return source_sys, tasks
-
-    def update_sink_metadata(
-        self,
-        config_master_id: int,
-        ingest_obj: IngestionTaskConfig,
-        sink_batch_started_date,
-        rownum: int,
-        data_size: int,
-    ) -> None:
-        """
-        Updates status, business_date, raw_last_sink_date, rownum, and data_size
-        on the child config table row for this task.
-
-        sink_batch_started_date is NOT written here — it is stamped once at batch
-        start (see get_tasks.py) and must stay constant for the whole run. The
-        param is still used to derive business_date.
-
-        Only called from the SUCCESS path in IngestionOrchestrator.run(), so
-        status is written as AUDIT_STATUS_SUCCESS unconditionally.
-
-        silver_last_sink_date is intentionally left untouched here — it belongs
-        to the (separately coupled) Silver pipeline; see the
-        `# trigger_silver [TO DO]` note in orchestrator.py.
-        """
-        master_rows = (
-            self.spark.table(self.config_master_table)
-            .filter(f"config_id = {config_master_id}")
-            .collect()
-        )
-        if not master_rows:
-            raise ValueError(
-                f"No entry in {self.config_master_table} for config_id={config_master_id}"
-            )
-        m_row = master_rows[0].asDict()
-        child_table_fqn = f"{m_row.get('config_catalog_name')}.{m_row.get('config_schema_name')}.{m_row.get('config_table_name')}"
-
-        business_date = sink_batch_started_date.date()
-
-        # deltacolumn_1 = the source's incremental/watermark column, read from
-        # the bronze table just written (not the config table itself). Best-effort:
-        # a missing bronze table or a misconfigured Delta_Column_1 (uuid/text id)
-        # is skipped so it can't fail the whole UPDATE and leave the row stuck at
-        # 'In Progress'.
-        raw_last_sink_date = None
-        if ingest_obj.incremental_column:
-            try:
-                max_val = (
-                    self.spark.table(ingest_obj.full_target_table)
-                    .agg({ingest_obj.incremental_column: "max"})
-                    .collect()[0][0]
-                )
-            except Exception as exc:
-                max_val = None
-                print(
-                    f"[ConfigManager] config_id={ingest_obj.config_id}: could not read "
-                    f"MAX({ingest_obj.incremental_column}) from {ingest_obj.full_target_table}: {exc}"
-                )
-            if isinstance(max_val, (date, datetime)):
-                raw_last_sink_date = max_val
-            elif max_val is not None:
-                print(
-                    f"[ConfigManager] config_id={ingest_obj.config_id}: "
-                    f"Delta_Column_1 '{ingest_obj.incremental_column}' MAX() is "
-                    f"{max_val!r} (not a date/timestamp) — leaving raw_last_sink_date unchanged."
-                )
-
-        set_clauses = [
-            f"status        = {self._sql_literal(AUDIT_STATUS_SUCCESS)}",
-            f"business_date  = {self._sql_literal(business_date)}",
-            f"rownum         = {int(rownum or 0)}",
-            f"data_size      = {int(data_size or 0)}",
-        ]
-        if raw_last_sink_date is not None:
-            set_clauses.append(
-                f"raw_last_sink_date = {self._sql_literal(raw_last_sink_date)}"
-            )
-
-        self.spark.sql(f"""
-            UPDATE {child_table_fqn}
-            SET {", ".join(set_clauses)}
-            WHERE config_id = {int(ingest_obj.config_id)}
-        """)
-
-    @staticmethod
-    def _sql_literal(value) -> str:
-        return "NULL" if value is None else "'" + str(value).replace("'", "''") + "'"
-
-    def update_silver_last_sink_date(
-        self, child_table_fqn: str, config_id: int
-    ) -> None:
-        """
-        Stamps Silver_Last_Sink_Date = current_timestamp() on this table's row
-        in its child config table — called right after Silver completes for
-        that table (see IngestionOrchestrator.run()). Column/PK names are
-        resolved case-insensitively since child config tables vary
-        (Config_ID vs config_id, Silver_Last_Sink_Date vs silver_last_sink_date).
-        """
-        columns = self.spark.table(child_table_fqn).columns
-        config_id_col = next(
-            (c for c in columns if c.lower() == "config_id"), "Config_ID"
-        )
-        sink_date_col = next(
-            (c for c in columns if c.lower() == "silver_last_sink_date"),
-            "Silver_Last_Sink_Date",
-        )
-        self.spark.sql(f"""
-            UPDATE {child_table_fqn}
-            SET {sink_date_col} = current_timestamp()
-            WHERE {config_id_col} = {int(config_id)}
-        """)
-
-    def update_status(self, child_table_fqn: str, config_id: int, status: str) -> None:
-        """
-        Sets Status on this table's row in its child config table — called by
-        IngestionOrchestrator.run() to flag 'Failed' when the raw or silver
-        layer fails. Column/PK names are resolved case-insensitively.
-        """
-        columns = self.spark.table(child_table_fqn).columns
-        config_id_col = next(
-            (c for c in columns if c.lower() == "config_id"), "Config_ID"
-        )
-        status_col = next((c for c in columns if c.lower() == "status"), "Status")
-        self.spark.sql(f"""
-            UPDATE {child_table_fqn}
-            SET {status_col} = '{status}'
-            WHERE {config_id_col} = {int(config_id)}
-        """)
