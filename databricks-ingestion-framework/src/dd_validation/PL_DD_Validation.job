@@ -1,0 +1,39 @@
+resources:
+  jobs:
+    PL_DD_Validation:
+      name: PL_DD_Validation
+      tasks:
+        - task_key: Get_DD_Query
+          notebook_task:
+            notebook_path: /Workspace/Shared/pfl-ingestion-framework-dd-check/databricks-ingestion-framework/src/dd_validation/get_all_table_data_dictionary
+            base_parameters:
+              code_part: "1"
+              batch_start_date: "{{job.parameters.batch_start_date}}"
+              source_name: "{{job.parameters.source_name}}"
+            source: WORKSPACE
+        - task_key: Copy_data
+          depends_on:
+            - task_key: Get_DD_Query
+          notebook_task:
+            notebook_path: /Workspace/Shared/pfl-ingestion-framework-dd-check/databricks-ingestion-framework/src/dd_validation/copy_data
+            base_parameters:
+              source_query: "{{tasks.Get_DD_Query.values.source_query}}"
+            source: WORKSPACE
+        - task_key: Load_DD
+          depends_on:
+            - task_key: Copy_data
+          notebook_task:
+            notebook_path: /Workspace/Shared/pfl-ingestion-framework-dd-check/databricks-ingestion-framework/src/dd_validation/get_all_table_data_dictionary
+            base_parameters:
+              code_part: "2"
+              dd_file_name: "{{tasks.Copy_data.values.dd_file_name}}"
+              s3_bucket: "{{tasks.Copy_data.values.s3_bucket}}"
+            source: WORKSPACE
+      queue:
+        enabled: true
+      parameters:
+        - name: batch_start_date
+          default: "1"
+        - name: source_name
+          default: PG_TEST_RDS
+      performance_target: PERFORMANCE_OPTIMIZED
