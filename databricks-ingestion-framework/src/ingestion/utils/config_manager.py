@@ -18,7 +18,6 @@ from __future__ import annotations
 import decimal
 import json
 from dataclasses import dataclass
-from datetime import date, datetime
 
 # ── Fully-qualified table name defaults ───────────────────────────────────────
 SOURCE_SYSTEM_TABLE = "migration_x_catalog.pfl_x_schema.config_source_system"
@@ -279,8 +278,8 @@ class ConfigManager:
         data_size: int,
     ) -> None:
         """
-        Updates status, business_date, raw_last_sink_date, rownum, and data_size
-        on the child config table row for this task.
+        Updates status, business_date, rownum, and data_size on the child
+        config table row for this task.
 
         sink_batch_started_date is NOT written here — it is stamped once at batch
         start (see get_tasks.py) and must stay constant for the whole run. The
@@ -288,6 +287,11 @@ class ConfigManager:
 
         Only called from the SUCCESS path in IngestionOrchestrator.run(), so
         status is written as AUDIT_STATUS_SUCCESS unconditionally.
+
+        raw_last_sink_date is NOT written here — it is stamped with
+        current_timestamp() by update_raw_last_sink_time() the moment the
+        Source→Raw stage completes, and must not be overwritten with the MAX of
+        the delta column afterwards.
 
         silver_last_sink_date is intentionally left untouched here — it belongs
         to the (separately coupled) Silver pipeline; see the
@@ -297,44 +301,12 @@ class ConfigManager:
 
         business_date = sink_batch_started_date.date()
 
-        # deltacolumn_1 = the source's incremental/watermark column, read from
-        # the bronze table just written (not the config table itself). Best-effort:
-        # a missing bronze table or a misconfigured Delta_Column_1 (uuid/text id)
-        # is skipped so it can't fail the whole UPDATE and leave the row stuck at
-        # 'In Progress'.
-        raw_last_sink_date = None
-        if ingest_obj.incremental_column:
-            try:
-                max_val = (
-                    self.spark.table(ingest_obj.full_target_table)
-                    .agg({ingest_obj.incremental_column: "max"})
-                    .collect()[0][0]
-                )
-            except Exception as exc:
-                max_val = None
-                print(
-                    f"[ConfigManager] config_id={ingest_obj.config_id}: could not read "
-                    f"MAX({ingest_obj.incremental_column}) from {ingest_obj.full_target_table}: {exc}"
-                )
-            if isinstance(max_val, (date, datetime)):
-                raw_last_sink_date = max_val
-            elif max_val is not None:
-                print(
-                    f"[ConfigManager] config_id={ingest_obj.config_id}: "
-                    f"Delta_Column_1 '{ingest_obj.incremental_column}' MAX() is "
-                    f"{max_val!r} (not a date/timestamp) — leaving raw_last_sink_date unchanged."
-                )
-
         set_clauses = [
             f"status        = {self._sql_literal(AUDIT_STATUS_SUCCESS)}",
             f"business_date  = {self._sql_literal(business_date)}",
             f"rownum         = {int(rownum )}",
             f"data_size      = {int(data_size)}",
         ]
-        if raw_last_sink_date is not None:
-            set_clauses.append(
-                f"raw_last_sink_date = {self._sql_literal(raw_last_sink_date)}"
-            )
 
         self.spark.sql(f"""
             UPDATE {child_table_fqn}
