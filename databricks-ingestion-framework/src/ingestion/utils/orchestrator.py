@@ -391,7 +391,7 @@ class IngestionOrchestrator:
                         )
                     except Exception as sink_exc:
                         self.logger.warning(
-                            f"[{run_id}] Could not update Raw_Last_Sink_Time "
+                            f"[{run_id}] Could not update Raw_Last_Sink_Date "
                             f"for config_id={ingest_obj.config_id}: {sink_exc}"
                         )
 

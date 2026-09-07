@@ -377,7 +377,7 @@ class ConfigManager:
         columns = self.spark.table(child_table_fqn).columns
         config_id_col = self._resolve_col(columns, "config_id", "Config_ID")
         sink_time_col = self._resolve_col(
-            columns, "raw_last_sink_time", "Raw_Last_Sink_Time"
+            columns, "raw_last_sink_date", "Raw_Last_Sink_Date"
         )
         self.spark.sql(f"""
             UPDATE {child_table_fqn}
