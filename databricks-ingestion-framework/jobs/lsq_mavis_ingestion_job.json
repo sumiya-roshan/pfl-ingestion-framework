@@ -1,0 +1,168 @@
+{
+  "_comment": [
+    "Databricks Jobs API definition for the LSQ Mavis ingestion pipeline.",
+    "Import via: databricks jobs create --json @jobs/lsq_mavis_ingestion_job.json",
+    "Or via the Databricks UI: Workflows → Create Job → Import JSON.",
+    "",
+    "BEFORE IMPORTING — update the following placeholders:",
+    "  REPLACE_WITH_REPO_PATH  : e.g. /Repos/data-eng/databricks-ingestion-framework",
+    "  REPLACE_WITH_NODE_TYPE  : e.g. Standard_DS3_v2 (Azure) or i3.xlarge (AWS)",
+    "",
+    "Two-task structure (mirrors ADF PL_LSQ_Mavis_Main):",
+    "  Task 0 — get_table_details : Initialises config status + fetches active rows,",
+    "            publishes via taskValues (replaces LK_Initialize_Ingestion_Status +",
+    "            LK_Get_Mavis_config_details + SV_Trigger_Time).",
+    "  Task 1 — run_ingestion     : Reads taskValues, fans out to MavisOrchestrator",
+    "            per table (replaces ForEach → PL_LSQ_Mavis_Raw_To_Silver).",
+    "",
+    "Job-level parameters (set once, available to both tasks):",
+    "  batch_start_date    : '1' for today (default), or 'yyyy-MM-dd HH:mm:ss' in IST",
+    "  admin_catalog_name  : Unity Catalog name holding the config schema",
+    "  raw_sa_name         : ADLS Gen2 storage account name for raw ZIP/CSV landing",
+    "  audit_table         : FQN of the shared audit log Delta table",
+    "  dependency_table    : FQN of dependency_master_config Delta table",
+    "  silver_notebook_path: Workspace path to the Mavis Silver notebook",
+    "  silver_notebook_timeout: Max seconds to wait per Silver notebook run",
+    "  environment         : dev | uat | prod",
+    "  pipeline_name       : Pipeline name written to audit rows"
+  ],
+
+  "name": "lsq_mavis_source_to_silver_ingestion",
+
+  "parameters": [
+    {
+      "name": "batch_start_date",
+      "default": "1",
+      "description": "Batch start date: '1' = today's UTC run; else 'yyyy-MM-dd HH:mm:ss' IST for a re-run."
+    },
+    {
+      "name": "admin_catalog_name",
+      "default": "",
+      "description": "Unity Catalog name that holds the config schema (e.g. pfl_admin_catalog)."
+    },
+    {
+      "name": "raw_sa_name",
+      "default": "",
+      "description": "ADLS Gen2 storage account name for raw ZIP/CSV landing (e.g. pflrawsa)."
+    },
+    {
+      "name": "audit_table",
+      "default": "",
+      "description": "FQN of the shared audit log Delta table (e.g. pfl_admin_catalog.config.tb_audit_log)."
+    },
+    {
+      "name": "dependency_table",
+      "default": "",
+      "description": "FQN of the dependency master config Delta table."
+    },
+    {
+      "name": "silver_notebook_path",
+      "default": "",
+      "description": "Workspace path to the Mavis Silver transformation notebook (blank = skip Silver)."
+    },
+    {
+      "name": "silver_notebook_timeout",
+      "default": "3600",
+      "description": "Max seconds to wait for each Silver notebook run."
+    },
+    {
+      "name": "environment",
+      "default": "prod",
+      "description": "Logging environment: dev | uat | prod."
+    },
+    {
+      "name": "pipeline_name",
+      "default": "lsq_mavis_source_to_silver_ingestion",
+      "description": "Pipeline name written to audit log rows."
+    },
+    {
+      "name": "job_run_id",
+      "default": "{{job.run_id}}",
+      "description": "Databricks job run ID — auto-populated from job context."
+    }
+  ],
+
+  "tags": {
+    "team":      "data-engineering",
+    "source":    "lsq-mavis",
+    "framework": "config-driven-ingestion"
+  },
+
+  "job_clusters": [
+    {
+      "job_cluster_key": "mavis_ingestion_cluster",
+      "new_cluster": {
+        "spark_version":      "15.4.x-scala2.12",
+        "node_type_id":       "REPLACE_WITH_NODE_TYPE",
+        "num_workers":        2,
+        "data_security_mode": "SINGLE_USER",
+        "spark_conf": {
+          "spark.databricks.delta.preview.enabled": "true"
+        }
+      }
+    }
+  ],
+
+  "tasks": [
+    {
+      "_comment": [
+        "Task 0 — get_table_details",
+        "Initialises config status (mirrors LK_Initialize_Ingestion_Status) and",
+        "fetches active rows (mirrors LK_Get_Mavis_config_details), then publishes",
+        "results via taskValues for Task 1 to consume."
+      ],
+      "task_key":        "get_table_details",
+      "job_cluster_key": "mavis_ingestion_cluster",
+      "notebook_task": {
+        "notebook_path": "REPLACE_WITH_REPO_PATH/src/api_sources/lsq_mavis/get_tasks",
+        "base_parameters": {
+          "batch_start_date":   "{{job.parameters.batch_start_date}}",
+          "admin_catalog_name": "{{job.parameters.admin_catalog_name}}",
+          "environment":        "{{job.parameters.environment}}",
+          "job_run_id":         "{{job.run_id}}"
+        }
+      },
+      "timeout_seconds": 300,
+      "max_retries":     0
+    },
+    {
+      "_comment": [
+        "Task 1 — run_ingestion",
+        "Reads taskValues from get_table_details, then fans out to MavisOrchestrator",
+        "per table (mirrors ForEach → PL_LSQ_Mavis_Raw_To_Silver).",
+        "Per-table flow: API export trigger → poll → ZIP download → unzip → Silver notebook."
+      ],
+      "task_key":        "run_ingestion",
+      "job_cluster_key": "mavis_ingestion_cluster",
+      "depends_on": [
+        { "task_key": "get_table_details" }
+      ],
+      "notebook_task": {
+        "notebook_path": "REPLACE_WITH_REPO_PATH/src/api_sources/lsq_mavis/main",
+        "base_parameters": {
+          "batch_start_date":        "{{job.parameters.batch_start_date}}",
+          "admin_catalog_name":      "{{job.parameters.admin_catalog_name}}",
+          "environment":             "{{job.parameters.environment}}",
+          "job_run_id":              "{{job.run_id}}",
+          "pipeline_name":           "{{job.parameters.pipeline_name}}",
+          "raw_sa_name":             "{{job.parameters.raw_sa_name}}",
+          "audit_table":             "{{job.parameters.audit_table}}",
+          "dependency_table":        "{{job.parameters.dependency_table}}",
+          "silver_notebook_path":    "{{job.parameters.silver_notebook_path}}",
+          "silver_notebook_timeout": "{{job.parameters.silver_notebook_timeout}}"
+        }
+      },
+      "timeout_seconds": 43200,
+      "max_retries":     0
+    }
+  ],
+
+  "schedule": {
+    "quartz_cron_expression": "0 0 1 * * ?",
+    "timezone_id":            "Asia/Kolkata",
+    "pause_status":           "PAUSED"
+  },
+
+  "max_concurrent_runs": 1,
+  "format":              "MULTI_TASK"
+}
