@@ -69,7 +69,7 @@ class MavisOrchestrator:
         dependency_table: str,
         pipeline_name: str,
         environment: str = "prod",
-        raw_sa_name: str = "",
+        s3_bucket_name: str = "",
         silver_notebook_path: str | None = None,
         silver_notebook_timeout: int = 3600,
     ):
@@ -77,7 +77,7 @@ class MavisOrchestrator:
         self.dbutils       = dbutils
         self.pipeline_name = pipeline_name
         self.environment   = environment
-        self.raw_sa_name   = raw_sa_name
+        self.s3_bucket_name = s3_bucket_name
 
         self.audit      = AuditLogger(spark, audit_table=audit_table)
         self.dependency = DependencyLogger(spark, dependency_table=dependency_table)
@@ -153,11 +153,11 @@ class MavisOrchestrator:
                 dbutils          = self.dbutils,
                 table            = table,
                 trigger_time_utc = trigger_time_utc,
-                raw_sa_name      = self.raw_sa_name,
+                s3_bucket_name   = self.s3_bucket_name,
             )
 
             extract_start = time.time()
-            df, zip_abfss, csv_abfss = connector.extract()
+            df, zip_s3, csv_s3 = connector.extract()
             rows_read         = df.count()
             copy_duration_sec = round(time.time() - extract_start, 2)
 
@@ -172,7 +172,7 @@ class MavisOrchestrator:
             # ── 5. Silver (inline, coupled) ────────────────────────────────────
             if self.silver_processor:
                 self.dependency.mark_raw_to_silver_start(dep_run)
-                silver_result = self._trigger_silver(table, csv_abfss)
+                silver_result = self._trigger_silver(table, csv_s3)
                 self.dependency.mark_raw_to_silver_end(dep_run)
 
                 if silver_result and silver_result.get("status") == "FAILED":
@@ -273,7 +273,7 @@ class MavisOrchestrator:
 
     # ── Silver trigger ────────────────────────────────────────────────────────
 
-    def _trigger_silver(self, table: MavisTableConfig, csv_abfss: str) -> dict:
+    def _trigger_silver(self, table: MavisTableConfig, csv_s3: str) -> dict:
         """
         Trigger the Mavis Silver notebook inline (synchronously, on this thread).
         Never raises — caught and returned as a result dict.
@@ -283,7 +283,7 @@ class MavisOrchestrator:
             return self.silver_processor.trigger(
                 config_id          = table.config_id,
                 source_system_id   = table.config_id,
-                landing_path       = csv_abfss,
+                landing_path       = csv_s3,
                 file_format        = "csv",
                 silver_catalog     = table.target_catalog,
                 silver_schema      = table.target_schema,

@@ -41,9 +41,9 @@
       "description": "Unity Catalog name that holds the config schema (e.g. pfl_admin_catalog)."
     },
     {
-      "name": "raw_sa_name",
-      "default": "",
-      "description": "ADLS Gen2 storage account name for raw ZIP/CSV landing (e.g. pflrawsa)."
+      "name": "s3_bucket_name",
+      "default": "pfl-raw-bucket-dev",
+      "description": "S3 bucket name for raw ZIP/CSV landing (e.g. pflrawsa)."
     },
     {
       "name": "audit_table",
@@ -145,7 +145,7 @@
           "environment":             "{{job.parameters.environment}}",
           "job_run_id":              "{{job.run_id}}",
           "pipeline_name":           "{{job.parameters.pipeline_name}}",
-          "raw_sa_name":             "{{job.parameters.raw_sa_name}}",
+          "s3_bucket_name":          "{{job.parameters.s3_bucket_name}}",
           "audit_table":             "{{job.parameters.audit_table}}",
           "dependency_table":        "{{job.parameters.dependency_table}}",
           "silver_notebook_path":    "{{job.parameters.silver_notebook_path}}",

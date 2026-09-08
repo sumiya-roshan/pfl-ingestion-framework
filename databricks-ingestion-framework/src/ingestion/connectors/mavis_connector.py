@@ -85,9 +85,9 @@ def _build_raw_paths(table: MavisTableConfig, trigger_time_utc: datetime) -> tup
     return zip_rel, csv_rel
 
 
-def _build_abfss(container: str, raw_sa_name: str, relative_path: str) -> str:
-    """Build a fully-qualified abfss:// URI for an ADLS Gen2 path."""
-    return f"abfss://{container}@{raw_sa_name}.dfs.core.windows.net/{relative_path.lstrip('/')}"
+def _build_s3_path(bucket: str, container: str, relative_path: str) -> str:
+    """Build a fully-qualified s3:// URI for the raw landing path."""
+    return f"s3://{bucket}/{container}/{relative_path.lstrip('/')}"
 
 
 class MavisApiConnector:
@@ -105,18 +105,18 @@ class MavisApiConnector:
         dbutils,
         table: MavisTableConfig,
         trigger_time_utc: datetime,
-        raw_sa_name: str,
+        s3_bucket_name: str,
     ):
         self.spark            = spark
         self.dbutils          = dbutils
         self.table            = table
         self.trigger_time_utc = trigger_time_utc
-        self.raw_sa_name      = raw_sa_name
+        self.s3_bucket_name   = s3_bucket_name
 
         # Derived once — reused across all steps
         self._zip_rel, self._csv_rel = _build_raw_paths(table, trigger_time_utc)
-        self._zip_abfss = _build_abfss(table.raw_container_name, raw_sa_name, self._zip_rel)
-        self._csv_abfss = _build_abfss(table.raw_container_name, raw_sa_name, self._csv_rel)
+        self._zip_s3 = _build_s3_path(s3_bucket_name, table.raw_container_name, self._zip_rel)
+        self._csv_s3 = _build_s3_path(s3_bucket_name, table.raw_container_name, self._csv_rel)
 
         self._headers = {
             "Content-Type": "application/json",
@@ -148,15 +148,15 @@ class MavisApiConnector:
         file_url = self._get_download_url(request_id)
         print(f"[Mavis] config_id={self.table.config_id} — FileURL obtained")
 
-        # Step 4 — download the ZIP and store it in ADLS (raw landing)
+        # Step 4 — download the ZIP and store it in S3 (raw landing)
         zip_bytes = self._download_and_store_zip(file_url)
-        print(f"[Mavis] config_id={self.table.config_id} — ZIP stored at {self._zip_abfss}")
+        print(f"[Mavis] config_id={self.table.config_id} — ZIP stored at {self._zip_s3}")
 
-        # Step 5 — unzip in-memory, write CSV to ADLS, read back as DataFrame
+        # Step 5 — unzip in-memory, write CSV to S3, read back as DataFrame
         df = self._unzip_to_csv_and_read(zip_bytes)
-        print(f"[Mavis] config_id={self.table.config_id} — CSV stored at {self._csv_abfss}")
+        print(f"[Mavis] config_id={self.table.config_id} — CSV stored at {self._csv_s3}")
 
-        return df, self._zip_abfss, self._csv_abfss
+        return df, self._zip_s3, self._csv_s3
 
     # ── Step 1: WB_Get_Request_ID ─────────────────────────────────────────────
 
@@ -340,8 +340,8 @@ class MavisApiConnector:
                     tmp.write(chunk)
                     zip_bytes += chunk
 
-            # Copy from local driver temp → ADLS using dbutils.fs.cp
-            self.dbutils.fs.cp(f"file://{tmp_zip_path}", self._zip_abfss)
+            # Copy from local driver temp → S3 using dbutils.fs.cp
+            self.dbutils.fs.cp(f"file://{tmp_zip_path}", self._zip_s3)
         finally:
             if tmp_zip_path and os.path.exists(tmp_zip_path):
                 os.unlink(tmp_zip_path)
@@ -376,18 +376,18 @@ class MavisApiConnector:
                 tmp_csv_path = tmp.name
                 tmp.write(csv_content)
 
-            self.dbutils.fs.cp(f"file://{tmp_csv_path}", self._csv_abfss)
+            self.dbutils.fs.cp(f"file://{tmp_csv_path}", self._csv_s3)
         finally:
             if tmp_csv_path and os.path.exists(tmp_csv_path):
                 os.unlink(tmp_csv_path)
 
-        # Read the CSV from ADLS into a Spark DataFrame
+        # Read the CSV from S3 into a Spark DataFrame
         df = (
             self.spark.read
             .option("header",      "true")
             .option("inferSchema", "true")
             .option("multiLine",   "true")
             .option("escape",      '"')
-            .csv(self._csv_abfss)
+            .csv(self._csv_s3)
         )
         return df

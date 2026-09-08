@@ -43,7 +43,7 @@ dbutils.widgets.text("admin_catalog_name",       "",     "Admin catalog name")
 dbutils.widgets.text("environment",              "prod", "Environment: dev | uat | prod")
 dbutils.widgets.text("job_run_id",               "",     "Job Run ID — set to {{job.run_id}}")
 dbutils.widgets.text("pipeline_name",            "",     "Pipeline name")
-dbutils.widgets.text("raw_sa_name",              "",     "ADLS Gen2 storage account name (e.g. pflrawsa)")
+dbutils.widgets.text("s3_bucket_name",           "",     "S3 bucket name (e.g. pfl-raw-bucket)")
 dbutils.widgets.text("audit_table",              "",     "FQN of audit log table")
 dbutils.widgets.text("dependency_table",         "",     "FQN of dependency_master_config table")
 dbutils.widgets.text("silver_notebook_path",     "",     "Workspace path to Mavis Silver notebook (blank = skip Silver)")
@@ -56,7 +56,7 @@ admin_catalog_name      = dbutils.widgets.get("admin_catalog_name").strip()
 environment             = dbutils.widgets.get("environment").strip() or "prod"
 job_run_id              = dbutils.widgets.get("job_run_id").strip()
 pipeline_name           = dbutils.widgets.get("pipeline_name").strip()
-raw_sa_name             = dbutils.widgets.get("raw_sa_name").strip()
+s3_bucket_name          = dbutils.widgets.get("s3_bucket_name").strip()
 audit_table             = dbutils.widgets.get("audit_table").strip()
 dependency_table        = dbutils.widgets.get("dependency_table").strip()
 silver_notebook_path    = dbutils.widgets.get("silver_notebook_path").strip() or None
@@ -66,7 +66,7 @@ for _name, _val in [
     ("admin_catalog_name", admin_catalog_name),
     ("job_run_id",         job_run_id),
     ("pipeline_name",      pipeline_name),
-    ("raw_sa_name",        raw_sa_name),
+    ("s3_bucket_name",     s3_bucket_name),
     ("audit_table",        audit_table),
     ("dependency_table",   dependency_table),
 ]:
@@ -198,7 +198,7 @@ orchestrator = MavisOrchestrator(
     dependency_table        = dependency_table,
     pipeline_name           = pipeline_name,
     environment             = environment,
-    raw_sa_name             = raw_sa_name,
+    s3_bucket_name          = s3_bucket_name,
     silver_notebook_path    = silver_notebook_path,
     silver_notebook_timeout = silver_notebook_timeout,
 )
