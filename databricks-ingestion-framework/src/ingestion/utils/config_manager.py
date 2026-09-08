@@ -209,6 +209,11 @@ class MavisIngestionTaskConfig(_DictSerializable):
 
     s3_raw_landing_path: str | None
 
+    # ── ADF path matching ──
+    raw_container_name: str | None
+    raw_folder_path: str | None
+    raw_file_name: str | None
+
     source_object_name: str | None = None
 
     child_table_fqn: str | None = None
@@ -664,6 +669,9 @@ class ConfigManager:
             s3_raw_landing_path=r.get("S3_Raw_Landing_Path")
             or r.get("s3_raw_landing_path")
             or r.get("Raw_Landing_Path"),
+            raw_container_name=r.get("Raw_Container_Name") or r.get("raw_container_name"),
+            raw_folder_path=r.get("Raw_Folder_Path") or r.get("raw_folder_path"),
+            raw_file_name=r.get("Raw_File_Name") or r.get("raw_file_name"),
             source_object_name=r.get("Source_Object_Name")
             or r.get("source_object_name"),
         )

@@ -110,38 +110,93 @@ class MavisApiExportConnector:
             )
         return str(file_url)
 
-    def download_and_extract_to_s3(self, task, download_url: str) -> list[str]:
+    def download_and_extract_to_s3(self, task, download_url: str) -> dict:
         """
-        Download the export zip to the task's raw landing path, unzip it into a
-        sibling ``extracted/`` folder, and return the extracted file paths.
-
-        ``s3_raw_landing_path`` must be a writable path (Unity Catalog Volume or
-        DBFS mount), not a bare ``s3://`` URI.
+        Hit the download URL to stream the ZIP file to a temporary driver file,
+        upload that ZIP to the S3 raw landing path, then stream-extract the
+        inner CSV and upload it to the S3 unzip path.
+        Returns a dict with the s3_zip_path and s3_csv_path.
         """
+        import os
+        import tempfile
         import requests
+        import zipfile
+        import shutil
+        from pyspark.dbutils import DBUtils
+        from datetime import datetime, timezone, timedelta
 
         landing = (task.s3_raw_landing_path or "").rstrip("/")
         if not landing:
-            raise RuntimeError(
-                f"config_id={task.config_id}: s3_raw_landing_path is not set"
-            )
+            raise RuntimeError(f"config_id={task.config_id}: s3_raw_landing_path is not set")
 
-        resp = requests.get(download_url, timeout=self.api.request_timeout_seconds)
+        # 1. Hit the download URL
+        resp = requests.get(download_url, stream=True, timeout=self.api.request_timeout_seconds)
         resp.raise_for_status()
 
-        zip_path = f"{landing}/export.zip"
-        with open(zip_path, "wb") as fh:
-            fh.write(resp.content)
-        print(f"[Mavis] config_id={task.config_id} zip -> {zip_path}")
+        # 2. Reconstruct the ADF exact path format
+        ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).replace(tzinfo=None)
+        year = ist.strftime("%Y")
+        month = ist.strftime("%b")
+        day = ist.strftime("%d")
+        ts = ist.strftime("%Y_%m_%d_%H_%M_%S")
 
-        extracted_dir = f"{landing}/extracted"
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(extracted_dir)
-            files = [
-                f"{extracted_dir}/{n}" for n in zf.namelist() if not n.endswith("/")
-            ]
-        print(f"[Mavis] config_id={task.config_id} extracted {len(files)} file(s)")
-        return files
+        bucket = landing
+        container = (task.raw_container_name or "").strip("/")
+        folder = (task.raw_folder_path or "").strip("/")
+        file_name = (task.raw_file_name or "export")
+
+        if container and folder:
+            s3_zip_path = f"{bucket}/{container}/{folder}/zip/{year}/{month}/{day}/{file_name}_{ts}.zip"
+            s3_csv_path = f"{bucket}/{container}/{folder}/unzip/{year}/{month}/{day}/{file_name}_{ts}.csv"
+        else:
+            s3_zip_path = f"{bucket}/{file_name}_{ts}.zip"
+            s3_csv_path = f"{bucket}/{file_name}_{ts}.csv"
+
+        tmp_fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip")
+        os.close(tmp_fd)
+        
+        tmp_fd2, tmp_csv_path = tempfile.mkstemp(suffix=".csv")
+        os.close(tmp_fd2)
+
+        try:
+            # 3. Stream download to local ZIP file
+            with open(tmp_zip_path, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
+                    fh.write(chunk)
+            
+            dbutils = DBUtils(self.spark)
+            
+            # 4. Upload ZIP to S3
+            dbutils.fs.cp(f"file://{tmp_zip_path}", s3_zip_path)
+            print(f"[Mavis] config_id={task.config_id} uploaded ZIP -> {s3_zip_path}")
+
+            # 5. Disk-to-disk Unzip to prevent MemoryError
+            with zipfile.ZipFile(tmp_zip_path) as zf:
+                csv_members = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+                if not csv_members:
+                    csv_members = zf.namelist()
+                if not csv_members:
+                    raise ValueError(f"[Mavis] ZIP for config_id={task.config_id} is empty.")
+                
+                with zf.open(csv_members[0]) as source_file:
+                    with open(tmp_csv_path, 'wb') as target_file:
+                        shutil.copyfileobj(source_file, target_file, length=8 * 1024 * 1024)
+            
+            # 6. Upload CSV to S3
+            dbutils.fs.cp(f"file://{tmp_csv_path}", s3_csv_path)
+            print(f"[Mavis] config_id={task.config_id} uploaded CSV -> {s3_csv_path}")
+
+            return {
+                "s3_zip_path": s3_zip_path,
+                "s3_csv_path": s3_csv_path
+            }
+
+        finally:
+            # Clean up local temp files
+            if os.path.exists(tmp_zip_path):
+                os.unlink(tmp_zip_path)
+            if os.path.exists(tmp_csv_path):
+                os.unlink(tmp_csv_path)
 
     # ── Helpers ────────────────────────────────────────────────────────────
 

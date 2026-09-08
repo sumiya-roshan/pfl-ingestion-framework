@@ -70,14 +70,14 @@ class MavisApiExtractor:
             download_url = self.connector.get_download_url(task, request_id)
 
             step = "download_and_extract_to_s3"
-            files = self.connector.download_and_extract_to_s3(task, download_url)
+            paths = self.connector.download_and_extract_to_s3(task, download_url)
 
             self.config_mgr.update_status(fqn, task.config_id, AUDIT_STATUS_SUCCESS)
             print(
                 f"[MavisApiExtractor] config_id={task.config_id} SUCCESS "
-                f"({len(files)} file(s))"
+                f"(ZIP: {paths['s3_zip_path']}, CSV: {paths['s3_csv_path']})"
             )
-            return files
+            return [paths["s3_zip_path"], paths["s3_csv_path"]]
         except Exception as exc:
             print(
                 f"[MavisApiExtractor] config_id={task.config_id} FAILED at "
