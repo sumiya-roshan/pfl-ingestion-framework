@@ -19,12 +19,17 @@ The x-api-key header comes from the task's own Api_Key column (never logged).
 Any failure raises; the extractor tags it with the step + config_id.
 """
 
-from __future__ import annotations
-
 import json
 import time
+import os
+import tempfile
+import requests
 import zipfile
+import shutil
+from pyspark.dbutils import DBUtils
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
+from __future__ import annotations
 
 
 def _fmt_dt(value) -> str:
@@ -138,13 +143,7 @@ class MavisApiExportConnector:
         inner CSV and upload it to the S3 unzip path.
         Returns a dict with the s3_zip_path and s3_csv_path.
         """
-        import os
-        import tempfile
-        import requests
-        import zipfile
-        import shutil
-        from pyspark.dbutils import DBUtils
-        from datetime import datetime, timezone, timedelta
+        
 
         landing = (task.s3_raw_landing_path or "").rstrip("/")
         if not landing:
