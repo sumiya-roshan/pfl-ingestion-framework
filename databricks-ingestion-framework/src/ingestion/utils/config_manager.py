@@ -197,9 +197,8 @@ class MavisIngestionTaskConfig(_DictSerializable):
     sink_batch_started_date: str | None
 
     load_type: str | None
-    incremental_column: str | None
-    silver_last_sink_date: str | None
-    lookback_hours: int | None
+    from_date: str | None   # INCREMENTAL export window start (config column)
+    to_date: str | None     # INCREMENTAL export window end   (config column)
     write_mode: str | None
     priority: int | None
     batch_id: int | None
@@ -654,16 +653,8 @@ class ConfigManager:
             ),
             sink_batch_started_date=r.get("sink_batch_started_date"),
             load_type=load_type,
-            incremental_column=r.get("Incremental_Column")
-            or r.get("incremental_column")
-            or r.get("Delta_Column_1"),
-            silver_last_sink_date=(
-                str(r.get("Silver_Last_Sink_Date") or r.get("silver_last_sink_date") or "")
-                or None
-            ),
-            lookback_hours=self._to_int(
-                r.get("Lookback_Hours") or r.get("lookback_hours")
-            ),
+            from_date=r.get("From_Date") or r.get("from_date"),
+            to_date=r.get("To_Date") or r.get("to_date"),
             write_mode=r.get("Write_Mode") or r.get("write_mode"),
             priority=self._to_int(r.get("Priority") or r.get("priority")),
             batch_id=self._to_int(r.get("Batch_ID") or r.get("batch_id")),
@@ -676,23 +667,6 @@ class ConfigManager:
             source_object_name=r.get("Source_Object_Name")
             or r.get("source_object_name"),
         )
-
-    def increment_execution_count(
-        self, child_table_fqn: str, config_id: int
-    ) -> None:
-        """+1 to Day_Execution_Count on this row (Mavis success path). PK and
-        column names resolved case-insensitively like update_status()."""
-        columns = self.spark.table(child_table_fqn).columns
-        id_col = self._resolve_col(columns, "config_id", "Config_ID")
-        cnt_col = self._resolve_col(
-            columns, "day_execution_count", "Day_Execution_Count"
-        )
-        self.spark.sql(
-            f"UPDATE {child_table_fqn} "
-            f"SET {cnt_col} = COALESCE({cnt_col}, 0) + 1 "
-            f"WHERE {id_col} = {int(config_id)}"
-        )
-
 
 
 
