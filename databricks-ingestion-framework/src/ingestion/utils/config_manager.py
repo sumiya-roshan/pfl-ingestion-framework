@@ -30,7 +30,8 @@ AUDIT_STATUS_INPROGRESS = "INPROGRESS"
 AUDIT_STATUS_SUCCESS = "SUCCESS"
 AUDIT_STATUS_FAILED = "FAILED"
 AUDIT_STATUS_SKIPPED = "SKIPPED"  # Used by source_lookup when a table has 0 rows
-
+MAVIS_SOURCE_NAME = "LSQ_Mavis"
+MAVIS_STATUS_NOT_STARTED = "Not-Started"
 # ─────────────────────────────────────────────────────────────────────────────
 # Data classes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -168,6 +169,65 @@ class IngestionTaskConfig(_DictSerializable):
         return (self.delta_layer or "BRONZE").upper()
 
 
+@dataclass
+class MavisIngestionTaskConfig(_DictSerializable):
+    """
+    One row of the Mavis child config table resolved to typed fields — the
+    per-object export settings (including the API key, which is read straight
+    off the row, not dbutils.secrets). Built by
+    ``ConfigManager._build_mavis_task`` inside the normal ``get_active_tasks``
+    flow.
+
+    Cross-object settings — source_name, retry_count, retry_interval — are NOT
+    here; they come from the shared ``SourceSystemConfig`` row, exactly like
+    every other source in this package.
+    """
+
+    config_id: int
+
+    org_code: str | None
+    database_id: str | None
+    table_id: str | None
+
+    api_key: str | None
+
+    is_active: int | None
+    status: str | None
+    day_execution_count: int | None
+    sink_batch_started_date: str | None
+
+    load_type: str | None
+    incremental_column: str | None
+    silver_last_sink_date: str | None
+    lookback_hours: int | None
+    write_mode: str | None
+    priority: int | None
+    batch_id: int | None
+
+    target_catalog: str | None
+    target_schema: str | None
+    target_table: str | None
+
+    s3_raw_landing_path: str | None
+
+    source_object_name: str | None = None
+
+    child_table_fqn: str | None = None
+
+    @property
+    def full_target_table(self) -> str:
+        return f"{self.target_catalog}.{self.target_schema}.{self.target_table}"
+
+    @property
+    def effective_load_type(self) -> str:
+        return (self.load_type or "FULL").upper()
+
+    @property
+    def effective_write_mode(self) -> str:
+        if self.write_mode:
+            return self.write_mode
+        return "overwrite" if self.effective_load_type == "FULL" else "append"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ConfigManager
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,20 +304,19 @@ class ConfigManager:
         )
 
         # Apply multi-refresh batch start date filtering if triggered by orchestrator
-        if batch_start_date and str(batch_start_date).strip() != "1":
-            date_col = self._resolve_col(child_df.columns, "sink_batch_started_date")
-            if date_col:
-                clean_date = str(batch_start_date).replace("T", " ").split(".")[0]
-                print(
-                    f"[ConfigManager] Filtering active tasks by {date_col} = '{clean_date}'"
-                )
-                filtered_df = filtered_df.filter(
-                    f"date_format(from_utc_timestamp({date_col}, 'UTC'), 'yyyy-MM-dd HH:mm:ss') = '{clean_date}'"
-                )
-            else:
-                print(
-                    f"[ConfigManager] Warning: {child_table_fqn} has no sink_batch_started_date column. Skipping filter."
-                )
+        date_col = self._resolve_col(child_df.columns, "sink_batch_started_date")
+        if date_col:
+            clean_date = str(batch_start_date).replace("T", " ").split(".")[0]
+            print(
+                f"[ConfigManager] Filtering active tasks by {date_col} = '{clean_date}'"
+            )
+            filtered_df = filtered_df.filter(
+                f"date_format(from_utc_timestamp({date_col}, 'UTC'), 'yyyy-MM-dd HH:mm:ss') = '{clean_date}'"
+            )
+        else:
+            print(
+                f"[ConfigManager] Warning: {child_table_fqn} has no sink_batch_started_date column. Skipping filter."
+            )
 
         child_rows = filtered_df.orderBy("priority").collect()
 
@@ -573,78 +632,49 @@ class ConfigManager:
     # only the row→object step differs, branched inside get_active_tasks)
     # ─────────────────────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _mavis_worker_no(cluster_option, worker_number) -> int | None:
-        """
-        Python port of the ADF Worker_No CASE: Autoscaling / Fixed clusters take
-        the configured worker count, anything else falls back to 1.
-        """
-        opt = str(cluster_option or "").strip().lower()
-        if opt in ("autoscaling", "fixed"):
-            return ConfigManager._to_int(worker_number)
-        return 1
-
     def _build_mavis_task(self, r: dict) -> MavisIngestionTaskConfig:
-        # Row keys vary in casing between environments — look them up
-        # case-insensitively, trying each alias in turn.
-        low = {k.lower(): v for k, v in r.items()}
-
-        def g(*names: str, default=None):
-            for n in names:
-                v = low.get(n.lower())
-                if v is not None:
-                    return v
-            return default
-
+        """
+        Row → MavisIngestionTaskConfig. Same style as _build_ingestion_task:
+        canonical column name first, lowercase alias as fallback.
+        """
         load_type = str(
-            g("load_type", "Load_Type", default="FULL") or "FULL"
+            r.get("Load_Type") or r.get("load_type") or "FULL"
         ).upper()
+
         return MavisIngestionTaskConfig(
-            config_id=self._to_int(g("config_id", "Config_ID")) or 0,
-            org_code=g("org_code", "Org_Code"),
-            database_id=_as_str(g("database_id", "Database_Id")),
-            table_id=_as_str(g("table_id", "Table_Id")),
-            api_key=g("api_key", "Api_Key"),
-            compute_policy_name=g("compute_policy_name", "Compute_Policy_Name"),
-            cluster_option=g("cluster_option", "Cluster_Option"),
-            worker_number=self._to_int(g("worker_number", "Worker_Number")),
-            worker_no=self._mavis_worker_no(
-                g("cluster_option", "Cluster_Option"),
-                g("worker_number", "Worker_Number"),
-            ),
-            is_active=self._to_int(g("is_active")),
-            status=g("status", "Status"),
+            config_id=self._to_int(r.get("Config_ID") or r.get("config_id")) or 0,
+            org_code=r.get("Org_Code") or r.get("org_code"),
+            database_id=r.get("Database_Id") or r.get("database_id"),
+            table_id=r.get("Table_Id") or r.get("table_id"),
+            api_key=r.get("Api_Key") or r.get("api_key"),
+            is_active=self._to_int(r.get("is_active")),
+            status=r.get("Status") or r.get("status"),
             day_execution_count=self._to_int(
-                g("day_execution_count", "Day_Execution_Count")
+                r.get("Day_Execution_Count") or r.get("day_execution_count")
             ),
-            sink_batch_started_date=_as_str(g("sink_batch_started_date")),
+            sink_batch_started_date=r.get("sink_batch_started_date"),
             load_type=load_type,
-            incremental_column=g(
-                "incremental_column", "Incremental_Column",
-                "delta_column_1", "Delta_Column_1",
+            incremental_column=r.get("Incremental_Column")
+            or r.get("incremental_column")
+            or r.get("Delta_Column_1"),
+            silver_last_sink_date=(
+                str(r.get("Silver_Last_Sink_Date") or r.get("silver_last_sink_date") or "")
+                or None
             ),
-            silver_last_sink_date=_as_str(
-                g("silver_last_sink_date", "Silver_Last_Sink_Date")
+            lookback_hours=self._to_int(
+                r.get("Lookback_Hours") or r.get("lookback_hours")
             ),
-            lookback_hours=self._to_int(g("lookback_hours", "Lookback_Hours")),
-            write_mode=g("write_mode", "Write_Mode"),
-            priority=self._to_int(g("priority", "Priority")),
-            batch_id=self._to_int(g("batch_id", "Batch_ID")),
-            target_catalog=g(
-                "target_catalog", "Target_Catalog", "Sink_Catalog_Name"
-            ),
-            target_schema=g(
-                "target_schema", "Target_Schema", "Sink_Schema_Name"
-            ),
-            target_table=g("target_table", "Target_Table", "Sink_Table_Name"),
-            s3_raw_landing_path=g(
-                "s3_raw_landing_path", "S3_Raw_Landing_Path",
-                "raw_landing_path", "Raw_Landing_Path",
-                "s3_raw_sink_file_path", "S3_Raw_Sink_File_Path",
-            ),
-            source_object_name=g(
-                "source_object_name", "Source_Object_Name", "Source_Table_Name"
-            ),
+            write_mode=r.get("Write_Mode") or r.get("write_mode"),
+            priority=self._to_int(r.get("Priority") or r.get("priority")),
+            batch_id=self._to_int(r.get("Batch_ID") or r.get("batch_id")),
+            target_catalog=r.get("Target_Catalog") or r.get("target_catalog"),
+            target_schema=r.get("Target_Schema") or r.get("target_schema"),
+            target_table=r.get("Target_Table") or r.get("target_table"),
+            s3_raw_landing_path=r.get("S3_Raw_Landing_Path")
+            or r.get("s3_raw_landing_path")
+            or r.get("Raw_Landing_Path"),
+            source_object_name=r.get("Source_Object_Name")
+            or r.get("source_object_name"),
         )
 
     def increment_execution_count(
@@ -664,103 +694,5 @@ class ConfigManager:
         )
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# LSQ Mavis (LeadSquared Mavis DB export API)
-# ═════════════════════════════════════════════════════════════════════════════
-#
-# LSQ_Mavis is NOT a special case for config resolution. Its config table FQN is
-# resolved via config_master (config_master_id) and its source_name / retry_count
-# / retry_interval via config_source_system (source_system_id) — exactly like
-# every other source. ConfigManager.get_active_tasks() is reused verbatim; the
-# only branch is the row→object step, which builds a MavisIngestionTaskConfig
-# (below) instead of an IngestionTaskConfig when source_name == 'LSQ_Mavis'.
-#
-# The one Mavis-specific field is the API key, read straight off each child-table
-# row (not dbutils.secrets).
-#
-# The two-stage batch reset (Stage 1) is done in the get_tasks notebook — the
-# same place the RDBMS reset lives — not here. MAVIS_STATUS_NOT_STARTED is the
-# reset sentinel it writes (no shared AUDIT_STATUS_* equivalent). Stage 2 is just
-# get_active_tasks() with batch_start_date set to the timestamp Stage 1 stamped.
 
-MAVIS_SOURCE_NAME = "LSQ_Mavis"
-MAVIS_STATUS_NOT_STARTED = "Not-Started"
-
-
-def _as_str(value) -> str | None:
-    return None if value is None else str(value)
-
-
-@dataclass
-class MavisIngestionTaskConfig(_DictSerializable):
-    """
-    One row of the Mavis child config table resolved to typed fields — the
-    per-object export settings (including the API key, which is read straight
-    off the row, not dbutils.secrets). Built by
-    ``ConfigManager._build_mavis_task`` inside the normal ``get_active_tasks``
-    flow.
-
-    Cross-object settings — source_name, retry_count, retry_interval — are NOT
-    here; they come from the shared ``SourceSystemConfig`` row, exactly like
-    every other source in this package.
-    """
-
-    config_id: int
-
-    # Mavis object identifiers — used to build the request URL per task.
-    org_code: str | None
-    database_id: str | None
-    table_id: str | None
-
-    # Auth — read straight off this row, NOT from dbutils.secrets.
-    api_key: str | None
-
-    # Compute-derived: ConfigManager._mavis_worker_no(cluster_option, worker_number).
-    worker_no: int | None
-    compute_policy_name: str | None
-    cluster_option: str | None
-    worker_number: int | None
-
-    # Lifecycle bookkeeping.
-    is_active: int | None
-    status: str | None
-    day_execution_count: int | None
-    sink_batch_started_date: str | None
-
-    # Load semantics.
-    load_type: str | None
-    incremental_column: str | None
-    silver_last_sink_date: str | None
-    lookback_hours: int | None
-    write_mode: str | None
-    priority: int | None
-    batch_id: int | None
-
-    # Target.
-    target_catalog: str | None
-    target_schema: str | None
-    target_table: str | None
-
-    # Raw landing.
-    s3_raw_landing_path: str | None
-
-    source_object_name: str | None = None
-
-    # Set by get_active_tasks — the config_master-resolved child table this row
-    # came from (used by the extractor for status writeback).
-    child_table_fqn: str | None = None
-
-    @property
-    def full_target_table(self) -> str:
-        return f"{self.target_catalog}.{self.target_schema}.{self.target_table}"
-
-    @property
-    def effective_load_type(self) -> str:
-        return (self.load_type or "FULL").upper()
-
-    @property
-    def effective_write_mode(self) -> str:
-        if self.write_mode:
-            return self.write_mode
-        return "overwrite" if self.effective_load_type == "FULL" else "append"
 
