@@ -148,12 +148,12 @@ class MavisApiConnector:
         file_url = self._get_download_url(request_id)
         print(f"[Mavis] config_id={self.table.config_id} — FileURL obtained")
 
-        # Step 4 — download the ZIP and store it in S3 (raw landing)
-        zip_bytes = self._download_and_store_zip(file_url)
+        # Step 4 — download the ZIP and stream it to disk and S3
+        local_zip_path = self._download_and_store_zip(file_url)
         print(f"[Mavis] config_id={self.table.config_id} — ZIP stored at {self._zip_s3}")
 
-        # Step 5 — unzip in-memory, write CSV to S3, read back as DataFrame
-        df = self._unzip_to_csv_and_read(zip_bytes)
+        # Step 5 — unzip via disk stream, write CSV to S3, read back as DataFrame
+        df = self._unzip_to_csv_and_read(local_zip_path)
         print(f"[Mavis] config_id={self.table.config_id} — CSV stored at {self._csv_s3}")
 
         return df, self._zip_s3, self._csv_s3
@@ -318,68 +318,60 @@ class MavisApiConnector:
 
     # ── Step 4: CP_Get_Binary_Zip_File ────────────────────────────────────────
 
-    def _download_and_store_zip(self, file_url: str) -> bytes:
+    def _download_and_store_zip(self, file_url: str) -> str:
         """
-        HTTP GET the FileURL, write the ZIP to a local temp file, copy to ADLS.
-        Returns the raw ZIP bytes (reused by the unzip step).
+        HTTP GET the FileURL, stream the ZIP to a local temp file, copy to S3.
+        Returns the local temp file path of the downloaded ZIP.
 
         ADF equivalent: CP_Get_Binary_Zip_File
-          Source: HTTP GET on FileURL (BinarySource / ZipDeflateReadSettings)
-          Sink  : ADLS Gen2 — {container}/{Raw_Folder_Path}/zip/{yyyy}/{MMM}/{dd}/{Raw_File_Name}_{ts}.zip
         """
         response  = requests.get(file_url, stream=True, timeout=600)
         response.raise_for_status()
 
-        zip_bytes    = b""
-        tmp_zip_path: str | None = None
+        # Create a temp file but DO NOT delete=True so we can reuse it in the next step
+        tmp_fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip")
+        os.close(tmp_fd)
 
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                tmp_zip_path = tmp.name
-                for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
-                    tmp.write(chunk)
-                    zip_bytes += chunk
+        # Stream chunks directly to disk (driver storage), bypassing memory
+        with open(tmp_zip_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
+                f.write(chunk)
 
-            # Copy from local driver temp → S3 using dbutils.fs.cp
-            self.dbutils.fs.cp(f"file://{tmp_zip_path}", self._zip_s3)
-        finally:
-            if tmp_zip_path and os.path.exists(tmp_zip_path):
-                os.unlink(tmp_zip_path)
+        # Copy from local driver temp → S3 using dbutils.fs.cp
+        self.dbutils.fs.cp(f"file://{tmp_zip_path}", self._zip_s3)
 
-        return zip_bytes
+        return tmp_zip_path
 
     # ── Step 5: CP_Get_Unzipped_File → Spark DataFrame ───────────────────────
 
-    def _unzip_to_csv_and_read(self, zip_bytes: bytes):
+    def _unzip_to_csv_and_read(self, local_zip_path: str):
         """
-        Unzip in-memory, write the first CSV entry to ADLS, read back as Spark DataFrame.
-
-        ADF equivalent: CP_Get_Unzipped_File
-          Source: ADLS ZIP (ZipDeflateReadSettings, preserveZipFileNameAsFolder=false)
-          Sink  : ADLS Gen2 — {container}/{Raw_Folder_Path}/unzip/{yyyy}/{MMM}/{dd}/{Raw_File_Name}_{ts}.csv
-          Mapping: allowDataTruncation=true
+        Unzip via disk stream, write the first CSV entry to S3, read back as Spark DataFrame.
         """
-        tmp_csv_path: str | None = None
+        tmp_fd, tmp_csv_path = tempfile.mkstemp(suffix=".csv")
+        os.close(tmp_fd)
 
         try:
-            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            # Stream unzipping from disk to disk (no RAM blowout)
+            import shutil
+            with zipfile.ZipFile(local_zip_path) as zf:
                 csv_members = [n for n in zf.namelist() if n.lower().endswith(".csv")]
                 if not csv_members:
                     csv_members = zf.namelist()
                 if not csv_members:
-                    raise ValueError(
-                        f"[Mavis] ZIP for config_id={self.table.config_id} is empty."
-                    )
-                csv_content = zf.read(csv_members[0])
-
-            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
-                tmp_csv_path = tmp.name
-                tmp.write(csv_content)
+                    raise ValueError(f"[Mavis] ZIP for config_id={self.table.config_id} is empty.")
+                
+                with zf.open(csv_members[0]) as source_file:
+                    with open(tmp_csv_path, 'wb') as target_file:
+                        shutil.copyfileobj(source_file, target_file, length=8 * 1024 * 1024)
 
             self.dbutils.fs.cp(f"file://{tmp_csv_path}", self._csv_s3)
         finally:
             if tmp_csv_path and os.path.exists(tmp_csv_path):
                 os.unlink(tmp_csv_path)
+            # We can now safely delete the local ZIP file
+            if local_zip_path and os.path.exists(local_zip_path):
+                os.unlink(local_zip_path)
 
         # Read the CSV from S3 into a Spark DataFrame
         df = (
