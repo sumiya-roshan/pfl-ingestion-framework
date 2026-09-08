@@ -197,8 +197,8 @@ class MavisIngestionTaskConfig(_DictSerializable):
     sink_batch_started_date: str | None
 
     load_type: str | None
-    from_date: str | None   # INCREMENTAL export window start (config column)
-    to_date: str | None     # INCREMENTAL export window end   (config column)
+    source_filter: str | None  # Source_Filter — the export request body template
+    to_date: str | None        # To_Date — previous INCREMENTAL window end
     write_mode: str | None
     priority: int | None
     batch_id: int | None
@@ -658,7 +658,7 @@ class ConfigManager:
             ),
             sink_batch_started_date=r.get("sink_batch_started_date"),
             load_type=load_type,
-            from_date=r.get("From_Date") or r.get("from_date"),
+            source_filter=r.get("Source_Filter") or r.get("source_filter"),
             to_date=r.get("To_Date") or r.get("to_date"),
             write_mode=r.get("Write_Mode") or r.get("write_mode"),
             priority=self._to_int(r.get("Priority") or r.get("priority")),

@@ -27,14 +27,35 @@ import zipfile
 from dataclasses import dataclass, field
 
 
+def _fmt_dt(value) -> str:
+    """Normalise a date value to the ADF ``yyyy-MM-dd HH:mm:ss`` string."""
+    return str(value or "").strip().replace("T", " ").split(".")[0][:19]
+
+
 @dataclass
 class MavisApiConfig:
-    """HTTP / polling settings for the Mavis export API."""
+    """
+    HTTP / polling settings for the Mavis export API.
 
-    api_base_url: str = "https://mavis-api.leadsquared.com"
-    start_export_path: str = "/api/v1/export/start"
-    status_path: str = "/api/v1/export/status"
-    download_url_path: str = "/api/v1/export/download"
+    Endpoints mirror the ADF pipeline. ``prod_api`` is the ADF ``Prod_API``
+    parameter (base URL, e.g. ``https://<host>/v2/...``); the three path
+    templates are concatenated onto it with the per-task ids substituted:
+
+      start_export   {prod_api}{database_id}/{table_id}/rows/export?orgcode={org_code}
+      status         {prod_api}{database_id}/tables/{table_id}/requesthistory?orgcode={org_code}
+      download_url   {prod_api}{database_id}/{table_id}/request/download?orgcode={org_code}
+    """
+
+    prod_api: str = "https://mavis-api.leadsquared.com/"
+    start_export_path: str = (
+        "{database_id}/{table_id}/rows/export?orgcode={org_code}"
+    )
+    status_path: str = (
+        "{database_id}/tables/{table_id}/requesthistory?orgcode={org_code}"
+    )
+    download_url_path: str = (
+        "{database_id}/{table_id}/request/download?orgcode={org_code}"
+    )
 
     request_timeout_seconds: int = 60
     poll_interval_seconds: int = 15
@@ -81,8 +102,8 @@ class MavisApiExportConnector:
         attempt = 0
         while attempt < self.api.poll_max_attempts:
             attempt += 1
-            resp = self._post(url, task, {"RequestId": request_id})
-            status = str(resp.get("Status") or resp.get("status") or "").strip()
+            resp = self._post(url, task, {"Parameter": {"RequestId": request_id}})
+            status = self._extract_status(resp)
             print(f"[Mavis] config_id={task.config_id} poll {attempt}: '{status}'")
             if status.lower() in done:
                 return status
@@ -201,39 +222,44 @@ class MavisApiExportConnector:
     # ── Helpers ────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _build_start_body(task) -> dict:
-        """start_export body. INCREMENTAL adds FromDate / ToDate from the config row."""
-        body = {
-            "OrgCode": task.org_code,
-            "DatabaseId": task.database_id,
-            "TableId": task.table_id,
-        }
-        if task.effective_load_type == "INCREMENTAL":
-            body["FromDate"] = task.from_date
-            body["ToDate"] = task.to_date
-        return body
+    def _build_start_body(task) -> str:
+        """
+        start_export body = the configured ``Source_Filter`` (a JSON string),
+        matching the ADF logic.
 
-    def _build_url(self, path: str, task) -> str:
+        FULL load  : Source_Filter sent as-is.
+        INCREMENTAL: the literal tokens in Source_Filter are replaced ADF-style —
+          ``from_date`` -> the configured ``To_Date`` (previous window end)
+          ``to_date``   -> the batch trigger time (sink_batch_started_date)
+        both formatted ``yyyy-MM-dd HH:mm:ss``.
         """
-        Per-task endpoint URL. ``{org_code}`` / ``{database_id}`` / ``{table_id}``
-        placeholders in the configured path are substituted; a path with no
-        placeholders gets the three appended as query params.
-        """
-        base = self.api.api_base_url.rstrip("/")
-        if "{" in path:
-            path = (
-                path.replace("{org_code}", str(task.org_code or ""))
-                .replace("{database_id}", str(task.database_id or ""))
-                .replace("{table_id}", str(task.table_id or ""))
+        source_filter = task.source_filter
+        if not source_filter:
+            raise RuntimeError(
+                f"config_id={task.config_id}: Source_Filter is not set on the config row"
             )
-            return f"{base}/{path.lstrip('/')}"
-        return (
-            f"{base}/{path.lstrip('/')}?orgCode={task.org_code}"
-            f"&databaseId={task.database_id}&tableId={task.table_id}"
-        )
+        if task.effective_load_type == "INCREMENTAL":
+            source_filter = source_filter.replace(
+                "from_date", _fmt_dt(task.to_date)
+            ).replace("to_date", _fmt_dt(task.sink_batch_started_date))
+        return source_filter
 
-    def _post(self, url: str, task, body: dict) -> dict:
-        """POST ``body`` as JSON with the task's x-api-key; return the JSON object."""
+    def _build_url(self, path_template: str, task) -> str:
+        """
+        ``{prod_api}`` + the ADF path template with ``{database_id}`` /
+        ``{table_id}`` / ``{org_code}`` substituted from the task row.
+        """
+        path = (
+            path_template.replace("{database_id}", str(task.database_id or ""))
+            .replace("{table_id}", str(task.table_id or ""))
+            .replace("{org_code}", str(task.org_code or ""))
+        )
+        return f"{self.api.prod_api.rstrip('/')}/{path.lstrip('/')}"
+
+    def _post(self, url: str, task, body: dict | str) -> dict:
+        """POST ``body`` as JSON with the task's x-api-key; return the JSON object.
+        ``body`` may be a dict or an already-serialised JSON string (Source_Filter).
+        """
         import requests
 
         if not task.api_key:
@@ -243,9 +269,29 @@ class MavisApiExportConnector:
         resp = requests.post(
             url,
             headers={"x-api-key": task.api_key, "Content-Type": "application/json"},
-            data=json.dumps(body),
+            data=body if isinstance(body, str) else json.dumps(body),
             timeout=self.api.request_timeout_seconds,
         )
         resp.raise_for_status()
         parsed = resp.json()
         return parsed if isinstance(parsed, dict) else {"data": parsed}
+
+    @staticmethod
+    def _extract_status(resp: dict) -> str:
+        """
+        Pull the export status out of the requesthistory response. Handles a
+        flat ``{"Status": ...}`` object and a list of history records (newest
+        first assumed) under ``data`` / ``RequestHistory`` / ``Records``.
+        """
+        if resp.get("Status") or resp.get("status"):
+            return str(resp.get("Status") or resp.get("status")).strip()
+        records = (
+            resp.get("data")
+            or resp.get("RequestHistory")
+            or resp.get("Records")
+            or []
+        )
+        if isinstance(records, list) and records and isinstance(records[0], dict):
+            rec = records[0]
+            return str(rec.get("Status") or rec.get("status") or "").strip()
+        return ""
