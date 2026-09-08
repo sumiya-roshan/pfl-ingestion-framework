@@ -15,13 +15,11 @@ Status values reuse the shared AUDIT_STATUS_* vocabulary — no separate Mavis
 audit status. The extracted files are loaded to their target table by the
 normal downstream S3 ingestion config, not here.
 
-The get_tasks notebook does the Stage-1 batch reset, then:
+Entry point: ``src/main/api_export_main.py`` (the sibling of ``main.py`` for the
+export-API shape). It reads the tasks ``get_tasks.py`` published, then:
 
-    source_sys, tasks = config_mgr.get_active_tasks(
-        config_master_id=..., source_system_id=..., batch_start_date=...,
-    )
     extractor = MavisApiExtractor(spark, config_mgr)
-    for task in tasks:
+    for task in tasks:            # tasks are MavisIngestionTaskConfig
         extractor.run(task)
 """
 
