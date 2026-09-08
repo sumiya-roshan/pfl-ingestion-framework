@@ -1,11 +1,11 @@
 """
 MavisApiConnector — replaces the 5 ADF activities in PL_LSQ_Mavis_Raw_To_Silver
-that handle data movement from the Mavis REST API to ADLS.
+that handle data movement from the Mavis REST API to S3.
 
 Lives in ingestion/connectors/ alongside jdbc_connector, sftp_connector, etc.
 Unlike the other connectors it is NOT registered in factory.py because it uses
 a different configuration object (MavisTableConfig instead of IngestionTaskConfig)
-and requires dbutils for ADLS file operations. It is instantiated directly by
+and requires dbutils for S3 file operations. It is instantiated directly by
 MavisOrchestrator.
 
   ADF activity                  →  Method here
@@ -21,13 +21,13 @@ MavisOrchestrator.
 Public API
 ──────────
   connector = MavisApiConnector(spark, dbutils, table, trigger_time_utc, raw_sa_name)
-  df, zip_abfss, csv_abfss = connector.extract()
+  df, zip_s3, csv_s3 = connector.extract()
 
 Returns
 ───────
-  df          : Spark DataFrame read from the unzipped CSV in ADLS
-  zip_abfss   : abfss:// path where the raw ZIP was stored (for audit)
-  csv_abfss   : abfss:// path where the unzipped CSV was stored (for Silver input)
+  df          : Spark DataFrame read from the unzipped CSV in S3
+  zip_s3   : s3:// path where the raw ZIP was stored (for audit)
+  csv_s3   : s3:// path where the unzipped CSV was stored (for Silver input)
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ def _utc_to_ist(dt_utc: datetime) -> datetime:
 
 def _build_raw_paths(table: MavisTableConfig, trigger_time_utc: datetime) -> tuple[str, str]:
     """
-    Derive the ADLS relative paths for the ZIP and CSV files.
+    Derive the S3 relative paths for the ZIP and CSV files.
 
     Mirrors ADF path expressions (all date parts computed from trigger_time in IST):
       ZIP: {Raw_Folder_Path}/zip/{yyyy}/{MMM}/{dd}/{Raw_File_Name}_{yyyy_MM_dd_HH_mm_ss}.zip
@@ -131,10 +131,10 @@ class MavisApiConnector:
 
         Returns
         -------
-        (df, zip_abfss, csv_abfss)
+        (df, zip_s3, csv_s3)
           df         : Spark DataFrame read from the unzipped CSV
-          zip_abfss  : abfss:// path of the stored ZIP (for audit)
-          csv_abfss  : abfss:// path of the stored CSV (for Silver input)
+          zip_s3  : s3:// path of the stored ZIP (for audit)
+          csv_s3  : s3:// path of the stored CSV (for Silver input)
         """
         # Step 1 — trigger the async Mavis export job, get RequestId
         request_id = self._trigger_export()
