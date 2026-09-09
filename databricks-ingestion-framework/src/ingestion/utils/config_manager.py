@@ -170,6 +170,36 @@ class IngestionTaskConfig(_DictSerializable):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Shared config_master routing helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def resolve_child_table_fqn(spark, config_master_table: str, config_master_id: int) -> str:
+    """
+    Resolve the child config table FQN routed to by a config_master id — the
+    same routing every config-driven source (RDBMS, NoSQL, S3, Lentra, ...)
+    uses. Shared so callers outside ConfigManager (e.g. the Lentra notebooks,
+    which don't build IngestionTaskConfig/SourceSystemConfig objects and so
+    have no reason to instantiate ConfigManager) don't duplicate this lookup.
+    """
+    rows = (
+        spark.table(config_master_table)
+        .filter(f"config_id = {int(config_master_id)}")
+        .collect()
+    )
+    if not rows:
+        raise ValueError(
+            f"No entry in {config_master_table} for config_id={config_master_id}"
+        )
+    m = rows[0].asDict()
+    return (
+        f"{m.get('config_catalog_name')}."
+        f"{m.get('config_schema_name')}."
+        f"{m.get('config_table_name')}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ConfigManager
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -427,21 +457,7 @@ class ConfigManager:
 
     def _child_table_fqn(self, config_master_id: int) -> str:
         """Resolve the child config table FQN routed to by a config_master id."""
-        rows = (
-            self.spark.table(self.config_master_table)
-            .filter(f"config_id = {config_master_id}")
-            .collect()
-        )
-        if not rows:
-            raise ValueError(
-                f"No entry in {self.config_master_table} for config_id={config_master_id}"
-            )
-        m = rows[0].asDict()
-        return (
-            f"{m.get('config_catalog_name')}."
-            f"{m.get('config_schema_name')}."
-            f"{m.get('config_table_name')}"
-        )
+        return resolve_child_table_fqn(self.spark, self.config_master_table, config_master_id)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Internal helpers — row → dataclass builders
