@@ -62,22 +62,20 @@ class LentraLoader:
         spark,
         dbutils,
         config_mgr: ConfigManager,
-        client_notebook_path: str,
+        load_notebook_path: str,
         raw_sa_name: str,
         run_id: str,
-        client_notebook_timeout: int = 3600,
-        aws_region: str = "us-east-1",
+        notebook_timeout: int = 3600,
         classify_notebook_path: str | None = None,
         job_trigger: JobTrigger | None = None,
     ):
         self.spark = spark
         self.dbutils = dbutils
         self.config_mgr = config_mgr
-        self.client_notebook_path = client_notebook_path
+        self.load_notebook_path = load_notebook_path
         self.raw_sa_name = raw_sa_name
         self.run_id = run_id
-        self.client_notebook_timeout = client_notebook_timeout
-        self.aws_region = aws_region
+        self.notebook_timeout = notebook_timeout
         self.classify_notebook_path = classify_notebook_path
         self.job_trigger = job_trigger
 
@@ -86,7 +84,6 @@ class LentraLoader:
         task: LentraIngestionTaskConfig,
         raw_sa_name: str,
         run_id: str,
-        aws_region: str = "us-east-1",
     ) -> dict[str, str]:
         """
         Builds the exact parameter dict the client notebook (and, for DMS-
@@ -101,7 +98,6 @@ class LentraLoader:
             "raw_sa_name": raw_sa_name or "",
             "source_name": task.source_name or "",
             "run_id": str(run_id or ""),
-            "aws_region": aws_region or "",
             "Config_ID": str(task.config_id),
             "Config_Master_ID": str(task.source_config_master_id or ""),
             "Report_Name": task.report_name or "",
@@ -141,14 +137,14 @@ class LentraLoader:
         try:
             self.config_mgr.update_status(fqn, config_id, AUDIT_STATUS_INPROGRESS)
 
-            params = self.build_params(task, self.raw_sa_name, self.run_id, self.aws_region)
+            params = self.build_params(task, self.raw_sa_name, self.run_id)
 
             print(
                 f"[LentraLoader] config_id={config_id} ({task.report_name}) "
-                f"triggering {self.client_notebook_path}"
+                f"triggering {self.load_notebook_path}"
             )
             exit_value = self.dbutils.notebook.run(
-                self.client_notebook_path, self.client_notebook_timeout, params
+                self.load_notebook_path, self.notebook_timeout, params
             )
 
             classify_exit_value = None
@@ -166,7 +162,7 @@ class LentraLoader:
                     f"is a DMS-master source — triggering {self.classify_notebook_path}"
                 )
                 classify_exit_value = self.dbutils.notebook.run(
-                    self.classify_notebook_path, self.client_notebook_timeout, params
+                    self.classify_notebook_path, self.notebook_timeout, params
                 )
 
                 if not self.job_trigger:

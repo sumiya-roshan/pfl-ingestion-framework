@@ -70,10 +70,9 @@ dbutils.widgets.text("environment",         "dev",            "Environment: dev 
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
 dbutils.widgets.text("silver_notebook_path",    "",           "Workspace path to Silver transformation notebook (blank = skip Silver trigger)")
 dbutils.widgets.text("silver_notebook_timeout", "3600",       "Max seconds to wait for each Silver notebook run")
-dbutils.widgets.text("lentra_client_notebook_path", "",       "Lentra only: workspace path to the client-provided load_raw_to_silver notebook")
+dbutils.widgets.text("lentra_load_notebook_path", "",       "Lentra only: workspace path to the client-provided load_raw_to_silver notebook")
 dbutils.widgets.text("lentra_raw_sa_name",          "",       "Lentra only: base raw landing path (S3 URI / Volume path)")
-dbutils.widgets.text("lentra_notebook_timeout",     "3600",   "Lentra only: max seconds to wait for the client notebook run")
-dbutils.widgets.text("lentra_aws_region",           "us-east-1", "Lentra only: AWS region for the source S3 bucket")
+dbutils.widgets.text("lentra_notebook_timeout",     "3600",   "Lentra only: max seconds to wait for each notebook.run() call (load and classify)")
 dbutils.widgets.text("lentra_classify_notebook_path", "",      "Lentra only: workspace path to the classify notebook (only used for the 2 DMS-master sources)")
 dbutils.widgets.text("secret_scope",                "",        "Lentra only: secret scope for Databricks PAT token (needed to trigger api_extract/dms_extract jobs) — same as multi_refresh_orchestrator.py")
 dbutils.widgets.text("secret_key_pat",              "databricks-pat-token", "Lentra only: secret key for Databricks PAT token")
@@ -285,16 +284,15 @@ if is_lentra:
     from ingestion.utils.lentra_loader import LentraLoader
     from multi_refresh.job_trigger import JobTrigger
 
-    lentra_client_notebook_path   = dbutils.widgets.get("lentra_client_notebook_path") or None
+    lentra_load_notebook_path     = dbutils.widgets.get("lentra_load_notebook_path") or None
     lentra_raw_sa_name            = dbutils.widgets.get("lentra_raw_sa_name") or None
     lentra_notebook_timeout       = int(dbutils.widgets.get("lentra_notebook_timeout") or "3600")
-    lentra_aws_region             = dbutils.widgets.get("lentra_aws_region") or "us-east-1"
     lentra_classify_notebook_path = dbutils.widgets.get("lentra_classify_notebook_path") or None
     lentra_secret_scope           = dbutils.widgets.get("secret_scope") or None
     lentra_secret_key_pat         = dbutils.widgets.get("secret_key_pat") or "databricks-pat-token"
 
-    if not lentra_client_notebook_path:
-        dbutils.notebook.exit("Error: lentra_client_notebook_path widget is required for Lentra sources.")
+    if not lentra_load_notebook_path:
+        dbutils.notebook.exit("Error: lentra_load_notebook_path widget is required for Lentra sources.")
     if not lentra_raw_sa_name:
         dbutils.notebook.exit("Error: lentra_raw_sa_name widget is required for Lentra sources.")
 
@@ -313,11 +311,10 @@ if is_lentra:
         spark,
         dbutils,
         config_mgr,
-        client_notebook_path    = lentra_client_notebook_path,
+        load_notebook_path      = lentra_load_notebook_path,
         raw_sa_name             = lentra_raw_sa_name,
         run_id                  = job_run_id,
-        client_notebook_timeout = lentra_notebook_timeout,
-        aws_region              = lentra_aws_region,
+        notebook_timeout        = lentra_notebook_timeout,
         classify_notebook_path  = lentra_classify_notebook_path,
         job_trigger             = lentra_job_trigger,
     )
@@ -330,7 +327,7 @@ if is_lentra:
     # lookup. Lentra always resolves to exactly one task per source, so
     # there's no ambiguity about which row's values these are.
     lentra_published_values = LentraLoader.build_params(
-        tasks[0], lentra_raw_sa_name, job_run_id, lentra_aws_region
+        tasks[0], lentra_raw_sa_name, job_run_id
     )
     for _key, _value in lentra_published_values.items():
         try:
@@ -338,25 +335,24 @@ if is_lentra:
         except Exception as _exc:
             print(f"[Lentra] taskValues not available (standalone mode) for {_key}: {_exc}")
 
-    lentra_max_workers = min(4, len(tasks))
-    print(f"[Lentra] Running {len(tasks)} task(s) with ThreadPoolExecutor(max_workers={lentra_max_workers})")
+    # Lentra always resolves to exactly one active row per source_name (see
+    # ConfigManager.get_active_tasks), so there's no real parallelism to gain
+    # here — a plain sequential loop, not a ThreadPoolExecutor.
+    print(f"[Lentra] Running {len(tasks)} task(s)")
 
     lentra_results = []
-    with ThreadPoolExecutor(max_workers=lentra_max_workers) as executor:
-        future_to_task = {executor.submit(lentra_loader.run, task): task for task in tasks}
-        for future in as_completed(future_to_task):
-            task = future_to_task[future]
-            try:
-                lentra_results.append(future.result())
-            except Exception as exc:  # defensive — LentraLoader.run shouldn't raise
-                print(f"[Lentra] config_id={task.config_id} FAILED (worker error): {exc}")
-                lentra_results.append({
-                    "config_id": task.config_id,
-                    "report_name": task.report_name,
-                    "status": AUDIT_STATUS_FAILED,
-                    "exit_value": None,
-                    "error": str(exc),
-                })
+    for task in tasks:
+        try:
+            lentra_results.append(lentra_loader.run(task))
+        except Exception as exc:  # defensive — LentraLoader.run shouldn't raise
+            print(f"[Lentra] config_id={task.config_id} FAILED (worker error): {exc}")
+            lentra_results.append({
+                "config_id": task.config_id,
+                "report_name": task.report_name,
+                "status": AUDIT_STATUS_FAILED,
+                "exit_value": None,
+                "error": str(exc),
+            })
 
     lentra_succeeded = [r for r in lentra_results if r["status"] == AUDIT_STATUS_SUCCESS]
     lentra_failed = [r for r in lentra_results if r["status"] == AUDIT_STATUS_FAILED]
