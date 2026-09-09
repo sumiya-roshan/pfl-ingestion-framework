@@ -85,6 +85,15 @@ if is_lentra:
     active_col = config_mgr.resolve_col(_child_columns, "is_active", "Is_Active")
     status_col = config_mgr.resolve_col(_child_columns, "status", "Status")
     report_col = config_mgr.resolve_col(_child_columns, "Report_Name")
+
+    # Same "1" sentinel -> real UTC timestamp resolution the RDBMS branch
+    # does below — without this, batch_start_date stays "1" for the rest of
+    # the run (published to main.py as-is, never a real timestamp). Not
+    # written back to the table — nothing reads it back for Lentra, it's
+    # only needed as the in-memory value published downstream.
+    if batch_start_date == "1":
+        batch_start_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+
     spark.sql(f"""
         UPDATE {child_table_fqn}
         SET {status_col} = 'Not-Started'
@@ -92,7 +101,10 @@ if is_lentra:
           AND {src_col} = '{lentra_source_name}'
           AND {active_col} = 1
     """)
-    print(f"[Lentra] reset Status for source_name={lentra_source_name!r}")
+    print(
+        f"[Lentra] reset Status for source_name={lentra_source_name!r}, "
+        f"batch_start_date={batch_start_date!r}"
+    )
 
 elif batch_start_date == "1":
     # Batch start: flip to In Progress, reset Day_Execution_Count to 0, and stamp
