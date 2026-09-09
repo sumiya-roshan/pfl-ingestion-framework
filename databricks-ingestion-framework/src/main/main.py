@@ -379,6 +379,18 @@ if is_lentra:
             f"[Lentra] Pipeline cannot continue — {len(lentra_failed)} of "
             f"{len(lentra_results)} task(s) FAILED. Failed Config IDs: {failed_ids}"
         )
+        # Included directly in the exit message (not just logged) because
+        # plain print()/logger output doesn't render in the Jobs UI's
+        # notebook-preview ("Graph" tab) view for a job run — only rich
+        # outputs and the final dbutils.notebook.exit() string do.
+        failure_details = "; ".join(
+            f"config_id={r['config_id']} ({r.get('report_name')}): {r.get('error')}"
+            for r in lentra_failed
+        )
+        dbutils.notebook.exit(
+            f"FAILED: {len(lentra_succeeded)}/{len(lentra_results)} Lentra task(s) completed "
+            f"({len(lentra_failed)} failed). {failure_details}"
+        )
 
     dbutils.notebook.exit(
         f"SUCCESS: {len(lentra_succeeded)}/{len(lentra_results)} Lentra task(s) completed "
