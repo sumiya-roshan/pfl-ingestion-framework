@@ -185,10 +185,9 @@ class LentraLoader:
                     job_name=DMS_EXTRACT_JOB_NAME, notebook_params=params
                 )
                 print(
-                    f"[LentraLoader] config_id={config_id} fired "
+                    f"[LentraLoader] config_id={config_id} triggered "
                     f"{API_EXTRACT_JOB_NAME}=run_id:{api_extract_run_id}, "
                     f"{DMS_EXTRACT_JOB_NAME}=run_id:{dms_extract_run_id} "
-                    f"(fire-and-forget, not waited on)"
                 )
 
             self.config_mgr.update_status(fqn, config_id, AUDIT_STATUS_SUCCESS)
