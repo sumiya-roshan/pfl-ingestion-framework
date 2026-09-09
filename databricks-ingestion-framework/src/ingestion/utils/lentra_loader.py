@@ -40,12 +40,10 @@ from .config_manager import (
 # Sources that need the DMS-master branch (classify notebook + 2 downstream
 # jobs) after the client notebook succeeds. Exact list, not a pattern match —
 # only these two ever trigger it.
-DMS_API_RESPONSE_FILES_SOURCES = frozenset(
-    {
-        "lentra_dealer_dms_api_response_files_hdr",
-        "lentra_cd_dms_api_response_files_hdr",
-    }
-)
+DMS_API_RESPONSE_FILES_SOURCES = [
+    "lentra_dealer_dms_api_response_files_hdr",
+    "lentra_cd_dms_api_response_files_hdr",
+]
 
 # Job names triggered (simultaneously — both fired before either is waited
 # on) after the classify notebook succeeds. Resolved to job_id by JobTrigger
