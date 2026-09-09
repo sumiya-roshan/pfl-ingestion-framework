@@ -74,6 +74,9 @@ dbutils.widgets.text("lentra_client_notebook_path", "",       "Lentra only: work
 dbutils.widgets.text("lentra_raw_sa_name",          "",       "Lentra only: base raw landing path (S3 URI / Volume path)")
 dbutils.widgets.text("lentra_notebook_timeout",     "3600",   "Lentra only: max seconds to wait for the client notebook run")
 dbutils.widgets.text("lentra_aws_region",           "us-east-1", "Lentra only: AWS region for the source S3 bucket")
+dbutils.widgets.text("lentra_classify_notebook_path", "",      "Lentra only: workspace path to the classify notebook (only used for the 2 DMS-master sources)")
+dbutils.widgets.text("secret_scope",                "",        "Lentra only: secret scope for Databricks PAT token (needed to trigger api_extract/dms_extract jobs) — same as multi_refresh_orchestrator.py")
+dbutils.widgets.text("secret_key_pat",              "databricks-pat-token", "Lentra only: secret key for Databricks PAT token")
 
 # COMMAND ----------
 
@@ -280,16 +283,31 @@ if not tasks:
 
 if is_lentra:
     from ingestion.utils.lentra_loader import LentraLoader
+    from multi_refresh.job_trigger import JobTrigger
 
-    lentra_client_notebook_path = dbutils.widgets.get("lentra_client_notebook_path") or None
-    lentra_raw_sa_name          = dbutils.widgets.get("lentra_raw_sa_name") or None
-    lentra_notebook_timeout     = int(dbutils.widgets.get("lentra_notebook_timeout") or "3600")
-    lentra_aws_region           = dbutils.widgets.get("lentra_aws_region") or "us-east-1"
+    lentra_client_notebook_path   = dbutils.widgets.get("lentra_client_notebook_path") or None
+    lentra_raw_sa_name            = dbutils.widgets.get("lentra_raw_sa_name") or None
+    lentra_notebook_timeout       = int(dbutils.widgets.get("lentra_notebook_timeout") or "3600")
+    lentra_aws_region             = dbutils.widgets.get("lentra_aws_region") or "us-east-1"
+    lentra_classify_notebook_path = dbutils.widgets.get("lentra_classify_notebook_path") or None
+    lentra_secret_scope           = dbutils.widgets.get("secret_scope") or None
+    lentra_secret_key_pat         = dbutils.widgets.get("secret_key_pat") or "databricks-pat-token"
 
     if not lentra_client_notebook_path:
         dbutils.notebook.exit("Error: lentra_client_notebook_path widget is required for Lentra sources.")
     if not lentra_raw_sa_name:
         dbutils.notebook.exit("Error: lentra_raw_sa_name widget is required for Lentra sources.")
+
+    # Only needed for the 2 DMS-master sources (api_extract/dms_extract job
+    # triggers) — left None otherwise, same "only errors when actually
+    # needed" pattern as lentra_classify_notebook_path inside LentraLoader.
+    lentra_job_trigger = None
+    if lentra_secret_scope:
+        lentra_workspace_url = (
+            dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiUrl().get()
+        )
+        lentra_pat_token = dbutils.secrets.get(scope=lentra_secret_scope, key=lentra_secret_key_pat)
+        lentra_job_trigger = JobTrigger(workspace_url=lentra_workspace_url, token=lentra_pat_token)
 
     lentra_loader = LentraLoader(
         spark,
@@ -300,6 +318,8 @@ if is_lentra:
         run_id                  = job_run_id,
         client_notebook_timeout = lentra_notebook_timeout,
         aws_region              = lentra_aws_region,
+        classify_notebook_path  = lentra_classify_notebook_path,
+        job_trigger             = lentra_job_trigger,
     )
 
     # Publish the same values the client notebook receives as taskValues, so
