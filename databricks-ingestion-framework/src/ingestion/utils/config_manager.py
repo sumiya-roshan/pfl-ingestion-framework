@@ -816,11 +816,25 @@ class ConfigManager:
             or r.get("silver_sink_schema_name"),
             silver_sink_table_name=r.get("Silver_Sink_table_Name")
             or r.get("silver_sink_table_name"),
-            business_date=r.get("Business_Date") or r.get("business_date"),
+            # Business_Date/Sink_Batch_Start_Date come back from Spark as
+            # datetime.date/Timestamp objects (not strings) when the column
+            # is actually date/timestamp-typed — json.dumps() (used when
+            # publishing tasks via taskValues) can't serialize those, so
+            # stringify here, same pattern _build_ingestion_task() uses for
+            # Silver_Last_Sink_Date.
+            business_date=(
+                str(r.get("Business_Date") or r.get("business_date") or "") or None
+            ),
             status=r.get("Status") or r.get("status"),
             is_active=self._to_int(r.get("Is_Active") or r.get("is_active")),
-            sink_batch_started_date=r.get("Sink_Batch_Start_Date")
-            or r.get("sink_batch_started_date"),
+            sink_batch_started_date=(
+                str(
+                    r.get("Sink_Batch_Start_Date")
+                    or r.get("sink_batch_started_date")
+                    or ""
+                )
+                or None
+            ),
             recipients=r.get("Recipients") or r.get("recipients"),
             pipeline_name=r.get("Pipeline_Name") or r.get("pipeline_name"),
             access_key_id=r.get("Access_Key_ID") or r.get("access_key_id"),
