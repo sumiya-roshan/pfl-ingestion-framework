@@ -65,6 +65,7 @@ class LentraLoader:
         load_notebook_path: str,
         raw_sa_name: str,
         run_id: str,
+        batch_start_date: str = "",
         notebook_timeout: int = 3600,
         classify_notebook_path: str | None = None,
         job_trigger: JobTrigger | None = None,
@@ -75,6 +76,7 @@ class LentraLoader:
         self.load_notebook_path = load_notebook_path
         self.raw_sa_name = raw_sa_name
         self.run_id = run_id
+        self.batch_start_date = batch_start_date
         self.notebook_timeout = notebook_timeout
         self.classify_notebook_path = classify_notebook_path
         self.job_trigger = job_trigger
@@ -84,6 +86,7 @@ class LentraLoader:
         task: LentraIngestionTaskConfig,
         raw_sa_name: str,
         run_id: str,
+        batch_start_date: str = "",
     ) -> dict[str, str]:
         """
         Builds the exact parameter dict the client notebook (and, for DMS-
@@ -98,6 +101,7 @@ class LentraLoader:
             "raw_sa_name": raw_sa_name or "",
             "source_name": task.source_name or "",
             "run_id": str(run_id or ""),
+            "batch_start_date": str(batch_start_date or ""),
             "Config_ID": str(task.config_id),
             "Config_Master_ID": str(task.source_config_master_id or ""),
             "Report_Name": task.report_name or "",
@@ -137,7 +141,7 @@ class LentraLoader:
         try:
             self.config_mgr.update_status(fqn, config_id, AUDIT_STATUS_INPROGRESS)
 
-            params = self.build_params(task, self.raw_sa_name, self.run_id)
+            params = self.build_params(task, self.raw_sa_name, self.run_id, self.batch_start_date)
 
             print(
                 f"[LentraLoader] config_id={config_id} ({task.report_name}) "

@@ -314,6 +314,7 @@ if is_lentra:
         load_notebook_path      = lentra_load_notebook_path,
         raw_sa_name             = lentra_raw_sa_name,
         run_id                  = job_run_id,
+        batch_start_date        = str(batch_start_date),
         notebook_timeout        = lentra_notebook_timeout,
         classify_notebook_path  = lentra_classify_notebook_path,
         job_trigger             = lentra_job_trigger,
@@ -327,7 +328,7 @@ if is_lentra:
     # lookup. Lentra always resolves to exactly one task per source, so
     # there's no ambiguity about which row's values these are.
     lentra_published_values = LentraLoader.build_params(
-        tasks[0], lentra_raw_sa_name, job_run_id
+        tasks[0], lentra_raw_sa_name, job_run_id, str(batch_start_date)
     )
     for _key, _value in lentra_published_values.items():
         try:
