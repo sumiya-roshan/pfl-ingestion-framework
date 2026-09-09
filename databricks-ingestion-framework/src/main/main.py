@@ -48,6 +48,7 @@ from ingestion.utils.config_manager import (
     SOURCE_SYSTEM_TABLE,
     ConfigManager,
     IngestionTaskConfig,
+    LentraIngestionTaskConfig,
     SourceSystemConfig,
 )
 from ingestion.utils.logger import _upload_on_exit, configure_s3_logging, get_logger
@@ -62,22 +63,30 @@ from ingestion.utils.orchestrator import IngestionOrchestrator
 
 dbutils.widgets.text("config_master_id",    "",               "Config Master ID (int — routes to correct child config table)")
 dbutils.widgets.text("source_system_id",    "",               "Source System ID (int — fetches credentials + source_name)")
-dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (required)")
+dbutils.widgets.text("source_name",         "",               "Lentra only: source name directly (matches the config table's Source_Name exactly) — alternative to source_system_id")
+dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (required for RDBMS/NoSQL/S3, not Lentra)")
 dbutils.widgets.text("job_run_id",          "",               "Job Run ID (required) — set to {{job.run_id}} in job config")
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
 dbutils.widgets.text("silver_notebook_path",    "",           "Workspace path to Silver transformation notebook (blank = skip Silver trigger)")
 dbutils.widgets.text("silver_notebook_timeout", "3600",       "Max seconds to wait for each Silver notebook run")
+dbutils.widgets.text("lentra_client_notebook_path", "",       "Lentra only: workspace path to the client-provided load_raw_to_silver notebook")
+dbutils.widgets.text("lentra_raw_sa_name",          "",       "Lentra only: base raw landing path (S3 URI / Volume path)")
+dbutils.widgets.text("lentra_notebook_timeout",     "3600",   "Lentra only: max seconds to wait for the client notebook run")
+dbutils.widgets.text("lentra_aws_region",           "us-east-1", "Lentra only: AWS region for the source S3 bucket")
 
 # COMMAND ----------
 
 config_master_id_raw = dbutils.widgets.get("config_master_id") or None
 source_system_id_raw = dbutils.widgets.get("source_system_id") or None
-if not config_master_id_raw or not source_system_id_raw:
-    dbutils.notebook.exit("Error: config_master_id and source_system_id are required.")
+source_name   = dbutils.widgets.get("source_name") or None
+if not config_master_id_raw:
+    dbutils.notebook.exit("Error: config_master_id is required.")
+if not source_system_id_raw and not source_name:
+    dbutils.notebook.exit("Error: either source_system_id or source_name is required.")
 
 config_master_id     = int(config_master_id_raw)
-source_system_id     = int(source_system_id_raw)
+source_system_id     = int(source_system_id_raw) if source_system_id_raw else None
 pipeline_name        = dbutils.widgets.get("pipeline_name")        or None
 try:
     job_id           = dbutils.widgets.get("job_id")           or None
@@ -85,8 +94,9 @@ except Exception:
     job_id           = None
 job_run_id           = dbutils.widgets.get("job_run_id")           or None
 
-if not pipeline_name:
-    dbutils.notebook.exit("Error: pipeline_name widget is required and cannot be empty.")
+# pipeline_name is required for RDBMS/NoSQL/S3 (filters get_active_tasks) but
+# NOT for Lentra, which has no pipeline_name-based filtering — checked again
+# below, after task discovery tells us which shape this run is.
 if not job_run_id:
     dbutils.notebook.exit("Error: job_run_id widget is required and cannot be empty.")
 
@@ -204,7 +214,11 @@ if payload_str:
     print("[Tasks] Reading active tasks from taskValues (get_table_details task).")
     payload    = json.loads(payload_str)
     source_sys = SourceSystemConfig.from_dict(payload["source_sys"])
-    tasks      = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
+    is_lentra  = bool(payload.get("is_lentra"))
+    if is_lentra:
+        tasks = [LentraIngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
+    else:
+        tasks = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
     batch_start_date = payload.get("batch_start_date")
 else:
     # ── Standalone mode: query config tables directly ──────────────────────
@@ -212,9 +226,16 @@ else:
     source_sys, tasks = config_mgr.get_active_tasks(
         config_master_id = config_master_id,
         source_system_id = source_system_id,
+        source_name      = source_name,
         pipeline_name    = pipeline_name,
         batch_start_date = batch_start_date,
     )
+    # Empty tasks -> notebook exits right below anyway, so it's fine that
+    # is_lentra can't be determined by isinstance() in that case.
+    is_lentra = bool(tasks) and isinstance(tasks[0], LentraIngestionTaskConfig)
+
+if not is_lentra and not pipeline_name:
+    dbutils.notebook.exit("Error: pipeline_name widget is required and cannot be empty.")
 
 # batch_start_date arrives as a string — get_tasks.py stamps it as
 # '%Y-%m-%d %H:%M:%S.%f', and the widget default is the sentinel '1'. The
@@ -233,13 +254,116 @@ print(f"Active tasks    : {len(tasks)}")
 # Configure S3/Volume logging dynamically
 resolved_landing_path = source_sys.landing_volume_path
 if resolved_landing_path:
-    s3_log_path = f"{resolved_landing_path.rstrip('/')}/logs/{pipeline_name}_{job_run_id}.log"
+    s3_log_path = f"{resolved_landing_path.rstrip('/')}/logs/{pipeline_name or source_sys.source_name}_{job_run_id}.log"
     configure_s3_logging(s3_log_path, dbutils=dbutils)
 
 logger.info(f"Pipeline started for source: {source_sys.source_name} ({source_sys.source_type})")
 
 if not tasks:
     dbutils.notebook.exit("No active ingestion tasks found for this pipeline.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Lentra — separate orchestrator
+# MAGIC
+# MAGIC Lentra tasks (`LentraIngestionTaskConfig`) don't go through
+# MAGIC `IngestionOrchestrator` — the actual connection/processing logic lives in
+# MAGIC a client-provided notebook, not a Python connector this framework owns.
+# MAGIC `LentraLoader` triggers that notebook per task and writes `Status` back.
+# MAGIC This block short-circuits via `dbutils.notebook.exit()`, so none of the
+# MAGIC `IngestionOrchestrator` / Silver / dependency-tracking code below ever
+# MAGIC runs for Lentra tasks — the rest of this notebook is untouched by this
+# MAGIC branch.
+
+# COMMAND ----------
+
+if is_lentra:
+    from ingestion.utils.lentra_loader import LentraLoader
+
+    lentra_client_notebook_path = dbutils.widgets.get("lentra_client_notebook_path") or None
+    lentra_raw_sa_name          = dbutils.widgets.get("lentra_raw_sa_name") or None
+    lentra_notebook_timeout     = int(dbutils.widgets.get("lentra_notebook_timeout") or "3600")
+    lentra_aws_region           = dbutils.widgets.get("lentra_aws_region") or "us-east-1"
+
+    if not lentra_client_notebook_path:
+        dbutils.notebook.exit("Error: lentra_client_notebook_path widget is required for Lentra sources.")
+    if not lentra_raw_sa_name:
+        dbutils.notebook.exit("Error: lentra_raw_sa_name widget is required for Lentra sources.")
+
+    lentra_loader = LentraLoader(
+        spark,
+        dbutils,
+        config_mgr,
+        client_notebook_path    = lentra_client_notebook_path,
+        raw_sa_name             = lentra_raw_sa_name,
+        run_id                  = job_run_id,
+        client_notebook_timeout = lentra_notebook_timeout,
+        aws_region              = lentra_aws_region,
+    )
+
+    # Publish the same values the client notebook receives as taskValues, so
+    # a downstream job task (e.g. a classify/DMS-extract notebook, wired
+    # directly in the job graph for specific sources — not something this
+    # code branches on) can read them via
+    # {{tasks.<this task's name>.values.<key>}} without its own config-table
+    # lookup. Lentra always resolves to exactly one task per source, so
+    # there's no ambiguity about which row's values these are.
+    lentra_published_values = LentraLoader.build_params(
+        tasks[0], lentra_raw_sa_name, job_run_id, lentra_aws_region
+    )
+    for _key, _value in lentra_published_values.items():
+        try:
+            dbutils.jobs.taskValues.set(key=_key, value=_value)
+        except Exception as _exc:
+            print(f"[Lentra] taskValues not available (standalone mode) for {_key}: {_exc}")
+
+    lentra_max_workers = min(4, len(tasks))
+    print(f"[Lentra] Running {len(tasks)} task(s) with ThreadPoolExecutor(max_workers={lentra_max_workers})")
+
+    lentra_results = []
+    with ThreadPoolExecutor(max_workers=lentra_max_workers) as executor:
+        future_to_task = {executor.submit(lentra_loader.run, task): task for task in tasks}
+        for future in as_completed(future_to_task):
+            task = future_to_task[future]
+            try:
+                lentra_results.append(future.result())
+            except Exception as exc:  # defensive — LentraLoader.run shouldn't raise
+                print(f"[Lentra] config_id={task.config_id} FAILED (worker error): {exc}")
+                lentra_results.append({
+                    "config_id": task.config_id,
+                    "report_name": task.report_name,
+                    "status": AUDIT_STATUS_FAILED,
+                    "exit_value": None,
+                    "error": str(exc),
+                })
+
+    lentra_succeeded = [r for r in lentra_results if r["status"] == AUDIT_STATUS_SUCCESS]
+    lentra_failed = [r for r in lentra_results if r["status"] == AUDIT_STATUS_FAILED]
+
+    print(f"\n{'=' * 75}")
+    print(f"{'CONF ID':>8}  {'STATUS':<10}  REPORT")
+    print(f"{'=' * 75}")
+    for r in sorted(lentra_results, key=lambda x: x["config_id"]):
+        icon = "✅" if r["status"] == AUDIT_STATUS_SUCCESS else "❌"
+        print(f"{r['config_id']:>8}  {icon} {r['status']:<8}  {r.get('report_name', '')}")
+    print(f"{'=' * 75}")
+    print(
+        f"Total: {len(lentra_results)} | ✅ Succeeded: {len(lentra_succeeded)} | "
+        f"❌ Failed: {len(lentra_failed)}\n"
+    )
+
+    if lentra_failed:
+        failed_ids = [r["config_id"] for r in lentra_failed]
+        logger.critical(
+            f"[Lentra] Pipeline cannot continue — {len(lentra_failed)} of "
+            f"{len(lentra_results)} task(s) FAILED. Failed Config IDs: {failed_ids}"
+        )
+
+    dbutils.notebook.exit(
+        f"SUCCESS: {len(lentra_succeeded)}/{len(lentra_results)} Lentra task(s) completed "
+        f"({len(lentra_failed)} failed)."
+    )
 
 # NOTE: max_workers is now derived dynamically from the distinct batch_id count
 # for this pipeline in the execution section below.

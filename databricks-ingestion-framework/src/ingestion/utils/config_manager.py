@@ -169,6 +169,84 @@ class IngestionTaskConfig(_DictSerializable):
         return (self.delta_layer or "BRONZE").upper()
 
 
+@dataclass
+class LentraIngestionTaskConfig(_DictSerializable):
+    """
+    One row of the Lentra child config table (the S3-ingestion config table
+    tracking Lentra report exports) resolved to typed fields. Built by
+    ``ConfigManager._build_lentra_task`` inside the normal ``get_active_tasks``
+    flow — same routing as every other source, just a different row→object
+    step, branched on the child table's own shape (see
+    ``ConfigManager.is_lentra_shaped``).
+
+    Unlike LSQ Mavis (one fixed source_name, routed via a dedicated
+    config_master_id), Lentra has many distinct Source_Name values that all
+    share this same table shape — one active row per source. So detection
+    here is by column shape (Report_Name + Silver_Sink_Schema_Name present),
+    not a hardcoded id/name, and works regardless of which config_master_id
+    ends up routing to this table.
+
+    ``worker_no`` is computed in Python here (mirrors the ADF/SQL CASE
+    expression the original ADF lookup used) rather than via a SQL CASE
+    clause in ``get_active_tasks``: multi-node compute policies get "1:N"
+    (autoscaling) or "N" (fixed); everything else gets "0".
+
+    ``source_config_master_id`` is this ROW's own Config_Master_ID column — a
+    per-row business field, unrelated to (and easily confused with) the
+    config_master ROUTING id passed into ``get_active_tasks``. Don't conflate
+    the two.
+
+    ``access_key_id`` / ``secret_access_key`` are AWS Secrets Manager secret
+    *names*, not raw credential values — safe to carry on this object and
+    serialize via taskValues.
+    """
+
+    config_id: int
+    source_config_master_id: int | None
+    report_name: str | None
+    key_column: str | None
+    source_name: str | None
+    source_bucket_name: str | None
+    external_path: str | None
+    frequency: str | None
+    load_type: str | None
+    raw_sink_container_name: str | None
+    raw_sink_file_path: str | None
+    column_delimiter: str | None
+    first_row_header: bool | None
+    silver_sink_schema_name: str | None
+    silver_sink_table_name: str | None
+    business_date: str | None
+    status: str | None
+    is_active: int | None
+    sink_batch_started_date: str | None
+    recipients: str | None
+    pipeline_name: str | None
+    access_key_id: str | None
+    secret_access_key: str | None
+    day_execution_count: int | None
+    report_execution_day: str | None
+    compute_policy_name: str | None
+    compute_policy_id: str | None
+    cluster_option: str | None
+    worker_number: int | None
+    worker_no: str | None = None
+
+    child_table_fqn: str | None = None
+
+    @property
+    def recipient_list(self) -> list[str] | None:
+        if not self.recipients:
+            return None
+        try:
+            parsed = json.loads(self.recipients)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(parsed, list):
+            return None
+        return [str(r).strip() for r in parsed if str(r).strip()]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared config_master routing helper
 # ─────────────────────────────────────────────────────────────────────────────
@@ -239,40 +317,67 @@ class ConfigManager:
     def get_active_tasks(
         self,
         config_master_id: int,
-        source_system_id: int,
+        source_system_id: int | None = None,
+        source_name: str | None = None,
         pipeline_name: str | None = None,
         batch_start_date: str | None = None,
-    ) -> tuple[SourceSystemConfig, list[IngestionTaskConfig]]:
+    ) -> tuple[SourceSystemConfig, list[IngestionTaskConfig | LentraIngestionTaskConfig]]:
         """
-        1. Fetch Source System by source_system_id to get credentials & source_name.
+        1. Resolve source_name — either via source_system_id (fetches
+           credentials + source_name from config_source_system, required for
+           RDBMS/NoSQL/S3) or source_name given directly (the Lentra path —
+           no config_source_system row needed, since Lentra's credentials are
+           AWS Secrets Manager secret names carried on the config table
+           itself, not config_source_system.secret_scope). Exactly one of
+           source_system_id / source_name must be given.
         2. Fetch the specific child config table location from config_master.
         3. Query the child config table for active tasks for this source_name,
            filtering by pipeline_name if provided.
         4. If batch_start_date is provided and not '1', filter by sink_batch_started_date.
+
+        For a Lentra-shaped child table (detected via ``is_lentra_shaped`` —
+        see that method for why it's shape-based, not a hardcoded id/name),
+        rows are built into LentraIngestionTaskConfig objects instead of
+        IngestionTaskConfig — routing/filtering is otherwise identical, plus
+        one extra filter (Report_Name like 'lentra%hdr') and a different order
+        column, since Lentra's table has no Priority column.
         """
 
-        # 1. Resolve source system
-        source_sys = self.get_source_system(source_system_id)
-        source_name = source_sys.source_name
+        # 1. Resolve source system / source_name
+        if source_system_id is not None:
+            source_sys = self.get_source_system(source_system_id)
+            resolved_source_name = source_sys.source_name
+        elif source_name:
+            source_sys = self._placeholder_source_system(source_name)
+            resolved_source_name = source_name
+        else:
+            raise ValueError(
+                "get_active_tasks requires either source_system_id or source_name."
+            )
 
         # 2. Find child config table location from master
         child_table_fqn = self._child_table_fqn(config_master_id)
 
         # 3. Query the child config table
         child_df = self.spark.table(child_table_fqn)
+        is_lentra = self.is_lentra_shaped(child_df.columns)
 
         # Case-insensitive column resolution
-        src_col = self._resolve_col(child_df.columns, "source_name", "Source_Name")
-        active_col = self._resolve_col(child_df.columns, "is_active", "Is_Active")
+        src_col = self.resolve_col(child_df.columns, "source_name", "Source_Name")
+        active_col = self.resolve_col(child_df.columns, "is_active", "Is_Active")
 
         # Basic filtering by source system and active status
         filtered_df = child_df.filter(
-            f"{src_col} = '{source_name}' AND {active_col} = 1"
+            f"{src_col} = '{resolved_source_name}' AND {active_col} = 1"
         )
+
+        if is_lentra:
+            report_col = self.resolve_col(child_df.columns, "Report_Name")
+            filtered_df = filtered_df.filter(f"{report_col} like 'lentra%hdr'")
 
         # Apply multi-refresh batch start date filtering if triggered by orchestrator
         if batch_start_date and str(batch_start_date).strip() != "1":
-            date_col = self._resolve_col(child_df.columns, "sink_batch_started_date")
+            date_col = self.resolve_col(child_df.columns, "sink_batch_started_date")
             if date_col:
                 clean_date = str(batch_start_date).replace("T", " ").split(".")[0]
                 print(
@@ -286,10 +391,18 @@ class ConfigManager:
                     f"[ConfigManager] Warning: {child_table_fqn} has no sink_batch_started_date column. Skipping filter."
                 )
 
-        child_rows = filtered_df.orderBy("priority").collect()
+        # Lentra's table has no Priority column — order by Config_ID instead.
+        order_col = "Config_ID" if is_lentra else "priority"
+        child_rows = filtered_df.orderBy(order_col).collect()
 
         tasks = []
         for r in child_rows:
+            if is_lentra:
+                lentra_task = self._build_lentra_task(r.asDict())
+                lentra_task.child_table_fqn = child_table_fqn
+                tasks.append(lentra_task)
+                continue
+
             task = self._build_ingestion_task(r.asDict())
             task.config_master_id = config_master_id
             task.child_table_fqn = child_table_fqn
@@ -383,8 +496,8 @@ class ConfigManager:
         (Config_ID vs config_id, Silver_Last_Sink_Date vs silver_last_sink_date).
         """
         columns = self.spark.table(child_table_fqn).columns
-        config_id_col = self._resolve_col(columns, "config_id", "Config_ID")
-        sink_date_col = self._resolve_col(
+        config_id_col = self.resolve_col(columns, "config_id", "Config_ID")
+        sink_date_col = self.resolve_col(
             columns, "silver_last_sink_date", "Silver_Last_Sink_Date"
         )
         self.spark.sql(f"""
@@ -405,8 +518,8 @@ class ConfigManager:
         (Config_ID vs config_id, Raw_Last_Sink_Time vs raw_last_sink_time).
         """
         columns = self.spark.table(child_table_fqn).columns
-        config_id_col = self._resolve_col(columns, "config_id", "Config_ID")
-        sink_time_col = self._resolve_col(
+        config_id_col = self.resolve_col(columns, "config_id", "Config_ID")
+        sink_time_col = self.resolve_col(
             columns, "raw_last_sink_time", "Raw_Last_Sink_Time"
         )
         self.spark.sql(f"""
@@ -422,8 +535,8 @@ class ConfigManager:
         layer fails. Column/PK names are resolved case-insensitively.
         """
         columns = self.spark.table(child_table_fqn).columns
-        config_id_col = self._resolve_col(columns, "config_id", "Config_ID")
-        status_col = self._resolve_col(columns, "status", "Status")
+        config_id_col = self.resolve_col(columns, "config_id", "Config_ID")
+        status_col = self.resolve_col(columns, "status", "Status")
         self.spark.sql(f"""
             UPDATE {child_table_fqn}
             SET {status_col} = '{status}'
@@ -451,7 +564,7 @@ class ConfigManager:
         return int(float(value))
 
     @staticmethod
-    def _resolve_col(columns, name: str, default: str | None = None) -> str | None:
+    def resolve_col(columns, name: str, default: str | None = None) -> str | None:
         """Case-insensitive lookup of `name` among `columns`, else `default`."""
         return next((c for c in columns if c.lower() == name.lower()), default)
 
@@ -459,9 +572,59 @@ class ConfigManager:
         """Resolve the child config table FQN routed to by a config_master id."""
         return resolve_child_table_fqn(self.spark, self.config_master_table, config_master_id)
 
+    def is_lentra_shaped(self, columns: list[str]) -> bool:
+        """
+        Detects the Lentra child table shape by its own columns, rather than a
+        hardcoded config_master_id or source_name. Lentra has many distinct
+        Source_Name values sharing this one table shape (unlike e.g. LSQ
+        Mavis, which is one fixed source_name), so column-shape detection is
+        what actually generalizes across all of them — and it works no matter
+        which config_master_id ends up routing to this table.
+        """
+        return bool(
+            self.resolve_col(columns, "Report_Name")
+            and self.resolve_col(columns, "Silver_Sink_Schema_Name")
+        )
+
     # ─────────────────────────────────────────────────────────────────────────
     # Internal helpers — row → dataclass builders
     # ─────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _placeholder_source_system(source_name: str) -> SourceSystemConfig:
+        """
+        A minimal SourceSystemConfig for the Lentra source_name path, which
+        has no config_source_system row — Lentra needs no shared connector
+        credentials or landing_volume_path there; its own AWS Secrets Manager
+        secret names live directly on the config table row. This keeps every
+        caller's source_sys.* access (source_name, source_type,
+        landing_volume_path, ...) working without a None check at every call
+        site — landing_volume_path is None here, which callers already treat
+        as "not configured, skip" (e.g. main.py's S3 log path setup).
+        """
+        return SourceSystemConfig(
+            source_id=0,
+            source_name=source_name,
+            source_type="LENTRA",
+            ingest_method="LENTRA",
+            host=None,
+            port=None,
+            database_name=None,
+            driver_class=None,
+            connection_uri=None,
+            nosql_replica_set=None,
+            nosql_collection_name=None,
+            sftp_root_path=None,
+            sftp_file_pattern=None,
+            sftp_host_key_fingerprint=None,
+            extra_params=None,
+            secret_scope="",
+            secret_key_credentials=None,
+            is_active=1,
+            landing_volume_path=None,
+            retry_count=None,
+            retry_interval=None,
+        )
 
     @staticmethod
     def _build_source_system(r: dict) -> SourceSystemConfig:
@@ -598,4 +761,78 @@ class ConfigManager:
             or r.get("raw_sink_file_path"),
             child_table_fqn=child_table_fqn,
             recipients=r.get("recipients") or r.get("Recipients"),
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Lentra — row builder (same routing as every source; only the row→object
+    # step differs, branched inside get_active_tasks via is_lentra_shaped)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_lentra_task(self, r: dict) -> LentraIngestionTaskConfig:
+        """
+        Row → LentraIngestionTaskConfig. Same style as _build_ingestion_task:
+        canonical column name first, lowercase alias as fallback.
+
+        worker_no mirrors the ADF/SQL CASE expression: multi-node compute
+        policies get "1:N" (autoscaling) or "N" (fixed) worker specs;
+        everything else gets "0".
+        """
+        compute_policy_name = (
+            r.get("Compute_Policy_Name") or r.get("compute_policy_name") or ""
+        )
+        cluster_option = r.get("Cluster_Option") or r.get("cluster_option") or ""
+        worker_number = self._to_int(r.get("Worker_Number") or r.get("worker_number"))
+
+        is_multi = "multi" in compute_policy_name.lower()
+        if is_multi and cluster_option == "Autoscaling":
+            worker_no = f"1:{worker_number}"
+        elif is_multi and cluster_option == "Fixed":
+            worker_no = str(worker_number) if worker_number is not None else "0"
+        else:
+            worker_no = "0"
+
+        return LentraIngestionTaskConfig(
+            config_id=self._to_int(r.get("Config_ID") or r.get("config_id")) or 0,
+            source_config_master_id=self._to_int(
+                r.get("Config_Master_ID") or r.get("config_master_id")
+            ),
+            report_name=r.get("Report_Name") or r.get("report_name"),
+            key_column=r.get("Key_Column") or r.get("key_column"),
+            source_name=r.get("Source_Name") or r.get("source_name"),
+            source_bucket_name=r.get("Source_Bucket_Name") or r.get("source_bucket_name"),
+            external_path=r.get("External_Path") or r.get("external_path"),
+            frequency=r.get("Frequency") or r.get("frequency"),
+            load_type=str(r.get("Load_Type") or r.get("load_type") or "FULL").upper(),
+            raw_sink_container_name=r.get("Raw_Sink_Container_Name")
+            or r.get("raw_sink_container_name"),
+            raw_sink_file_path=r.get("Raw_Sink_File_Path") or r.get("raw_sink_file_path"),
+            column_delimiter=r.get("Column_Delimiter") or r.get("column_delimiter"),
+            first_row_header=(
+                r.get("First_Row_Header")
+                if r.get("First_Row_Header") is not None
+                else r.get("first_row_header")
+            ),
+            silver_sink_schema_name=r.get("Silver_Sink_Schema_Name")
+            or r.get("silver_sink_schema_name"),
+            silver_sink_table_name=r.get("Silver_Sink_table_Name")
+            or r.get("silver_sink_table_name"),
+            business_date=r.get("Business_Date") or r.get("business_date"),
+            status=r.get("Status") or r.get("status"),
+            is_active=self._to_int(r.get("Is_Active") or r.get("is_active")),
+            sink_batch_started_date=r.get("Sink_Batch_Start_Date")
+            or r.get("sink_batch_started_date"),
+            recipients=r.get("Recipients") or r.get("recipients"),
+            pipeline_name=r.get("Pipeline_Name") or r.get("pipeline_name"),
+            access_key_id=r.get("Access_Key_ID") or r.get("access_key_id"),
+            secret_access_key=r.get("Secret_Access_Key") or r.get("secret_access_key"),
+            day_execution_count=self._to_int(
+                r.get("Day_Execution_Count") or r.get("day_execution_count")
+            ),
+            report_execution_day=r.get("Report_Execution_Day")
+            or r.get("report_execution_day"),
+            compute_policy_name=compute_policy_name or None,
+            compute_policy_id=r.get("Compute_Policy_ID") or r.get("compute_policy_id"),
+            cluster_option=cluster_option or None,
+            worker_number=worker_number,
+            worker_no=worker_no,
         )
