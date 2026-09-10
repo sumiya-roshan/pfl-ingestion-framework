@@ -19,8 +19,16 @@
 # MAGIC Tasks come from `taskValues` (Task 0 — `get_tasks.py`) in Job mode, or from
 # MAGIC a direct config query in standalone mode.
 # MAGIC
-# MAGIC **Parallelism:** up to 4 tables run concurrently (`ThreadPoolExecutor`,
-# MAGIC `max_workers=4`). The API steps within one table stay sequential.
+# MAGIC **Parallelism:** one worker per task (`max_workers` = distinct `config_id`
+# MAGIC count), all tables run concurrently. The API steps within one table stay
+# MAGIC sequential.
+# MAGIC
+# MAGIC **Audit & logging:** each task gets one audit row (INPROGRESS → SUCCESS /
+# MAGIC FAILED) and the run's logs are uploaded to the source's landing path —
+# MAGIC both owned by `MavisApiExtractor`, mirroring `IngestionOrchestrator`.
+# MAGIC
+# MAGIC **Retry:** the export sequence per task is retried as a unit using
+# MAGIC `retry_count` / `retry_interval` from the `config_source_system` row.
 # MAGIC
 # MAGIC **Fault tolerance:** a failure on one task does NOT stop the others. Every
 # MAGIC task is attempted; a summary is printed at the end and the notebook raises
@@ -29,7 +37,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install requests boto3 --quiet
+# MAGIC %pip install requests boto3 python-dotenv --quiet
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -37,18 +45,21 @@
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
-sys.path.append("..")
+# notebook lives at src/ingestion/lsq_mavis/ — two levels below src/
+sys.path.append("../..")
 
-from ingestion.connectors.api_connector import MavisApiConfig
+from ingestion.lsq_mavis.mavis_api_extractor import MavisApiExtractor
 from ingestion.utils.config_manager import (
+    AUDIT_TABLE,
     CONFIG_MASTER_TABLE,
     SOURCE_SYSTEM_TABLE,
     ConfigManager,
     MavisIngestionTaskConfig,
     SourceSystemConfig,
 )
-from ingestion.utils.mavis_api_extractor import MavisApiExtractor
+from ingestion.utils.logger import _upload_on_exit, configure_s3_logging, get_logger
 
 # COMMAND ----------
 
@@ -59,9 +70,10 @@ from ingestion.utils.mavis_api_extractor import MavisApiExtractor
 
 dbutils.widgets.text("config_master_id", "", "Config Master ID (int)")
 dbutils.widgets.text("source_system_id", "", "Source System ID (int)")
+dbutils.widgets.text("pipeline_name", "", "Pipeline Name (required)")
+dbutils.widgets.text("job_run_id", "", "Job Run ID (required) — set to {{job.run_id}} in job config")
+dbutils.widgets.text("environment", "dev", "Environment: dev | uat | prod")
 dbutils.widgets.text("batch_start_date", "1", "Batch Start Date")
-dbutils.widgets.text("get_tasks_task_key", "get_table_details", "Job task key that published active_tasks_metadata")
-dbutils.widgets.text("mavis_prod_api", "", "Override MavisApiConfig.prod_api (blank = use default)")
 
 # COMMAND ----------
 
@@ -72,9 +84,60 @@ if not config_master_id_raw or not source_system_id_raw:
 
 config_master_id = int(config_master_id_raw)
 source_system_id = int(source_system_id_raw)
+pipeline_name = dbutils.widgets.get("pipeline_name") or None
+job_run_id = dbutils.widgets.get("job_run_id") or None
+if not pipeline_name:
+    dbutils.notebook.exit("Error: pipeline_name widget is required and cannot be empty.")
+if not job_run_id:
+    dbutils.notebook.exit("Error: job_run_id widget is required and cannot be empty.")
+
+environment = dbutils.widgets.get("environment") or "dev"
 batch_start_date = dbutils.widgets.get("batch_start_date") or "1"
-get_tasks_task_key = dbutils.widgets.get("get_tasks_task_key") or "get_table_details"
-mavis_prod_api = dbutils.widgets.get("mavis_prod_api") or None
+get_tasks_task_key = "get_table_details"  # taskValues task key published by get_tasks.py
+
+logger = get_logger(environment=environment)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Databricks job context
+# MAGIC
+# MAGIC Job/run metadata for the audit row — nothing hardcoded.
+
+# COMMAND ----------
+
+def get_databricks_job_context():
+    context = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+
+    def get_context_value(method_name):
+        try:
+            return getattr(context, method_name)().get()
+        except Exception:
+            return None
+
+    databricks_url = get_context_value("apiUrl")
+    try:
+        job_id = dbutils.widgets.get("job_id")
+    except Exception:
+        job_id = None
+    databricks_url = (
+        f"{databricks_url}/#job/{job_id}" if databricks_url and job_id else None
+    )
+    return {
+        "job_id": get_context_value("jobId"),
+        "job_name": get_context_value("jobName"),
+        "notebook_name": get_context_value("notebookPath"),
+        "databricks_url": databricks_url,
+        "trigger_type": get_context_value("triggerType"),
+        "trigger_id": get_context_value("triggerId"),
+        "trigger_name": get_context_value("triggerName"),
+    }
+
+
+job_context = get_databricks_job_context()
+job_context["job_run_id"] = job_run_id
+job_context["trigger_id"] = job_run_id
+job_context["pipeline_start_time"] = datetime.now(timezone.utc)
 
 # COMMAND ----------
 
@@ -114,12 +177,23 @@ else:
     source_sys, tasks = config_mgr.get_active_tasks(
         config_master_id=config_master_id,
         source_system_id=source_system_id,
-        pipeline_name=None,
+        pipeline_name=pipeline_name,
         batch_start_date=batch_start_date,
     )
 
 print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
 print(f"Active tasks    : {len(tasks)}")
+
+# Configure S3/Volume logging dynamically (same as main.py)
+resolved_landing_path = source_sys.landing_volume_path
+if resolved_landing_path:
+    s3_log_path = f"{resolved_landing_path.rstrip('/')}/logs/{pipeline_name}_{job_run_id}.log"
+    configure_s3_logging(s3_log_path, dbutils=dbutils)
+
+logger.info(
+    f"API-export started for source: {source_sys.source_name} "
+    f"({source_sys.source_type}) — {len(tasks)} task(s)"
+)
 
 if not tasks:
     dbutils.notebook.exit("No active API-export tasks found.")
@@ -135,21 +209,28 @@ if not all(isinstance(t, MavisIngestionTaskConfig) for t in tasks):
 # MAGIC %md
 # MAGIC ### Run export tasks — table-level parallelism, API steps sequential per table
 # MAGIC
-# MAGIC Up to 4 tables run their Mavis export flow concurrently. The API steps for
-# MAGIC a single table (start → poll → download URL → download/unzip) stay
-# MAGIC sequential inside `MavisApiExtractor.run` — parallelism is only across
-# MAGIC tables. The `extractor` / `connector` / `config_mgr` / `spark` objects are
-# MAGIC shared but only read (the connector is stateless — every call takes its
-# MAGIC `task` as an argument), and each worker returns its own result tuple that
-# MAGIC the main thread collects, so no mutable state is shared between workers.
+# MAGIC Every task runs its Mavis export flow concurrently (one worker each). The
+# MAGIC API steps for a single table (start → poll → download URL → download/unzip)
+# MAGIC stay sequential inside `MavisApiExtractor.run` — parallelism is only across
+# MAGIC tables. `MavisApiExtractor` owns the audit row + child-config Status +
+# MAGIC logging per task; its `AuditLogger` and status writes are internally
+# MAGIC serialised, and the connector is stateless (every call takes its `task`
+# MAGIC as an argument), so nothing mutable is shared between workers.
 
 # COMMAND ----------
 
-# Maximum tables processed concurrently (fixed for now — no config column / env var).
-MAX_WORKERS = 4
+# One worker per task — each Mavis export is independent, so max_workers is the
+# distinct config_id count from the resolved config rows.
+max_workers = len({t.config_id for t in tasks})
 
-api_config = MavisApiConfig(prod_api=mavis_prod_api) if mavis_prod_api else None
-extractor = MavisApiExtractor(spark, config_mgr, api_config=api_config)
+# Endpoint base URL (prod_api) comes from each task's own config row; poll
+# cadence / timeouts come from MavisApiConfig's defaults inside the connector.
+extractor = MavisApiExtractor(
+    spark,
+    config_mgr,
+    audit_table=AUDIT_TABLE,
+    environment=environment,
+)
 
 
 def process_table(task: MavisIngestionTaskConfig) -> tuple[int, str, object]:
@@ -158,11 +239,13 @@ def process_table(task: MavisIngestionTaskConfig) -> tuple[int, str, object]:
     download/unzip), run in one worker. Returns ``(config_id, status, detail)``;
     never raises — a table-level failure is captured here so the other tables
     keep running. ``MavisApiExtractor.run`` already writes Status=FAILED on the
-    row for a failure.
+    config row and closes the audit row FAILED before raising.
     """
     print(f"[api_export] config_id={task.config_id} START ({task.source_object_name})")
     try:
-        paths = extractor.run(task)
+        paths = extractor.run(
+            task, source_sys, pipeline_name, job_context, config_master_id
+        )
         print(f"[api_export] config_id={task.config_id} SUCCESS")
         return task.config_id, "SUCCESS", paths
     except Exception as exc:
@@ -170,11 +253,10 @@ def process_table(task: MavisIngestionTaskConfig) -> tuple[int, str, object]:
         return task.config_id, "FAILED", str(exc)
 
 
-workers = min(MAX_WORKERS, len(tasks))
-print(f"Running {len(tasks)} export task(s) with ThreadPoolExecutor(max_workers={workers})")
+print(f"Running {len(tasks)} export task(s) with ThreadPoolExecutor(max_workers={max_workers})")
 
 results: dict[int, tuple[str, object]] = {}
-with ThreadPoolExecutor(max_workers=workers) as executor:
+with ThreadPoolExecutor(max_workers=max_workers) as executor:
     future_to_cid = {executor.submit(process_table, task): task.config_id for task in tasks}
     for future in as_completed(future_to_cid):
         cid = future_to_cid[future]
@@ -200,6 +282,18 @@ print(f"Success : {len(succeeded)} {succeeded}")
 print(f"Failed  : {len(failed)} {failed}")
 for cid in failed:
     print(f"  config_id={cid}: {results[cid][1]}")
+
+if failed:
+    logger.critical(
+        f"API-export — {len(failed)} of {len(results)} task(s) FAILED. "
+        f"Failed Config IDs: {failed}. Check the audit table and logs above."
+    )
+else:
+    logger.info(
+        f"API-export complete — {len(succeeded)}/{len(results)} task(s) succeeded."
+    )
+
+_upload_on_exit()
 
 if failed:
     raise RuntimeError(

@@ -3,7 +3,7 @@ LSQ Mavis (LeadSquared Mavis DB export API) connector.
 
 Talks to the Mavis export API and lands its files in S3. It does NOT own config
 lookups or step sequencing — see ingestion.utils.config_manager and
-ingestion.utils.mavis_api_extractor.
+ingestion.lsq_mavis.mavis_api_extractor.
 
 Flow per task:
   1. start_export(task)                    -> RequestId
@@ -43,9 +43,11 @@ class MavisApiConfig:
     """
     HTTP / polling settings for the Mavis export API.
 
-    Endpoints mirror the ADF pipeline. ``prod_api`` is the ADF ``Prod_API``
-    parameter (base URL, e.g. ``https://<host>/v2/...``); the three path
-    templates are concatenated onto it with the per-task ids substituted:
+    Endpoints mirror the ADF pipeline. The base URL is the ADF ``Prod_API``
+    value — read per row from the Mavis config table
+    (``MavisIngestionTaskConfig.prod_api``); ``prod_api`` here is only the
+    fallback used when that column is blank. The three path templates are
+    concatenated onto the base URL with the per-task ids substituted:
 
       start_export   {prod_api}{database_id}/{table_id}/rows/export?orgcode={org_code}
       status         {prod_api}{database_id}/tables/{table_id}/requesthistory?orgcode={org_code}
@@ -248,13 +250,18 @@ class MavisApiExportConnector:
         """
         ``{prod_api}`` + the ADF path template with ``{database_id}`` /
         ``{table_id}`` / ``{org_code}`` substituted from the task row.
+
+        The base URL is the task's own ``prod_api`` (the ADF ``Prod_API`` column
+        on the Mavis config row); it falls back to ``MavisApiConfig.prod_api``
+        when the column is blank.
         """
         path = (
             path_template.replace("{database_id}", str(task.database_id or ""))
             .replace("{table_id}", str(task.table_id or ""))
             .replace("{org_code}", str(task.org_code or ""))
         )
-        return f"{self.api.prod_api.rstrip('/')}/{path.lstrip('/')}"
+        base = getattr(task, "prod_api", None) or self.api.prod_api
+        return f"{base.rstrip('/')}/{path.lstrip('/')}"
 
     def _post(self, url: str, task, body: dict | str) -> dict:
         """POST ``body`` as JSON with the task's x-api-key; return the JSON object.

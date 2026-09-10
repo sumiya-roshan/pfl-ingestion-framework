@@ -216,6 +216,10 @@ class MavisIngestionTaskConfig(_DictSerializable):
 
     source_object_name: str | None = None
 
+    # Base URL for the Mavis export API — the ADF ``Prod_API`` parameter, per
+    # child config row. Blank falls back to MavisApiConfig's default.
+    prod_api: str | None = None
+
     child_table_fqn: str | None = None
 
     @property
@@ -674,6 +678,7 @@ class ConfigManager:
             raw_file_name=r.get("Raw_File_Name") or r.get("raw_file_name"),
             source_object_name=r.get("Source_Object_Name")
             or r.get("source_object_name"),
+            prod_api=r.get("Prod_API") or r.get("prod_api") or r.get("Prod_Api"),
         )
 
 
