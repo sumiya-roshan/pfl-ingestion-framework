@@ -54,8 +54,10 @@ from ingestion.lsq_mavis.mavis_api_extractor import MavisApiExtractor
 from ingestion.utils.config_manager import (
     AUDIT_TABLE,
     CONFIG_MASTER_TABLE,
+    MAVIS_SOURCE_NAME,
     SOURCE_SYSTEM_TABLE,
     ConfigManager,
+    IngestionTaskConfig,
     MavisIngestionTaskConfig,
     SourceSystemConfig,
 )
@@ -74,6 +76,10 @@ dbutils.widgets.text("pipeline_name", "", "Pipeline Name (required)")
 dbutils.widgets.text("job_run_id", "", "Job Run ID (required) — set to {{job.run_id}} in job config")
 dbutils.widgets.text("environment", "dev", "Environment: dev | uat | prod")
 dbutils.widgets.text("batch_start_date", "1", "Batch Start Date")
+dbutils.widgets.text("silver_notebook_path",
+                     "/PFL/Admin/Config/Dependency_Config/silver_notebook_execution_maivs",
+                     "Silver notebook to run after extraction (blank = skip)")
+dbutils.widgets.text("silver_notebook_timeout", "", "Silver run timeout (s); blank = use query_timeout")
 
 # COMMAND ----------
 
@@ -93,6 +99,8 @@ if not job_run_id:
 
 environment = dbutils.widgets.get("environment") or "dev"
 batch_start_date = dbutils.widgets.get("batch_start_date") or "1"
+silver_notebook_path = dbutils.widgets.get("silver_notebook_path") or None
+silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or 0) or None
 get_tasks_task_key = "get_table_details"  # taskValues task key published by get_tasks.py
 
 logger = get_logger(environment=environment)
@@ -170,7 +178,10 @@ if payload_str:
     print(f"[Tasks] Reading active tasks from taskValues ('{get_tasks_task_key}').")
     payload = json.loads(payload_str)
     source_sys = SourceSystemConfig.from_dict(payload["source_sys"])
-    tasks = [MavisIngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
+    # same payload shape for every source — only the task class differs
+    is_mavis = (source_sys.source_name or "").strip().upper() == MAVIS_SOURCE_NAME.upper()
+    task_cls = MavisIngestionTaskConfig if is_mavis else IngestionTaskConfig
+    tasks = [task_cls.from_dict(t) for t in payload["tasks"]]
     batch_start_date = payload.get("batch_start_date") or batch_start_date
 else:
     print("[Tasks] taskValues not available — querying config tables directly.")
@@ -223,13 +234,18 @@ if not all(isinstance(t, MavisIngestionTaskConfig) for t in tasks):
 # distinct config_id count from the resolved config rows.
 max_workers = len({t.config_id for t in tasks})
 
-# Endpoint base URL (prod_api) comes from each task's own config row; poll
-# cadence / timeouts come from MavisApiConfig's defaults inside the connector.
+# Endpoint base URL (prod_api) comes from each task's own config row; retry /
+# interval / timeout come from config_source_system; the Silver notebook trigger
+# is owned by MavisApiExtractor. dbutils is passed so it can call
+# dbutils.notebook.run for Silver.
 extractor = MavisApiExtractor(
     spark,
     config_mgr,
     audit_table=AUDIT_TABLE,
     environment=environment,
+    dbutils=dbutils,
+    silver_notebook_path=silver_notebook_path,
+    silver_notebook_timeout=silver_notebook_timeout,
 )
 
 

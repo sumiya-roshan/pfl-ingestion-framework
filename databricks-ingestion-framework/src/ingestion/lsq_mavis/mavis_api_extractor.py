@@ -6,26 +6,29 @@ writes Status back to its config-table row via the ordinary ``ConfigManager``:
 
   1. Status = AUDIT_STATUS_INPROGRESS
   2. start_export            -> RequestId
-  3. poll_until_ready
+  3. poll_until_ready        (12h wall-clock budget from query_timeout)
   4. get_download_url        -> FileURL
   5. download_and_extract_to_s3
   6. Status = AUDIT_STATUS_SUCCESS   (on failure: AUDIT_STATUS_FAILED, re-raised)
+  7. trigger the Silver notebook   (logged only — never fails the export)
 
-Status values reuse the shared AUDIT_STATUS_* vocabulary — no separate Mavis
-audit status. The extracted files are loaded to their target table by the
-normal downstream S3 ingestion config, not here.
+Owned here, mirroring ``IngestionOrchestrator`` for the connector path:
 
-Audit + logging are owned here, the same shape as ``IngestionOrchestrator`` for
-the connector path: the extractor builds its own ``AuditLogger`` and logger from
-the audit table + environment, writes one INPROGRESS audit row per task at the
-start, and closes it SUCCESS / FAILED at the end.
+* **Audit** — one INPROGRESS row per task at the start, closed SUCCESS / FAILED
+  at the end. Every ADF-derived column (Delta_Layer, SourceSchema/Table,
+  TargetSchema/Table, business_date, trigger_time, Frequency, byte / throughput
+  / duration metrics) is reproduced from the fixed ``sink_batch_started_date``
+  (ADF ``triggerTime``) and the connector's real copy metrics.
+* **Retry** — per ADF activity. ``config_source_system`` gives one
+  ``retry_count`` / ``retry_interval`` / ``query_timeout``; the two ADF retry
+  outliers (get_download_url = 50, silver = 2) are floors in ``MavisApiConfig``.
+* **Silver** — ``dbutils.notebook.run`` of the Mavis silver notebook, with all
+  parameters derived here.
 
-Entry point: ``src/ingestion/lsq_mavis/api_export_main.py`` (the export-API
-counterpart of ``src/main/main.py``). It reads the tasks ``get_tasks.py``
-published, then:
+Entry point: ``src/ingestion/lsq_mavis/api_export_main.py``.
 
     extractor = MavisApiExtractor(spark, config_mgr, audit_table=AUDIT_TABLE,
-                                  environment=environment)
+                                  environment=environment, dbutils=dbutils)
     for task in tasks:            # tasks are MavisIngestionTaskConfig
         extractor.run(task, source_sys, pipeline_name, job_context, config_master_id)
 """
@@ -33,6 +36,9 @@ published, then:
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timedelta, timezone
+
+from pyspark.dbutils import DBUtils
 
 from ..connectors.api_connector import MavisApiConfig, MavisApiExportConnector
 from ..utils.audit import AuditLogger
@@ -45,6 +51,44 @@ from ..utils.config_manager import (
 )
 from ..utils.logger import get_logger
 from ..utils.retry import retry_on_failure
+
+_IST = timedelta(hours=5, minutes=30)
+_DEFAULT_QUERY_TIMEOUT = 12 * 3600  # 43200s — fallback when query_timeout is blank
+
+
+def _parse_bsd(value) -> datetime:
+    """
+    ``sink_batch_started_date`` -> naive UTC datetime (the ADF ``triggerTime``).
+    ``get_tasks.py`` stamps it as UTC ``'YYYY-MM-DD HH:MM:SS'``; it arrives as a
+    ``datetime`` (standalone) or an ISO-ish string (job mode via taskValues).
+    Falls back to "now" for the ``'1'`` sentinel / blank / unparseable.
+    """
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    text = str(value).strip() if value is not None else ""
+    if text and text != "1":
+        try:
+            return datetime.fromisoformat(
+                text.replace("T", " ").rstrip("Z").split("+")[0].strip()
+            )
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _hms_to_seconds(value) -> int | None:
+    """``'HH:mm:ss'`` (e.g. ``'12:00:00'``) -> whole seconds. Blank / ``'0'`` /
+    malformed -> ``None`` (caller applies its own default)."""
+    if not value:
+        return None
+    parts = str(value).strip().split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        h, m, s = (int(p) for p in parts)
+    except ValueError:
+        return None
+    return (h * 3600 + m * 60 + s) or None
 
 
 class MavisApiExtractor:
@@ -64,6 +108,9 @@ class MavisApiExtractor:
         department_id: int = 0,
         api_config: MavisApiConfig | None = None,
         connector: MavisApiExportConnector | None = None,
+        dbutils=None,
+        silver_notebook_path: str | None = None,
+        silver_notebook_timeout: int | None = None,
     ):
         self.spark = spark
         self.config_mgr = config_mgr
@@ -72,6 +119,36 @@ class MavisApiExtractor:
             spark, audit_table=audit_table, department_id=department_id
         )
         self.logger = get_logger(environment=environment)
+        self._dbutils = dbutils
+        self.silver_notebook_path = silver_notebook_path
+        self.silver_notebook_timeout = silver_notebook_timeout
+
+    # ── retry policy ────────────────────────────────────────────────────────
+
+    def _retry_plan(self, source_sys) -> dict:
+        """
+        One ``source_sys.retry_count`` / ``retry_interval`` / ``query_timeout``
+        -> per-step retry counts (each floored at the ADF value), a uniform
+        interval, and the wall-clock timeout budget (seconds).
+        """
+        base = int(getattr(source_sys, "retry_count", 0) or 0)
+        interval = int(getattr(source_sys, "retry_interval", 0) or 30)
+        query_timeout = (
+            _hms_to_seconds(getattr(source_sys, "query_timeout", None))
+            or _DEFAULT_QUERY_TIMEOUT
+        )
+        api = self.connector.api
+        return {
+            "interval": interval,
+            "query_timeout": query_timeout,
+            "start_export": max(base, api.start_export_retries),
+            "poll_until_ready": max(base, api.poll_retries),
+            "get_download_url": max(base, api.download_url_retries),
+            "download_and_extract_to_s3": max(base, api.copy_retries),
+            "silver": max(base, api.silver_retries),
+        }
+
+    # ── main entry ─────────────────────────────────────────────────────────
 
     def run(
         self,
@@ -82,67 +159,109 @@ class MavisApiExtractor:
         config_master_id: int | None = None,
     ) -> list[str]:
         """
-        Run every step for ``task``; return the extracted S3 file paths
-        ``[s3_zip_path, s3_csv_path]``. On any failure the config row is flagged
-        Status='Failed', the audit row is closed FAILED, and the exception is
-        re-raised so the caller can record it in its summary.
-
-        The export sequence (start → poll → download URL → download/unzip) is
-        retried as a unit — a mid-flight failure restarts a fresh export — using
-        ``retry_count`` / ``retry_interval`` from the source system config row.
-        The audit + config-status writes around it are not retried.
+        Run every step for ``task``; return ``[s3_zip_path, s3_csv_path]``. On
+        any failure the config row is flagged Status='Failed', the audit row is
+        closed FAILED, and the exception is re-raised for the caller's summary.
         """
         fqn = task.child_table_fqn
-        current_step = ["start_export"]
+        ctx = dict(job_context or {})
+
+        # Fixed run instant — ADF triggerTime == sink_batch_started_date (UTC).
+        trigger_time = _parse_bsd(task.sink_batch_started_date)
+        trigger_time_ist = trigger_time + _IST
+        ts = trigger_time_ist.strftime("%Y_%m_%d_%H_%M_%S")
+        folder = (task.raw_folder_path or "").strip("/")
+
+        # ADF-manner audit derivations (concat + IST formatDateTime).
+        derived = dict(
+            delta_layer="Raw",
+            frequency="Daily",
+            trigger_time=trigger_time_ist,
+            business_date=trigger_time.date(),
+            source_schema=(
+                f"mavis/{folder}/zip/"
+                f"{trigger_time_ist:%Y}/{trigger_time_ist:%b}/{trigger_time_ist:%d}"
+            ),
+            source_table=f"{task.raw_file_name}_{ts}.zip",
+            target_schema=(
+                f"mavis/{folder}/unzip/"
+                f"{trigger_time_ist:%Y}/{trigger_time_ist:%b}/{trigger_time_ist:%d}"
+            ),
+            target_table=f"{task.raw_file_name}_{ts}.csv",
+        )
 
         audit_run = self.audit.start_run(
             task=task,
             source_sys=source_sys,
-            job_context=dict(job_context or {}),
+            job_context=ctx,
             pipeline_name=pipeline_name,
             config_master_id=config_master_id,
+            **derived,
         )
 
-        max_retries = int(getattr(source_sys, "retry_count", 0) or 0)
-        retry_interval = int(getattr(source_sys, "retry_interval", 0) or 0)
+        plan = self._retry_plan(source_sys)
+        current_step = ["start_export"]
 
-        def _export() -> dict:
-            current_step[0] = "start_export"
-            request_id = self.connector.start_export(task)
-
-            current_step[0] = "poll_until_ready"
-            self.connector.poll_until_ready(task, request_id)
-
-            current_step[0] = "get_download_url"
-            download_url = self.connector.get_download_url(task, request_id)
-
-            current_step[0] = "download_and_extract_to_s3"
-            return self.connector.download_and_extract_to_s3(task, download_url)
+        def _step(name, fn):
+            current_step[0] = name
+            return retry_on_failure(
+                fn,
+                max_retries=plan[name],
+                retry_interval=plan["interval"],
+                logger=self.logger,
+                description=f"{name} config_id={task.config_id}",
+            )
 
         try:
             self._update_status(fqn, task.config_id, AUDIT_STATUS_INPROGRESS)
 
-            paths = retry_on_failure(
-                _export,
-                max_retries=max_retries,
-                retry_interval=retry_interval,
-                logger=self.logger,
-                description=f"Mavis export config_id={task.config_id}",
+            request_id = _step(
+                "start_export", lambda: self.connector.start_export(task)
+            )
+            _step(
+                "poll_until_ready",
+                lambda: self.connector.poll_until_ready(
+                    task, request_id, query_timeout=plan["query_timeout"]
+                ),
+            )
+            download_url = _step(
+                "get_download_url",
+                lambda: self.connector.get_download_url(task, request_id),
+            )
+            paths = _step(
+                "download_and_extract_to_s3",
+                lambda: self.connector.download_and_extract_to_s3(
+                    task,
+                    download_url,
+                    trigger_time=trigger_time,
+                    query_timeout=plan["query_timeout"],
+                ),
             )
 
             self._update_status(fqn, task.config_id, AUDIT_STATUS_SUCCESS)
-            self.audit.complete_run(audit_run, AUDIT_STATUS_SUCCESS)
-
+            self.audit.complete_run(
+                audit_run,
+                AUDIT_STATUS_SUCCESS,
+                rows_read=1,
+                rows_copied=1,
+                data_read_bytes=paths.get("data_read_bytes", 0),
+                data_written_bytes=paths.get("data_written_bytes", 0),
+                throughput_mb_per_sec=paths.get("throughput_mb_per_sec"),
+                copy_duration_sec=paths.get("copy_duration_sec"),
+            )
             self.logger.info(
                 f"[MavisApiExtractor] config_id={task.config_id} SUCCESS "
                 f"(ZIP: {paths['s3_zip_path']}, CSV: {paths['s3_csv_path']})"
             )
+
+            self._trigger_silver(task, trigger_time_ist, plan)
+
             return [paths["s3_zip_path"], paths["s3_csv_path"]]
         except Exception as exc:
             step = current_step[0]
             self.logger.exception(
                 f"[MavisApiExtractor] config_id={task.config_id} FAILED at "
-                f"'{step}' (after {max_retries} retr{'y' if max_retries == 1 else 'ies'}): {exc}"
+                f"'{step}': {exc}"
             )
             try:
                 self._update_status(fqn, task.config_id, AUDIT_STATUS_FAILED)
@@ -163,6 +282,59 @@ class MavisApiExtractor:
                     f"write FAILED audit row: {audit_exc}"
                 )
             raise
+
+    # ── silver ─────────────────────────────────────────────────────────────
+
+    def _trigger_silver(self, task, trigger_time_ist, plan) -> None:
+        """
+        Run the Mavis silver notebook for this task via ``dbutils.notebook.run``.
+        Retried ``plan['silver']`` times. A Silver failure is logged and
+        swallowed — it never flips the export to FAILED (matches
+        ``IngestionOrchestrator._trigger_silver``).
+        """
+        if not self.silver_notebook_path:
+            self.logger.info(
+                f"[MavisApiExtractor] config_id={task.config_id} — silver skipped "
+                f"(no notebook path)"
+            )
+            return
+
+        dbutils = self._dbutils or DBUtils(self.spark)
+        timeout = self.silver_notebook_timeout or plan["query_timeout"]
+        params = {
+            "config_id": str(task.config_id),
+            "load_type": task.load_type or "",
+            "raw_sa_name": task.s3_raw_landing_path or "",
+            "containerName": task.raw_container_name or "",
+            "raw_folder_path": task.raw_folder_path or "",
+            "raw_file_name": task.raw_file_name or "",
+            # IST — the silver notebook subtracts 5:30 to get UTC.
+            "triggerTime": trigger_time_ist.strftime("%Y-%m-%dT%H:%M:%S.%f"),
+            "sink_schema_name": task.target_schema or "",
+            "sink_table_name": task.target_table or "",
+            "deltaColumn": task.delta_column or "",
+            "key_column": task.key_column or "",
+        }
+        try:
+            exit_value = retry_on_failure(
+                lambda: dbutils.notebook.run(
+                    self.silver_notebook_path, timeout, params
+                ),
+                max_retries=plan["silver"],
+                retry_interval=plan["interval"],
+                logger=self.logger,
+                description=f"silver config_id={task.config_id}",
+            )
+            self.logger.info(
+                f"[MavisApiExtractor] config_id={task.config_id} silver SUCCESS "
+                f"-> {exit_value}"
+            )
+        except Exception as exc:
+            self.logger.exception(
+                f"[MavisApiExtractor] config_id={task.config_id} silver FAILED: {exc}"
+            )
+
+    # ── helpers ────────────────────────────────────────────────────────────
 
     def _update_status(self, child_table_fqn, config_id, status) -> None:
         with self._status_lock:

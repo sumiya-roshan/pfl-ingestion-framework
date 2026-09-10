@@ -66,8 +66,16 @@ class MavisApiConfig:
     )
 
     request_timeout_seconds: int = 60
-    poll_interval_seconds: int = 15
-    poll_max_attempts: int = 120
+    poll_interval_seconds: int = 30      # ADF: 30s between status checks
+
+    # Per-step retry FLOORS (ADF activity retry counts). The effective count is
+    # ``max(source_sys.retry_count, <floor>)`` — the single config value can't
+    # express six different ADF values, so the two outliers stay here.
+    start_export_retries: int = 0        # ADF: Web Get RequestId  -> 0
+    poll_retries: int = 0               # ADF: Web Get Status     -> 0
+    download_url_retries: int = 50       # ADF: Web Get URL        -> 50
+    copy_retries: int = 1               # ADF: Copy zip / unzip   -> 1
+    silver_retries: int = 2            # ADF: Silver notebook    -> 2
 
     done_statuses: list[str] = field(
         default_factory=lambda: ["completed", "success", "succeeded", "done"]
@@ -101,14 +109,20 @@ class MavisApiExportConnector:
         print(f"[Mavis] config_id={task.config_id} export started, id={request_id}")
         return str(request_id)
 
-    def poll_until_ready(self, task, request_id: str) -> str:
-        """POST every ``poll_interval_seconds`` until the status is done / failed."""
+    def poll_until_ready(self, task, request_id: str, query_timeout: int) -> str:
+        """
+        POST every ``poll_interval_seconds`` until the status is done / failed.
+
+        ``query_timeout`` is the wall-clock budget in seconds (ADF: the Until
+        loop's 12h timeout, from ``config_source_system.query_timeout``).
+        """
         url = self._build_url(self.api.status_path, task)
         done = {s.lower() for s in self.api.done_statuses}
         failed = {s.lower() for s in self.api.failed_statuses}
 
+        deadline = time.monotonic() + query_timeout
         attempt = 0
-        while attempt < self.api.poll_max_attempts:
+        while time.monotonic() < deadline:
             attempt += 1
             resp = self._post(url, task, {"Parameter": {"RequestId": request_id}})
             status = self._extract_status(resp)
@@ -122,7 +136,8 @@ class MavisApiExportConnector:
             time.sleep(self.api.poll_interval_seconds)
 
         raise RuntimeError(
-            f"config_id={task.config_id}: export not ready after {attempt} polls"
+            f"config_id={task.config_id}: export not ready after {attempt} polls "
+            f"({query_timeout}s query_timeout budget)"
         )
 
     def get_download_url(self, task, request_id: str) -> str:
@@ -139,25 +154,44 @@ class MavisApiExportConnector:
             )
         return str(file_url)
 
-    def download_and_extract_to_s3(self, task, download_url: str) -> dict:
+    def download_and_extract_to_s3(
+        self,
+        task,
+        download_url: str,
+        trigger_time=None,
+        query_timeout: int | None = None,
+    ) -> dict:
         """
         Hit the download URL to stream the ZIP file to a temporary driver file,
         upload that ZIP to the S3 raw landing path, then stream-extract the
         inner CSV and upload it to the S3 unzip path.
-        Returns a dict with the s3_zip_path and s3_csv_path.
+
+        ``trigger_time`` is the fixed run instant (naive UTC — the task's
+        ``sink_batch_started_date``); it drives the IST-dated path exactly like
+        ADF's ``triggerTime`` parameter, so the landed path matches the audit
+        row's source/target table. Falls back to "now" when not given.
+        ``query_timeout`` (seconds) is the streaming-download read timeout.
+
+        Returns ``s3_zip_path`` / ``s3_csv_path`` plus copy metrics
+        (``data_read_bytes``, ``data_written_bytes``, ``copy_duration_sec``,
+        ``throughput_mb_per_sec``).
         """
-        
 
         landing = (task.s3_raw_landing_path or "").rstrip("/")
         if not landing:
             raise RuntimeError(f"config_id={task.config_id}: s3_raw_landing_path is not set")
 
         # 1. Hit the download URL
-        resp = requests.get(download_url, stream=True, timeout=self.api.request_timeout_seconds)
+        resp = requests.get(
+            download_url,
+            stream=True,
+            timeout=query_timeout or self.api.request_timeout_seconds,
+        )
         resp.raise_for_status()
 
-        # 2. Reconstruct the ADF exact path format
-        ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).replace(tzinfo=None)
+        # 2. Reconstruct the ADF exact path format — IST of the fixed trigger_time
+        base = trigger_time or datetime.now(timezone.utc)
+        ist = base.replace(tzinfo=None) + timedelta(hours=5, minutes=30)
         year = ist.strftime("%Y")
         month = ist.strftime("%b")
         day = ist.strftime("%d")
@@ -177,18 +211,19 @@ class MavisApiExportConnector:
 
         tmp_fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip")
         os.close(tmp_fd)
-        
+
         tmp_fd2, tmp_csv_path = tempfile.mkstemp(suffix=".csv")
         os.close(tmp_fd2)
 
+        started = time.monotonic()
         try:
             # 3. Stream download to local ZIP file
             with open(tmp_zip_path, "wb") as fh:
                 for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
                     fh.write(chunk)
-            
+
             dbutils = DBUtils(self.spark)
-            
+
             # 4. Upload ZIP to S3
             dbutils.fs.cp(f"file://{tmp_zip_path}", s3_zip_path)
             print(f"[Mavis] config_id={task.config_id} uploaded ZIP -> {s3_zip_path}")
@@ -200,18 +235,27 @@ class MavisApiExportConnector:
                     csv_members = zf.namelist()
                 if not csv_members:
                     raise ValueError(f"[Mavis] ZIP for config_id={task.config_id} is empty.")
-                
+
                 with zf.open(csv_members[0]) as source_file:
                     with open(tmp_csv_path, 'wb') as target_file:
                         shutil.copyfileobj(source_file, target_file, length=8 * 1024 * 1024)
-            
+
             # 6. Upload CSV to S3
             dbutils.fs.cp(f"file://{tmp_csv_path}", s3_csv_path)
             print(f"[Mavis] config_id={task.config_id} uploaded CSV -> {s3_csv_path}")
 
+            zip_bytes = os.path.getsize(tmp_zip_path)
+            csv_bytes = os.path.getsize(tmp_csv_path)
+            duration = round(time.monotonic() - started, 2)
             return {
                 "s3_zip_path": s3_zip_path,
-                "s3_csv_path": s3_csv_path
+                "s3_csv_path": s3_csv_path,
+                "data_read_bytes": zip_bytes,
+                "data_written_bytes": csv_bytes,
+                "copy_duration_sec": duration,
+                "throughput_mb_per_sec": (
+                    round(zip_bytes / 1e6 / duration, 2) if duration > 0 else None
+                ),
             }
 
         finally:

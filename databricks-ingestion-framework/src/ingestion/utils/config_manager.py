@@ -220,6 +220,11 @@ class MavisIngestionTaskConfig(_DictSerializable):
     # child config row. Blank falls back to MavisApiConfig's default.
     prod_api: str | None = None
 
+    # Silver-side columns (read from existing config columns; passed to the
+    # Silver notebook by MavisApiExtractor — never used by the export itself).
+    key_column: str | None = None
+    delta_column: str | None = None
+
     child_table_fqn: str | None = None
 
     @property
@@ -679,6 +684,11 @@ class ConfigManager:
             source_object_name=r.get("Source_Object_Name")
             or r.get("source_object_name"),
             prod_api=r.get("Prod_API") or r.get("prod_api") or r.get("Prod_Api"),
+            key_column=r.get("Key_Column") or r.get("key_column"),
+            delta_column=r.get("Delta_Column")
+            or r.get("delta_column")
+            or r.get("Delta_Column_1")
+            or r.get("delta_column_1"),
         )
 
 

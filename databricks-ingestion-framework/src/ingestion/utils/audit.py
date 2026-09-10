@@ -43,10 +43,26 @@ class AuditLogger:
         pipeline_name: str,
         config_master_id: int | None = None,
         business_date=None,
+        *,
+        delta_layer=None,
+        frequency=None,
+        trigger_time=None,
+        source_schema=None,
+        source_table=None,
+        target_schema=None,
+        target_table=None,
     ) -> dict[str, Any]:
-        """Insert an INPROGRESS row and capture the current start time."""
+        """
+        Insert an INPROGRESS row and capture the current start time.
+
+        The keyword-only overrides let a caller supply values it derives itself
+        (the Mavis export path builds ADF-style ``source_schema`` / ``*_table`` /
+        ``delta_layer`` strings and passes a fixed ``trigger_time``); each falls
+        back to the usual ``task.*`` derivation when not given, so connector-path
+        callers are unaffected.
+        """
         ctx = job_context or {}
-        start_time = datetime.now(timezone.utc)
+        start_time = trigger_time if trigger_time is not None else datetime.now(timezone.utc)
         table_id = int(task.config_id)
         job_run_id = ctx.get("job_run_id")
         if not job_run_id:
@@ -60,11 +76,14 @@ class AuditLogger:
                 int(config_master_id) if config_master_id is not None else table_id,
                 table_id,
                 int(self.department_id),
-                self._required_string(getattr(task, "effective_delta_layer", None)),
+                self._required_string(
+                    delta_layer if delta_layer is not None
+                    else getattr(task, "effective_delta_layer", None)
+                ),
                 self._required_string(source_sys.source_name),
                 self._required_string(pipeline_name),
                 self._required_string(task.load_type),
-                getattr(task, "frequency", None),
+                frequency if frequency is not None else getattr(task, "frequency", None),
                 business_date if business_date is not None else start_time.date(),
                 self._required_string(ctx.get("job_id"), "MANUAL"),
                 job_run_id,
@@ -74,10 +93,15 @@ class AuditLogger:
                 start_time,
                 None,
                 None,
-                getattr(task, "source_schema", None),
-                task.source_object_name,
-                self._required_string(task.target_schema),
-                self._required_string(task.target_table),
+                source_schema if source_schema is not None
+                else getattr(task, "source_schema", None),
+                source_table if source_table is not None else task.source_object_name,
+                self._required_string(
+                    target_schema if target_schema is not None else task.target_schema
+                ),
+                self._required_string(
+                    target_table if target_table is not None else task.target_table
+                ),
                 0,
                 0,
                 0,
