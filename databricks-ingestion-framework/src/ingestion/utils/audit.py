@@ -60,7 +60,7 @@ class AuditLogger:
                 int(config_master_id) if config_master_id is not None else table_id,
                 table_id,
                 int(self.department_id),
-                self._required_string(task.effective_delta_layer),
+                self._required_string(getattr(task, "effective_delta_layer", None)),
                 self._required_string(source_sys.source_name),
                 self._required_string(pipeline_name),
                 self._required_string(task.load_type),
@@ -74,7 +74,7 @@ class AuditLogger:
                 start_time,
                 None,
                 None,
-                task.source_schema,
+                getattr(task, "source_schema", None),
                 task.source_object_name,
                 self._required_string(task.target_schema),
                 self._required_string(task.target_table),
@@ -191,7 +191,7 @@ class AuditLogger:
                 int(config_master_id) if config_master_id is not None else table_id,
                 table_id,
                 int(self.department_id),
-                self._required_string(task.effective_delta_layer),
+                self._required_string(getattr(task, "effective_delta_layer", None)),
                 self._required_string(source_sys.source_name),
                 self._required_string(pipeline_name),
                 self._required_string(task.load_type),
@@ -205,7 +205,7 @@ class AuditLogger:
                 now,  # trigger_time
                 now,  # end_time  (same — skipped immediately)
                 Decimal(0),  # execution_duration_sec
-                task.source_schema,
+                getattr(task, "source_schema", None),
                 task.source_object_name,
                 self._required_string(task.target_schema),
                 self._required_string(task.target_table),

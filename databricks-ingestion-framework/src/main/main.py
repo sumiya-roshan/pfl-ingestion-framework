@@ -20,6 +20,10 @@
 # MAGIC **Fault tolerance:** a failure on one table does NOT stop the others.
 # MAGIC All objects are attempted; a summary is printed at the end. The notebook
 # MAGIC raises a final exception only if at least one table failed.
+# MAGIC
+# MAGIC The main cell at the bottom reads top-down: build job context → resolve
+# MAGIC tasks → route → run pipeline → summarise → exit. Each stage is a named
+# MAGIC function defined in the cells above it.
 
 # COMMAND ----------
 
@@ -37,7 +41,6 @@ import json
 import sys
 from datetime import datetime, timezone
 sys.path.append("..")
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from ingestion.utils.config_manager import (
     AUDIT_STATUS_FAILED,
     AUDIT_STATUS_SKIPPED,
@@ -45,13 +48,19 @@ from ingestion.utils.config_manager import (
     AUDIT_TABLE,
     CONFIG_MASTER_TABLE,
     DEPENDENCY_TABLE,
+    MAVIS_SOURCE_NAME,
     SOURCE_SYSTEM_TABLE,
     ConfigManager,
     IngestionTaskConfig,
+    MavisIngestionTaskConfig,
     SourceSystemConfig,
 )
+from ingestion.utils.databricks_context import get_databricks_job_context
 from ingestion.utils.logger import _upload_on_exit, configure_s3_logging, get_logger
+from ingestion.utils.mavis_api_extractor import MavisApiExtractor
 from ingestion.utils.orchestrator import IngestionOrchestrator
+from ingestion.utils.pipeline_results import make_task_result, print_results_summary
+from ingestion.utils.task_executor import execute_batches, execute_parallel
 
 # COMMAND ----------
 
@@ -97,138 +106,221 @@ logger               = get_logger(environment=environment)
 silver_notebook_path    = dbutils.widgets.get("silver_notebook_path")    or None
 silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
 
-
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Get Databricks Job Context
+# MAGIC ### Stage functions
 # MAGIC
-# MAGIC Job/run information comes from the Databricks runtime.
-# MAGIC Nothing is hardcoded.
+# MAGIC Each stage of the run is a named function; the main cell at the bottom
+# MAGIC calls them in order.
 
 # COMMAND ----------
 
-def get_databricks_job_context():
+def build_job_context(dbutils, job_run_id: str, job_id: str | None) -> dict:
+    """
+    Assemble the job/run context dict that is threaded through every task.
 
-    context = (
-        dbutils.notebook.entry_point
-        .getDbutils()
-        .notebook()
-        .getContext()
-    )
+    """
+    job_context = get_databricks_job_context(dbutils, job_id=job_id)
+    job_context["job_run_id"] = job_run_id
+    job_context["pipeline_start_time"] = datetime.now(timezone.utc)
+    print(f"pipeline_start_time (job-level): {job_context['pipeline_start_time']}")
+    return job_context
 
-    def get_context_value(method_name):
 
-        try:
-            return getattr(context, method_name)().get()
-        except Exception:
-            return None
-    databricks_url = get_context_value("apiUrl")
+def resolve_tasks(
+    dbutils,
+    config_mgr: ConfigManager,
+    *,
+    config_master_id: int,
+    source_system_id: int,
+    pipeline_name: str,
+    batch_start_date,
+):
+    """
+    Discover the active tasks for this run and normalise ``batch_start_date``.
+
+    Two modes, transparent to the caller:
+
+    * **Job mode** — Task 0 (``get_tasks.py``) already queried the config tables
+      and published the active tasks to ``taskValues`` (task key
+      ``get_table_details`` / key ``active_tasks_metadata``); deserialize those
+      to avoid a duplicate config query.
+    * **Standalone mode** — no ``taskValues`` (interactive / manual run without
+      Task 0); query the config tables directly.
+
+    """
+    payload_str = None
     try:
-        job_id     = dbutils.widgets.get("job_id")
-    except Exception:
-        job_id     = None
-    databricks_url = (
-        f"{databricks_url}/#job/{job_id}"
-        if databricks_url and job_id
-        else None
-    )
-    return {
-        "job_id": get_context_value("jobId"),
-        "job_name": get_context_value("jobName"),
-        "notebook_name": get_context_value("notebookPath"), #Can change it to point silver notebook path later
-        "databricks_url": databricks_url,
-        "trigger_type": get_context_value("triggerType"),
-        "trigger_id": get_context_value("triggerId"),
-        "trigger_name": get_context_value("triggerName"),
-    }
+        payload_str = dbutils.jobs.taskValues.get(
+            taskKey   = "get_table_details",
+            key       = "active_tasks_metadata",
+            default   = None,
+            debugValue = None,
+        )
+    except Exception as exc:
+        print(f"[INFO] taskValues not available (standalone mode): {exc}")
+
+    if payload_str:
+        run_mode = "JOB"
+        print("[Tasks] Reading active tasks from taskValues (get_table_details task).")
+        payload    = json.loads(payload_str)
+        source_sys = SourceSystemConfig.from_dict(payload["source_sys"])
+        # Same payload shape for every source; only the task class differs —
+        # LSQ_Mavis rows carry the export-API fields (MavisIngestionTaskConfig),
+        # all others are IngestionTaskConfig.
+        is_mavis   = (source_sys.source_name or "").strip().upper() == MAVIS_SOURCE_NAME.upper()
+        task_cls   = MavisIngestionTaskConfig if is_mavis else IngestionTaskConfig
+        tasks      = [task_cls.from_dict(t) for t in payload["tasks"]]
+        batch_start_date = payload.get("batch_start_date")
+    else:
+        run_mode = "STANDALONE"
+        print("[Tasks] taskValues not available — querying config tables directly (standalone mode).")
+        source_sys, tasks = config_mgr.get_active_tasks(
+            config_master_id = config_master_id,
+            source_system_id = source_system_id,
+            pipeline_name    = pipeline_name,
+            batch_start_date = batch_start_date,
+        )
+
+    if isinstance(batch_start_date, str) and batch_start_date.strip() not in ("", "1"):
+        batch_start_date = datetime.fromisoformat(
+            batch_start_date.strip().replace("T", " ")
+        )
+    else:
+        batch_start_date = datetime.now(timezone.utc)
+
+    print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
+    print(f"Active tasks    : {len(tasks)}")
+    return source_sys, tasks, batch_start_date, run_mode
 
 
-job_context = get_databricks_job_context()
-job_context["job_run_id"]   = job_run_id
+def run_pipeline(
+    tasks,
+    source_sys,
+    *,
+    is_api_export: bool,
+    spark,
+    dbutils,
+    config_mgr: ConfigManager,
+    job_context: dict,
+    job_run_id: str,
+    config_master_id: int,
+    environment: str,
+    pipeline_name: str,
+    resolved_landing_path: str | None,
+    trigger_id: str,
+    batch_start_date,
+    silver_notebook_path: str | None,
+    silver_notebook_timeout: int,
+) -> list:
+    """
+    Build the right per-task runner for this source, fan the tasks out, and
+    (connector path only) close the dependency job.
 
-# pipeline_start_time is job-level — captured ONCE here, before the table
-# fan-out below, and threaded through job_context so every table's
-# DependencyLogger row uses the same value (see orchestrator.run()).
-pipeline_start_time = datetime.now(timezone.utc)
-job_context["pipeline_start_time"] = pipeline_start_time
+    ``is_api_export`` picks the runner; both return the same result shape:
 
-print(f"pipeline_start_time (job-level): {pipeline_start_time}")
+    * **False** — ``IngestionOrchestrator`` (RDBMS / NoSQL / S3). Silver runs
+      COUPLED — inline, synchronously — inside each ``orchestrator.run`` call
+      right after that table's landing write and before its Bronze Delta write.
+      So by the time a task result comes back its Silver run (if enabled) has
+      already finished and is carried on the result under ``silver_result`` — no
+      separate wait step.
+    * **True** — ``MavisApiExtractor`` (LSQ Mavis export API). It owns its own
+      audit row + child-config Status write + logging, mirroring the orchestrator.
+
+    After the fan-out, the connector path bulk-stamps ``pipeline_end_time`` (and
+    the derived ``dependency_resolve_time``) onto every ``dependency_master_config``
+    row for this ``job_run_id`` in one shot — it isn't known until every table
+    has finished. The API-export path has no dependency rows.
+    """
+    if is_api_export:
+        # Endpoint config (base URL, poll cadence, timeouts) comes from
+        # MavisApiConfig's defaults — the extractor builds it internally.
+        extractor = MavisApiExtractor(
+            spark,
+            config_mgr,
+            audit_table = AUDIT_TABLE,
+            environment = environment,
+        )
+
+        def run_one(task: MavisIngestionTaskConfig):
+            """Run one Mavis export task. ``MavisApiExtractor.run`` owns audit +
+            child-config Status + logging, just like ``IngestionOrchestrator.run``
+            for the connector path."""
+            extractor.run(task, source_sys, pipeline_name, job_context, config_master_id)
+            return make_task_result(config_id=task.config_id, status=AUDIT_STATUS_SUCCESS)
+    else:
+        orchestrator = IngestionOrchestrator(
+            spark,
+            dbutils,
+            audit_table             = AUDIT_TABLE,
+            dependency_table        = DEPENDENCY_TABLE,
+            pipeline_name           = pipeline_name,
+            environment             = environment,
+            silver_notebook_path    = silver_notebook_path,
+            silver_notebook_timeout = silver_notebook_timeout,
+            config_mgr              = config_mgr,
+        )
+
+        def run_one(task: IngestionTaskConfig):
+            """
+            Run a single ingestion task — works for RDBMS, NoSQL, and S3.
+
+            Retries happen inside ``IngestionOrchestrator.run``, scoped only to
+            the source connection pull (``connector.extract``), using the source
+            system's ``retry_count`` / ``retry_interval`` from
+            ``config_source_system``. Writing / transform steps are not retried —
+            a failure there fails the task outright.
+            """
+            logger.info(f"Processing table {task.source_object_name}")
+            return orchestrator.run(
+                source_sys          = source_sys,
+                ingest_obj          = task,
+                config_master_id    = config_master_id,   # routing table ID from widget
+                landing_volume_path = resolved_landing_path,
+                trigger_id          = trigger_id,
+                job_context         = job_context,
+                sink_batch_started_date = batch_start_date,
+            )
+
+    if is_api_export:
+        # Mavis exports are independent — flat fan-out, one thread per task, no
+        # batch_id/priority grouping and no dependency job to close.
+        return execute_parallel(tasks, run_one)
+
+    results = execute_batches(tasks, run_one)
+    orchestrator.dependency.complete_job(job_run_id)
+    return results
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Resolve pipeline name
-# MAGIC Always read from the widget value.
+# MAGIC ### Run
 
 # COMMAND ----------
+
+job_context = build_job_context(dbutils, job_run_id, job_id)
 
 print(f"pipeline_name from widget: '{pipeline_name}'")
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Discover ingestion tasks for this source
-# MAGIC
-# MAGIC When running as part of a Databricks Job, Task 0 (`get_tasks.py`) queries
-# MAGIC the config tables and publishes the active tasks via `taskValues`.
-# MAGIC This task reads them from `taskValues` to avoid duplicate config queries.
-# MAGIC Falls back to a direct config query when running the notebook standalone
-# MAGIC (interactive / manual run without Task 0).
-
-# COMMAND ----------
-
-payload_str = None
-try:
-    payload_str = dbutils.jobs.taskValues.get(
-        taskKey   = "get_table_details",
-        key       = "active_tasks_metadata",
-        default   = None,
-        debugValue = None,
-    )
-except Exception as exc:
-    print(f"[INFO] taskValues not available (standalone mode): {exc}")
-
-# config_mgr is needed regardless of mode — IngestionOrchestrator uses it
-# later for Silver_Last_Sink_Date bookkeeping (see orchestrator.run()), even
-# in Job mode where task discovery itself is skipped (tasks already came
-# from taskValues).
+# config_mgr is needed regardless of mode — IngestionOrchestrator uses it later
+# for Silver_Last_Sink_Date bookkeeping (see orchestrator.run()), even in Job
+# mode where task discovery itself is skipped (tasks already came from taskValues).
 config_mgr = ConfigManager(
     spark,
     source_system_table = SOURCE_SYSTEM_TABLE,
     config_master_table = CONFIG_MASTER_TABLE,
 )
 
-if payload_str:
-    # ── Job mode: deserialize what get_tasks.py published ──────────────────
-    print("[Tasks] Reading active tasks from taskValues (get_table_details task).")
-    payload    = json.loads(payload_str)
-    source_sys = SourceSystemConfig.from_dict(payload["source_sys"])
-    tasks      = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
-    batch_start_date = payload.get("batch_start_date")
-else:
-    # ── Standalone mode: query config tables directly ──────────────────────
-    print("[Tasks] taskValues not available — querying config tables directly (standalone mode).")
-    source_sys, tasks = config_mgr.get_active_tasks(
-        config_master_id = config_master_id,
-        source_system_id = source_system_id,
-        pipeline_name    = pipeline_name,
-        batch_start_date = batch_start_date,
-    )
-
-# batch_start_date arrives as a string — get_tasks.py stamps it as
-# '%Y-%m-%d %H:%M:%S.%f', and the widget default is the sentinel '1'. The
-# orchestrator needs a real datetime (landing-file path + business_date), so
-# parse it once here.
-if isinstance(batch_start_date, str) and batch_start_date.strip() not in ("", "1"):
-    batch_start_date = datetime.fromisoformat(
-        batch_start_date.strip().replace("T", " ")
-    )
-else:
-    batch_start_date = datetime.now(timezone.utc)
-print(type(batch_start_date),batch_start_date)
-print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
-print(f"Active tasks    : {len(tasks)}")
+source_sys, tasks, batch_start_date, run_mode = resolve_tasks(
+    dbutils,
+    config_mgr,
+    config_master_id = config_master_id,
+    source_system_id = source_system_id,
+    pipeline_name    = pipeline_name,
+    batch_start_date = batch_start_date,
+)
 
 # Configure S3/Volume logging dynamically
 resolved_landing_path = source_sys.landing_volume_path
@@ -241,191 +333,63 @@ logger.info(f"Pipeline started for source: {source_sys.source_name} ({source_sys
 if not tasks:
     dbutils.notebook.exit("No active ingestion tasks found for this pipeline.")
 
-# NOTE: max_workers is now derived dynamically from the distinct batch_id count
-# for this pipeline in the execution section below.
-# COMMAND ----------
+# ── Route: connector/orchestrator path vs API-export path ──────────────────────
+# source_name = 'LSQ_Mavis' → tasks are MavisIngestionTaskConfig and the export
+# flow (MavisApiExtractor) runs instead of IngestionOrchestrator. Everything
+# downstream — fan-out, summary, exit — is shared.
+_is_api_export = (
+    (source_sys.source_name or "").strip().upper() == MAVIS_SOURCE_NAME.upper()
+)
 
-# MAGIC %md
-# MAGIC ### Execute Ingestion
+if _is_api_export and not all(isinstance(t, MavisIngestionTaskConfig) for t in tasks):
+    raise RuntimeError(
+        "Source resolves to LSQ_Mavis but the tasks are not "
+        "MavisIngestionTaskConfig. Run this notebook standalone — Job-mode "
+        "taskValues deserializes rows as IngestionTaskConfig."
+    )
 
-# COMMAND ----------
+logger.info(
+    f"Mode: {run_mode} x {'API_EXPORT' if _is_api_export else 'CONNECTOR'}"
+)
 
 # trigger_id also set to rootRunId for traceability in audit trigger_id column
 trigger_id = job_run_id
 job_context["trigger_id"] = trigger_id
 
-orchestrator = IngestionOrchestrator(
-    spark,
-    dbutils,
-    audit_table             = AUDIT_TABLE,
-    dependency_table        = DEPENDENCY_TABLE,
-    pipeline_name           = pipeline_name,
+results = run_pipeline(
+    tasks,
+    source_sys,
+    is_api_export           = _is_api_export,
+    spark                   = spark,
+    dbutils                 = dbutils,
+    config_mgr              = config_mgr,
+    job_context             = job_context,
+    job_run_id              = job_run_id,
+    config_master_id        = config_master_id,
     environment             = environment,
+    pipeline_name           = pipeline_name,
+    resolved_landing_path   = resolved_landing_path,
+    trigger_id              = trigger_id,
+    batch_start_date        = batch_start_date,
     silver_notebook_path    = silver_notebook_path,
     silver_notebook_timeout = silver_notebook_timeout,
-    config_mgr              = config_mgr,
 )
-
-
-
-def run_one(task: IngestionTaskConfig) -> dict:
-    logger.info(f"Processing table {task.source_object_name}")
-    """
-    Run a single ingestion task — works for RDBMS, NoSQL, and S3.
-
-    Retries happen inside IngestionOrchestrator.run(), scoped only to the
-    source connection pull (connector.extract), using the source system's
-    retry_count/retry_interval from config_source_system. Writing/transform
-    steps are not retried — a failure there fails the task outright.
-    """
-
-    return orchestrator.run(
-        source_sys          = source_sys,
-        ingest_obj          = task,
-        config_master_id    = config_master_id,   # ← routing table ID from widget
-        landing_volume_path = resolved_landing_path,
-        trigger_id          = trigger_id,
-        job_context          = job_context,
-        sink_batch_started_date = batch_start_date,
-    )
-
-
-
-results = []
-
-# ── Batch-level parallelism ────────────────────────────────────────────────
-# batch_id  → controls PARALLEL execution: one thread per distinct batch.
-# priority  → controls SEQUENTIAL execution of tables WITHIN a batch (ascending).
-#
-# max_workers is derived dynamically from the distinct batch_id count for this
-# pipeline — NOT hardcoded, NOT taken from the widget/config. Tables are never
-# assigned to their own threads; a batch's tables run one-by-one inside the
-# batch's single thread. Per-table processing (load type, incremental/full,
-# retry, timeout, watermark, …) is unchanged — it all still happens in run_one.
-
-# Group tasks by batch_id, tables inside each batch ordered by priority ascending.
-batches = {}
-for task in sorted(tasks, key=lambda t: t.priority):
-    batches.setdefault(task.batch_id, []).append(task)
-
-max_workers = len(batches)   # distinct batch_id count for this pipeline
-
-
-def run_batch(batch_id, batch_tasks: list) -> list:
-    """Run every table in one batch sequentially, in priority order."""
-    batch_results = []
-    print(
-        f"[Batch {batch_id}] Starting {len(batch_tasks)} table(s) sequentially: "
-        f"{[t.source_object_name for t in batch_tasks]}"
-    )
-    for task in batch_tasks:
-        try:
-            batch_results.append(run_one(task))
-        except Exception as exc:
-            print(f"Task {task.source_object_name} (Config ID: {task.config_id}) failed with exception: {exc}")
-            batch_results.append({
-                "config_id": task.config_id,
-                "run_id":   None,
-                "status":   AUDIT_STATUS_FAILED,
-                "rows_read": 0,
-                "error":    str(exc),
-            })
-    return batch_results
-
-
-print(
-    f"\nStarting {len(tasks)} tasks across {len(batches)} batch(es) with "
-    f"ThreadPoolExecutor (max_workers={max_workers})..."
-)
-with ThreadPoolExecutor(max_workers=max_workers) as executor:
-    future_to_batch = {
-        executor.submit(run_batch, batch_id, batch_tasks): batch_id
-        for batch_id, batch_tasks in batches.items()
-    }
-
-    for future in as_completed(future_to_batch):
-        batch_id = future_to_batch[future]
-        try:
-            results.extend(future.result())
-        except Exception as exc:
-            print(f"Batch {batch_id} failed with exception: {exc}")
-            for task in batches[batch_id]:
-                results.append({
-                    "config_id": task.config_id,
-                    "run_id":   None,
-                    "status":   AUDIT_STATUS_FAILED,
-                    "rows_read": 0,
-                    "error":    str(exc),
-                })
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Close the dependency job
-# MAGIC
-# MAGIC pipeline_end_time isn't known until every table has finished — bulk-stamp
-# MAGIC it (and the derived dependency_resolve_time) onto every dependency_master_config
-# MAGIC row for this job_run_id in one shot, now that the fan-out above is done.
+# MAGIC ### Results summary & exit
 
 # COMMAND ----------
 
-orchestrator.dependency.complete_job(job_run_id)
+silver_results = [r["silver_result"] for r in results if r.get("silver_result")]
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Results summary
-# MAGIC
-# MAGIC Silver now runs coupled — inline, synchronously — inside each table's
-# MAGIC own orchestrator.run() call (see IngestionOrchestrator._trigger_silver),
-# MAGIC right after that table's landing write and before its Bronze Delta
-# MAGIC write. By the time a task's future resolves above, its Silver run (if
-# MAGIC enabled) has already finished, so results already carry it under
-# MAGIC "silver_result" — no separate wait step needed.
-
-# COMMAND ----------
-# optional can be removed 
-STATUS_ICONS = {
-    AUDIT_STATUS_SUCCESS: "✅",
-    AUDIT_STATUS_SKIPPED: "⏭️",
-}
-
-print(f"\n{'='*75}")
-print(f"{'CONF ID':>8}  {'STATUS':<10}  {'ROWS':>8}  ERROR")
-print(f"{'='*75}")
-for r in sorted(results, key=lambda x: x["config_id"]):
-    icon   = STATUS_ICONS.get(r["status"], "❌")
-    error  = (r.get("error") or "")[:50]
-    print(f"{r['config_id']:>8}  {icon} {r['status']:<8}  {r.get('rows_read', 0):>8}  {error}")
-print(f"{'='*75}")
+print_results_summary(results, silver_results)
 
 succeeded = [r for r in results if r["status"] == AUDIT_STATUS_SUCCESS]
 skipped   = [r for r in results if r["status"] == AUDIT_STATUS_SKIPPED]
 failed    = [r for r in results if r["status"] == AUDIT_STATUS_FAILED]
-print(
-    f"Total: {len(results)} | ✅ Succeeded: {len(succeeded)} | "
-    f"⏭️ Skipped (0 rows): {len(skipped)} | ❌ Failed: {len(failed)}\n"
-)
-
-silver_results = [r["silver_result"] for r in results if r.get("silver_result")]
-
-if silver_results:
-    print(f"{'='*75}")
-    print(f"{'CONF ID':>8}  {'SILVER STATUS':<14}  TARGET")
-    print(f"{'='*75}")
-    for r in sorted(silver_results, key=lambda x: x["config_id"]):
-        icon = "✅" if r["status"] == "SUCCESS" else "❌"
-        print(f"{r['config_id']:>8}  {icon} {r['status']:<12}  {r.get('target', '')}")
-    print(f"{'='*75}")
-
 silver_failed = [r for r in silver_results if r["status"] == "FAILED"]
-print(
-    f"Silver — Total: {len(silver_results)} | "
-    f"✅ Succeeded: {len(silver_results) - len(silver_failed)} | ❌ Failed: {len(silver_failed)}\n"
-)
-
-# COMMAND ----------
-
 
 if failed:
     failed_ids = [r["config_id"] for r in failed]
@@ -437,8 +401,6 @@ if failed:
         f"(Config IDs: {silver_failed_ids}). "
         f"Check the audit table and logs above for details."
     )
-    _upload_on_exit()
-
 
 _upload_on_exit()
 dbutils.notebook.exit(
@@ -447,4 +409,3 @@ dbutils.notebook.exit(
 )
 
 # COMMAND ----------
-

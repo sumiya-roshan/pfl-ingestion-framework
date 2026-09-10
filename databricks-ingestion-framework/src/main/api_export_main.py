@@ -19,9 +19,6 @@
 # MAGIC Tasks come from `taskValues` (Task 0 — `get_tasks.py`) in Job mode, or from
 # MAGIC a direct config query in standalone mode.
 # MAGIC
-# MAGIC **Parallelism:** up to 4 tables run concurrently (`ThreadPoolExecutor`,
-# MAGIC `max_workers=4`). The API steps within one table stay sequential.
-# MAGIC
 # MAGIC **Fault tolerance:** a failure on one task does NOT stop the others. Every
 # MAGIC task is attempted; a summary is printed at the end and the notebook raises
 # MAGIC only if at least one task failed (each failed row is flagged
@@ -36,7 +33,6 @@
 
 import json
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.append("..")
 
@@ -133,57 +129,23 @@ if not all(isinstance(t, MavisIngestionTaskConfig) for t in tasks):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Run export tasks — table-level parallelism, API steps sequential per table
-# MAGIC
-# MAGIC Up to 4 tables run their Mavis export flow concurrently. The API steps for
-# MAGIC a single table (start → poll → download URL → download/unzip) stay
-# MAGIC sequential inside `MavisApiExtractor.run` — parallelism is only across
-# MAGIC tables. The `extractor` / `connector` / `config_mgr` / `spark` objects are
-# MAGIC shared but only read (the connector is stateless — every call takes its
-# MAGIC `task` as an argument), and each worker returns its own result tuple that
-# MAGIC the main thread collects, so no mutable state is shared between workers.
+# MAGIC ### Run each export task (fault-tolerant, sequential)
 
 # COMMAND ----------
-
-# Maximum tables processed concurrently (fixed for now — no config column / env var).
-MAX_WORKERS = 4
 
 api_config = MavisApiConfig(prod_api=mavis_prod_api) if mavis_prod_api else None
 extractor = MavisApiExtractor(spark, config_mgr, api_config=api_config)
 
-
-def process_table(task: MavisIngestionTaskConfig) -> tuple[int, str, object]:
-    """
-    Single-table Mavis export flow (start → RequestId → poll → FileURL →
-    download/unzip), run in one worker. Returns ``(config_id, status, detail)``;
-    never raises — a table-level failure is captured here so the other tables
-    keep running. ``MavisApiExtractor.run`` already writes Status=FAILED on the
-    row for a failure.
-    """
+results: dict[int, tuple[str, object]] = {}
+for task in tasks:
     print(f"[api_export] config_id={task.config_id} START ({task.source_object_name})")
     try:
         paths = extractor.run(task)
+        results[task.config_id] = ("SUCCESS", paths)
         print(f"[api_export] config_id={task.config_id} SUCCESS")
-        return task.config_id, "SUCCESS", paths
-    except Exception as exc:
+    except Exception as exc:  # extractor already wrote Status=FAILED
+        results[task.config_id] = ("FAILED", str(exc))
         print(f"[api_export] config_id={task.config_id} FAILED: {exc}")
-        return task.config_id, "FAILED", str(exc)
-
-
-workers = min(MAX_WORKERS, len(tasks))
-print(f"Running {len(tasks)} export task(s) with ThreadPoolExecutor(max_workers={workers})")
-
-results: dict[int, tuple[str, object]] = {}
-with ThreadPoolExecutor(max_workers=workers) as executor:
-    future_to_cid = {executor.submit(process_table, task): task.config_id for task in tasks}
-    for future in as_completed(future_to_cid):
-        cid = future_to_cid[future]
-        try:
-            config_id, status, detail = future.result()
-            results[config_id] = (status, detail)
-        except Exception as exc:  # defensive — process_table shouldn't raise
-            results[cid] = ("FAILED", str(exc))
-            print(f"[api_export] config_id={cid} FAILED (worker error): {exc}")
 
 # COMMAND ----------
 
