@@ -68,6 +68,7 @@ dbutils.widgets.text("environment",         "dev",            "Environment: dev 
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
 dbutils.widgets.text("silver_notebook_path",    "",           "Workspace path to Silver transformation notebook (blank = skip Silver trigger)")
 dbutils.widgets.text("silver_notebook_timeout", "3600",       "Max seconds to wait for each Silver notebook run")
+dbutils.widgets.text("batch_id",            "",               "Single Batch_ID to process (set by rdbms_pipeline_launcher; blank = all active batches)")
 
 # COMMAND ----------
 
@@ -96,6 +97,10 @@ logger               = get_logger(environment=environment)
 
 silver_notebook_path    = dbutils.widgets.get("silver_notebook_path")    or None
 silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
+# Single Batch_ID filter — set by rdbms_pipeline_launcher; blank means process all batches
+batch_id_filter_raw = dbutils.widgets.get("batch_id").strip() or None
+batch_id_filter     = int(batch_id_filter_raw) if batch_id_filter_raw else None
+# max_workers comes from config_source_system.max_workers (set after source_sys is resolved below)
 
 
 # COMMAND ----------
@@ -230,6 +235,17 @@ print(type(batch_start_date),batch_start_date)
 print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
 print(f"Active tasks    : {len(tasks)}")
 
+# If triggered by rdbms_pipeline_launcher, filter to the single Batch_ID for this run
+if batch_id_filter is not None:
+    tasks = [t for t in tasks if t.batch_id == batch_id_filter]
+    print(f"[Batch_ID filter] Running for single Batch_ID={batch_id_filter} — {len(tasks)} task(s) matched.")
+else:
+    print("[Batch_ID filter] No filter set — running all active batches.")
+
+# max_workers from config_source_system — how many tables run in parallel on this cluster
+max_workers = source_sys.max_workers or 5
+print(f"[Parallelism] max_workers={max_workers} (from config_source_system)")
+
 # Configure S3/Volume logging dynamically
 resolved_landing_path = source_sys.landing_volume_path
 if resolved_landing_path:
@@ -293,70 +309,52 @@ def run_one(task: IngestionTaskConfig) -> dict:
 
 results = []
 
-# ── Batch-level parallelism ────────────────────────────────────────────────
-# batch_id  → controls PARALLEL execution: one thread per distinct batch.
-# priority  → controls SEQUENTIAL execution of tables WITHIN a batch (ascending).
+# ── Table-level parallelism within this batch ─────────────────────────────
+# All tasks for this batch_id are submitted to the ThreadPoolExecutor in
+# priority order (ascending). The thread pool picks them up as workers become
+# free, so lower-priority-number tables always get a worker first.
+# max_workers controls how many tables run concurrently on this cluster.
 #
-# max_workers is derived dynamically from the distinct batch_id count for this
-# pipeline — NOT hardcoded, NOT taken from the widget/config. Tables are never
-# assigned to their own threads; a batch's tables run one-by-one inside the
-# batch's single thread. Per-table processing (load type, incremental/full,
-# retry, timeout, watermark, …) is unchanged — it all still happens in run_one.
+# Example: 10 tables, priority 1-10, max_workers=5
+#   → tables 1-5 start immediately (first 5 workers claimed)
+#   → as each finishes, the next priority table starts
+#   → net result: always up to 5 running at once, in priority order
 
-# Group tasks by batch_id, tables inside each batch ordered by priority ascending.
-batches = {}
-for task in sorted(tasks, key=lambda t: t.priority):
-    batches.setdefault(task.batch_id, []).append(task)
+sorted_tasks = sorted(tasks, key=lambda t: (t.priority or 0))
 
-max_workers = len(batches)   # distinct batch_id count for this pipeline
-
-
-def run_batch(batch_id, batch_tasks: list) -> list:
-    """Run every table in one batch sequentially, in priority order."""
-    batch_results = []
-    print(
-        f"[Batch {batch_id}] Starting {len(batch_tasks)} table(s) sequentially: "
-        f"{[t.source_object_name for t in batch_tasks]}"
-    )
-    for task in batch_tasks:
-        try:
-            batch_results.append(run_one(task))
-        except Exception as exc:
-            print(f"Task {task.source_object_name} (Config ID: {task.config_id}) failed with exception: {exc}")
-            batch_results.append({
-                "config_id": task.config_id,
-                "run_id":   None,
-                "status":   AUDIT_STATUS_FAILED,
-                "rows_read": 0,
-                "error":    str(exc),
-            })
-    return batch_results
-
-
+effective_workers = min(max_workers, len(sorted_tasks))
 print(
-    f"\nStarting {len(tasks)} tasks across {len(batches)} batch(es) with "
-    f"ThreadPoolExecutor (max_workers={max_workers})..."
+    f"\nStarting {len(sorted_tasks)} task(s) with "
+    f"ThreadPoolExecutor(max_workers={effective_workers}), "
+    f"submitted in priority order..."
 )
-with ThreadPoolExecutor(max_workers=max_workers) as executor:
-    future_to_batch = {
-        executor.submit(run_batch, batch_id, batch_tasks): batch_id
-        for batch_id, batch_tasks in batches.items()
-    }
 
-    for future in as_completed(future_to_batch):
-        batch_id = future_to_batch[future]
+with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+    # Submit ALL tasks upfront in priority order — the pool queues the overflow
+    future_to_task = {}
+    for task in sorted_tasks:
+        print(
+            f"  → Submitting priority={task.priority or 0} "
+            f"table={task.source_object_name} (config_id={task.config_id})"
+        )
+        future_to_task[executor.submit(run_one, task)] = task
+
+    for future in as_completed(future_to_task):
+        task = future_to_task[future]
         try:
-            results.extend(future.result())
+            results.append(future.result())
         except Exception as exc:
-            print(f"Batch {batch_id} failed with exception: {exc}")
-            for task in batches[batch_id]:
-                results.append({
-                    "config_id": task.config_id,
-                    "run_id":   None,
-                    "status":   AUDIT_STATUS_FAILED,
-                    "rows_read": 0,
-                    "error":    str(exc),
-                })
+            print(
+                f"Task {task.source_object_name} "
+                f"(Config ID: {task.config_id}) failed: {exc}"
+            )
+            results.append({
+                "config_id": task.config_id,
+                "run_id":    None,
+                "status":    AUDIT_STATUS_FAILED,
+                "rows_read": 0,
+                "error":     str(exc),
+            })
 
 # COMMAND ----------
 

@@ -92,6 +92,7 @@ class SourceSystemConfig(_DictSerializable):
     retry_interval: int | None
     query_timeout: str | None = None
     uc_connection_name: str | None = None
+    max_workers: int | None = None  # max parallel tables within a batch on this source
 
 
 @dataclass
@@ -520,6 +521,7 @@ class ConfigManager:
             retry_interval=r.get("retry_interval"),
             query_timeout=r.get("query_timeout"),
             uc_connection_name=r.get("uc_connection_name"),
+            max_workers=self._to_int(r.get("max_workers") or r.get("Max_Workers")),
         )
 
     def _build_ingestion_task(
