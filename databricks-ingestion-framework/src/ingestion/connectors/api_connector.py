@@ -19,6 +19,8 @@ The x-api-key header comes from the task's own Api_Key column (never logged).
 Any failure raises; the extractor tags it with the step + config_id.
 """
 
+from __future__ import annotations
+
 import json
 import time
 import os
@@ -29,7 +31,6 @@ import shutil
 from pyspark.dbutils import DBUtils
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
-from __future__ import annotations
 
 
 def _fmt_dt(value) -> str:
