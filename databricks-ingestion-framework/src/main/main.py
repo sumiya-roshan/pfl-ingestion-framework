@@ -74,8 +74,6 @@ dbutils.widgets.text("lentra_load_notebook_path", "",       "Lentra only: worksp
 dbutils.widgets.text("lentra_raw_sa_name",          "",       "Lentra only: base raw landing path (S3 URI / Volume path)")
 dbutils.widgets.text("lentra_notebook_timeout",     "3600",   "Lentra only: max seconds to wait for each notebook.run() call (load and classify)")
 dbutils.widgets.text("lentra_classify_notebook_path", "",      "Lentra only: workspace path to the classify notebook (only used for the 2 DMS-master sources)")
-dbutils.widgets.text("secret_scope",                "",        "Lentra only: secret scope for Databricks PAT token (needed to trigger api_extract/dms_extract jobs) — same as multi_refresh_orchestrator.py")
-dbutils.widgets.text("secret_key_pat",              "databricks-pat-token", "Lentra only: secret key for Databricks PAT token")
 
 # COMMAND ----------
 
@@ -281,31 +279,17 @@ if not tasks:
 # COMMAND ----------
 
 if is_lentra:
-    from ingestion.utils.lentra_loader import LentraLoader
-    from multi_refresh.job_trigger import JobTrigger
+    from ingestion.utils.lentra_loader import DMS_API_RESPONSE_FILES_SOURCES, LentraLoader
 
     lentra_load_notebook_path     = dbutils.widgets.get("lentra_load_notebook_path") or None
     lentra_raw_sa_name            = dbutils.widgets.get("lentra_raw_sa_name") or None
     lentra_notebook_timeout       = int(dbutils.widgets.get("lentra_notebook_timeout") or "3600")
     lentra_classify_notebook_path = dbutils.widgets.get("lentra_classify_notebook_path") or None
-    lentra_secret_scope           = dbutils.widgets.get("secret_scope") or None
-    lentra_secret_key_pat         = dbutils.widgets.get("secret_key_pat") or "databricks-pat-token"
 
     if not lentra_load_notebook_path:
         dbutils.notebook.exit("Error: lentra_load_notebook_path widget is required for Lentra sources.")
     if not lentra_raw_sa_name:
         dbutils.notebook.exit("Error: lentra_raw_sa_name widget is required for Lentra sources.")
-
-    # Only needed for the 2 DMS-master sources (api_extract/dms_extract job
-    # triggers) — left None otherwise, same "only errors when actually
-    # needed" pattern as lentra_classify_notebook_path inside LentraLoader.
-    lentra_job_trigger = None
-    if lentra_secret_scope:
-        lentra_workspace_url = (
-            dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiUrl().get()
-        )
-        lentra_pat_token = dbutils.secrets.get(scope=lentra_secret_scope, key=lentra_secret_key_pat)
-        lentra_job_trigger = JobTrigger(workspace_url=lentra_workspace_url, token=lentra_pat_token)
 
     lentra_loader = LentraLoader(
         spark,
@@ -316,16 +300,14 @@ if is_lentra:
         run_id                  = job_run_id,
         notebook_timeout        = lentra_notebook_timeout,
         classify_notebook_path  = lentra_classify_notebook_path,
-        job_trigger             = lentra_job_trigger,
     )
 
     # Publish the same values the client notebook receives as taskValues, so
-    # a downstream job task (e.g. a classify/DMS-extract notebook, wired
-    # directly in the job graph for specific sources — not something this
-    # code branches on) can read them via
-    # {{tasks.<this task's name>.values.<key>}} without its own config-table
-    # lookup. Lentra always resolves to exactly one task per source, so
-    # there's no ambiguity about which row's values these are.
+    # the downstream api_extract/dms_extract Run Job tasks (wired directly in
+    # the job graph, gated by a Condition task on dms_master below) can read
+    # them via {{tasks.<this task's name>.values.<key>}} without their own
+    # config-table lookup. Lentra always resolves to exactly one task per
+    # source, so there's no ambiguity about which row's values these are.
     lentra_published_values = LentraLoader.build_params(
         tasks[0], lentra_raw_sa_name, job_run_id
     )
@@ -334,6 +316,22 @@ if is_lentra:
             dbutils.jobs.taskValues.set(key=_key, value=_value)
         except Exception as _exc:
             print(f"[Lentra] taskValues not available (standalone mode) for {_key}: {_exc}")
+
+    # dms_master — lets a downstream Condition task in the job graph decide
+    # whether to branch into api_extract/dms_extract (visible Run Job tasks,
+    # not fired from Python — see lentra_loader.py's module docstring for
+    # why). Published as lowercase "true"/"false" strings, matching what a
+    # Condition task's EQUAL_TO comparison expects. Computed here regardless
+    # of this task's own success/failure — the Condition task's own
+    # "Depends on: run_source_ingestion, Run if: All succeeded" is what
+    # actually gates on whether the load+classify notebooks succeeded.
+    try:
+        dbutils.jobs.taskValues.set(
+            key="dms_master",
+            value=str(tasks[0].source_name in DMS_API_RESPONSE_FILES_SOURCES).lower(),
+        )
+    except Exception as _exc:
+        print(f"[Lentra] taskValues not available (standalone mode) for dms_master: {_exc}")
 
     # Lentra always resolves to exactly one active row per source_name (see
     # ConfigManager.get_active_tasks), so there's no real parallelism to gain

@@ -14,10 +14,12 @@ notebook run in place of the API calls.
 
 DMS-master branch: for the two sources in DMS_API_RESPONSE_FILES_SOURCES,
 after the client notebook succeeds, a second ("classify") notebook is
-triggered with the same params, and once THAT succeeds, two Databricks JOBS
-(not notebooks — API_EXTRACT_JOB_NAME / DMS_EXTRACT_JOB_NAME) are triggered
-via the Jobs REST API, fire-and-forget (not waited on), using the same
-JobTrigger helper multi_refresh_orchestrator.py already uses.
+triggered with the same params. The two downstream jobs (api_extract /
+dms_extract) are NOT triggered from here — the client wants them visible as
+real tasks in the job graph, not hidden inside notebook logs. main.py
+publishes a `dms_master` taskValue instead, and a Condition task + two Run
+Job tasks wired directly in the Databricks job handle the branching (see
+main.py's Lentra branch for what gets published).
 
 Entry point: src/main/main.py branches to this class when the discovered
 tasks are LentraIngestionTaskConfig objects (see ConfigManager.get_active_tasks
@@ -27,8 +29,6 @@ IngestionOrchestrator.
 
 from __future__ import annotations
 
-from multi_refresh.job_trigger import JobTrigger
-
 from .config_manager import (
     AUDIT_STATUS_FAILED,
     AUDIT_STATUS_INPROGRESS,
@@ -37,19 +37,13 @@ from .config_manager import (
     LentraIngestionTaskConfig,
 )
 
-# Sources that need the DMS-master branch (classify notebook + 2 downstream
-# jobs) after the client notebook succeeds. Exact list, not a pattern match —
-# only these two ever trigger it.
+# Sources that need the DMS-master branch (classify notebook here, plus
+# api_extract/dms_extract as visible job-graph tasks downstream — see module
+# docstring). Exact list, not a pattern match — only these two ever trigger it.
 DMS_API_RESPONSE_FILES_SOURCES = [
     "lentra_dealer_dms_api_response_files_hdr",
     "lentra_cd_dms_api_response_files_hdr",
 ]
-
-# Job names triggered (simultaneously — both fired before either is waited
-# on) after the classify notebook succeeds. Resolved to job_id by JobTrigger
-# via the Jobs API, not hardcoded IDs.
-API_EXTRACT_JOB_NAME = "api_extract"
-DMS_EXTRACT_JOB_NAME = "dms_extract"
 
 
 class LentraLoader:
@@ -65,7 +59,6 @@ class LentraLoader:
         run_id: str,
         notebook_timeout: int = 3600,
         classify_notebook_path: str | None = None,
-        job_trigger: JobTrigger | None = None,
     ):
         self.spark = spark
         self.dbutils = dbutils
@@ -75,7 +68,6 @@ class LentraLoader:
         self.run_id = run_id
         self.notebook_timeout = notebook_timeout
         self.classify_notebook_path = classify_notebook_path
-        self.job_trigger = job_trigger
 
     @staticmethod
     def build_params(
@@ -85,12 +77,12 @@ class LentraLoader:
     ) -> dict[str, str]:
         """
         Builds the exact parameter dict the client notebook (and, for DMS-
-        master sources, the classify notebook and the two triggered jobs)
-        receives — exposed as a shared static method so callers needing the
-        same values (e.g. main.py publishing them as taskValues for a
-        downstream job task) can't drift from what these actually get. All
-        values are strings, since dbutils.notebook.run() parameters and Jobs
-        API job_parameters must be strings.
+        master sources, the classify notebook) receives — exposed as a
+        shared static method so callers needing the same values (e.g.
+        main.py publishing them as taskValues for the downstream
+        api_extract/dms_extract Run Job tasks) can't drift from what these
+        actually get. All values are strings, since dbutils.notebook.run()
+        parameters and Jobs API job_parameters must be strings.
         """
         return {
             "raw_sa_name": raw_sa_name or "",
@@ -122,12 +114,10 @@ class LentraLoader:
         results from every task regardless of individual failures).
 
         DMS-master branch (see module docstring) lives inside this same try
-        block, so a failure at any step — client notebook, classify notebook,
-        or triggering the two jobs — is treated identically: Status -> Failed,
-        overall result FAILED. The two jobs are only ever triggered after the
-        classify notebook succeeds (matches the original flow's
-        if_master_load_flag_true gate), and they're fired one right after the
-        other without waiting for either to finish.
+        block, so a classify-notebook failure is treated identically to a
+        load-notebook failure: Status -> Failed, overall result FAILED.
+        Triggering api_extract/dms_extract themselves is NOT done here — see
+        module docstring.
         """
         fqn = task.child_table_fqn
         config_id = task.config_id
@@ -146,8 +136,6 @@ class LentraLoader:
             )
 
             classify_exit_value = None
-            api_extract_run_id = None
-            dms_extract_run_id = None
 
             if task.source_name in DMS_API_RESPONSE_FILES_SOURCES:
                 if not self.classify_notebook_path:
@@ -163,27 +151,6 @@ class LentraLoader:
                     self.classify_notebook_path, self.notebook_timeout, params
                 )
 
-                if not self.job_trigger:
-                    raise ValueError(
-                        f"source_name={task.source_name!r} is a DMS-master source "
-                        f"but job_trigger (PAT token) was not configured."
-                    )
-                print(
-                    f"[LentraLoader] config_id={config_id} classify notebook succeeded — "
-                    f"triggering {API_EXTRACT_JOB_NAME!r} and {DMS_EXTRACT_JOB_NAME!r}"
-                )
-                api_extract_run_id = self.job_trigger.run_now_by_name(
-                    job_name=API_EXTRACT_JOB_NAME, notebook_params=params
-                )
-                dms_extract_run_id = self.job_trigger.run_now_by_name(
-                    job_name=DMS_EXTRACT_JOB_NAME, notebook_params=params
-                )
-                print(
-                    f"[LentraLoader] config_id={config_id} triggered "
-                    f"{API_EXTRACT_JOB_NAME}=run_id:{api_extract_run_id}, "
-                    f"{DMS_EXTRACT_JOB_NAME}=run_id:{dms_extract_run_id} "
-                )
-
             self.config_mgr.update_status(fqn, config_id, AUDIT_STATUS_SUCCESS)
             print(f"[LentraLoader] config_id={config_id} SUCCESS — {exit_value}")
             return {
@@ -192,8 +159,6 @@ class LentraLoader:
                 "status": AUDIT_STATUS_SUCCESS,
                 "exit_value": exit_value,
                 "classify_exit_value": classify_exit_value,
-                "api_extract_run_id": api_extract_run_id,
-                "dms_extract_run_id": dms_extract_run_id,
                 "error": None,
             }
         except Exception as exc:
@@ -211,7 +176,5 @@ class LentraLoader:
                 "status": AUDIT_STATUS_FAILED,
                 "exit_value": None,
                 "classify_exit_value": None,
-                "api_extract_run_id": None,
-                "dms_extract_run_id": None,
                 "error": str(exc),
             }
