@@ -42,19 +42,13 @@ def _fmt_dt(value) -> str:
 class MavisApiConfig:
     """
     HTTP / polling settings for the Mavis export API.
-
-    Endpoints mirror the ADF pipeline. The base URL is the ADF ``Prod_API``
-    value — read per row from the Mavis config table
-    (``MavisIngestionTaskConfig.prod_api``); ``prod_api`` here is only the
-    fallback used when that column is blank. The three path templates are
-    concatenated onto the base URL with the per-task ids substituted:
-
-      start_export   {prod_api}{database_id}/{table_id}/rows/export?orgcode={org_code}
-      status         {prod_api}{database_id}/tables/{table_id}/requesthistory?orgcode={org_code}
-      download_url   {prod_api}{database_id}/{table_id}/request/download?orgcode={org_code}
+    Endpoints mirror the ADF pipeline.
+    
+    The actual base URL (prod_api) and api_key come from the individual
+    task configuration row.
     """
 
-    prod_api: str = "https://api_url.com/"
+    prod_api: str | None = None
     start_export_path: str = (
         "{database_id}/{table_id}/rows/export?orgcode={org_code}"
     )
@@ -340,6 +334,10 @@ class MavisApiExportConnector:
             .replace("{org_code}", str(task.org_code or ""))
         )
         base = getattr(task, "prod_api", None) or self.api.prod_api
+        if not base:
+            raise RuntimeError(
+                f"config_id={task.config_id}: Prod_API is missing on the config row"
+            )
         return f"{base.rstrip('/')}/{path.lstrip('/')}"
 
     def _post(self, url: str, task, body: dict | str) -> dict:
