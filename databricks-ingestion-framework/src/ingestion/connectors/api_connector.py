@@ -224,8 +224,8 @@ class MavisApiExportConnector:
         ts    = ist.strftime("%Y_%m_%d_%H_%M_%S")
 
         # folder = sink table name; file_name = schema_table (matches ADF convention)
-        folder    = (task.target_table or "export").strip("/")
-        file_name = f"{task.target_schema}_{task.target_table}" if task.target_schema else folder
+        folder    = (task.sink_table_name or "export").strip("/")
+        file_name = f"{task.sink_schema_name}_{task.sink_table_name}" if task.sink_schema_name else folder
 
         # inner path shared by both the final S3 destination and the staging Volume
         inner_zip  = f"{folder}/zip/{year}/{month}/{day}/{file_name}_{ts}.zip"
