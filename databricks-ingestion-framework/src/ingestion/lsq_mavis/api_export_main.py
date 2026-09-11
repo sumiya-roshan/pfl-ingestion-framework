@@ -44,7 +44,6 @@
 
 import json
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 # notebook lives at src/ingestion/lsq_mavis/ — two levels below src/
@@ -218,26 +217,21 @@ if not all(isinstance(t, MavisIngestionTaskConfig) for t in tasks):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Run export tasks — table-level parallelism, API steps sequential per table
+# MAGIC ### Run export tasks
 # MAGIC
-# MAGIC Every task runs its Mavis export flow concurrently (one worker each). The
-# MAGIC API steps for a single table (start → poll → download URL → download/unzip)
-# MAGIC stay sequential inside `MavisApiExtractor.run` — parallelism is only across
-# MAGIC tables. `MavisApiExtractor` owns the audit row + child-config Status +
-# MAGIC logging per task; its `AuditLogger` and status writes are internally
-# MAGIC serialised, and the connector is stateless (every call takes its `task`
-# MAGIC as an argument), so nothing mutable is shared between workers.
+# MAGIC `extractor.run_all(...)` fans the tasks out one worker per distinct
+# MAGIC `config_id`; the API steps for a single table (start → poll → download URL
+# MAGIC → download/unzip → Silver) stay sequential inside `MavisApiExtractor.run`.
+# MAGIC The audit row, child-config Status, retry and Silver trigger are all owned
+# MAGIC by the extractor. Returns `{config_id: (status, detail)}`.
 
 # COMMAND ----------
 
-# One worker per task — each Mavis export is independent, so max_workers is the
-# distinct config_id count from the resolved config rows.
-max_workers = len({t.config_id for t in tasks})
-
 # Endpoint base URL (prod_api) comes from each task's own config row; retry /
-# interval / timeout come from config_source_system; the Silver notebook trigger
-# is owned by MavisApiExtractor. dbutils is passed so it can call
-# dbutils.notebook.run for Silver.
+# interval / timeout come from config_source_system. The parallel fan-out
+# (one worker per distinct config_id), the audit row, child-config Status and
+# the Silver notebook trigger are all owned by MavisApiExtractor. dbutils is
+# passed so it can call dbutils.notebook.run for Silver.
 extractor = MavisApiExtractor(
     spark,
     config_mgr,
@@ -248,40 +242,10 @@ extractor = MavisApiExtractor(
     silver_notebook_timeout=silver_notebook_timeout,
 )
 
-
-def process_table(task: MavisIngestionTaskConfig) -> tuple[int, str, object]:
-    """
-    Single-table Mavis export flow (start → RequestId → poll → FileURL →
-    download/unzip), run in one worker. Returns ``(config_id, status, detail)``;
-    never raises — a table-level failure is captured here so the other tables
-    keep running. ``MavisApiExtractor.run`` already writes Status=FAILED on the
-    config row and closes the audit row FAILED before raising.
-    """
-    print(f"[api_export] config_id={task.config_id} START ({task.source_object_name})")
-    try:
-        paths = extractor.run(
-            task, source_sys, pipeline_name, job_context, config_master_id
-        )
-        print(f"[api_export] config_id={task.config_id} SUCCESS")
-        return task.config_id, "SUCCESS", paths
-    except Exception as exc:
-        print(f"[api_export] config_id={task.config_id} FAILED: {exc}")
-        return task.config_id, "FAILED", str(exc)
-
-
-print(f"Running {len(tasks)} export task(s) with ThreadPoolExecutor(max_workers={max_workers})")
-
-results: dict[int, tuple[str, object]] = {}
-with ThreadPoolExecutor(max_workers=max_workers) as executor:
-    future_to_cid = {executor.submit(process_table, task): task.config_id for task in tasks}
-    for future in as_completed(future_to_cid):
-        cid = future_to_cid[future]
-        try:
-            config_id, status, detail = future.result()
-            results[config_id] = (status, detail)
-        except Exception as exc:  # defensive — process_table shouldn't raise
-            results[cid] = ("FAILED", str(exc))
-            print(f"[api_export] config_id={cid} FAILED (worker error): {exc}")
+# {config_id: ("SUCCESS", [zip, csv]) | ("FAILED", "<error>")}
+results = extractor.run_all(
+    tasks, source_sys, pipeline_name, job_context, config_master_id
+)
 
 # COMMAND ----------
 

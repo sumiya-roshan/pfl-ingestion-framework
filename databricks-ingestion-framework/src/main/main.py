@@ -32,6 +32,26 @@
 # MAGIC
 
 # COMMAND ----------
+import json
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+
+# notebook lives at src/ingestion/lsq_mavis/ — two levels below src/
+sys.path.append("../..")
+
+from ingestion.lsq_mavis.mavis_api_extractor import MavisApiExtractor
+from ingestion.utils.config_manager import (
+    AUDIT_TABLE,
+    CONFIG_MASTER_TABLE,
+    MAVIS_SOURCE_NAME,
+    SOURCE_SYSTEM_TABLE,
+    ConfigManager,
+    IngestionTaskConfig,
+    MavisIngestionTaskConfig,
+    SourceSystemConfig,
+)
+from ingestion.utils.logger import _upload_on_exit, configure_s3_logging, get_logger
 
 import json
 import sys
@@ -200,20 +220,21 @@ config_mgr = ConfigManager(
 )
 
 if payload_str:
-    # ── Job mode: deserialize what get_tasks.py published ──────────────────
-    print("[Tasks] Reading active tasks from taskValues (get_table_details task).")
-    payload    = json.loads(payload_str)
+    print(f"[Tasks] Reading active tasks from taskValues ('{get_tasks_task_key}').")
+    payload = json.loads(payload_str)
     source_sys = SourceSystemConfig.from_dict(payload["source_sys"])
-    tasks      = [IngestionTaskConfig.from_dict(t) for t in payload["tasks"]]
-    batch_start_date = payload.get("batch_start_date")
+    # same payload shape for every source — only the task class differs
+    is_mavis = (source_sys.source_name or "").strip().upper() == MAVIS_SOURCE_NAME.upper()
+    task_cls = MavisIngestionTaskConfig if is_mavis else IngestionTaskConfig
+    tasks = [task_cls.from_dict(t) for t in payload["tasks"]]
+    batch_start_date = payload.get("batch_start_date") or batch_start_date
 else:
-    # ── Standalone mode: query config tables directly ──────────────────────
-    print("[Tasks] taskValues not available — querying config tables directly (standalone mode).")
+    print("[Tasks] taskValues not available — querying config tables directly.")
     source_sys, tasks = config_mgr.get_active_tasks(
-        config_master_id = config_master_id,
-        source_system_id = source_system_id,
-        pipeline_name    = pipeline_name,
-        batch_start_date = batch_start_date,
+        config_master_id=config_master_id,
+        source_system_id=source_system_id,
+        pipeline_name=pipeline_name,
+        batch_start_date=batch_start_date,
     )
 
 # batch_start_date arrives as a string — get_tasks.py stamps it as
@@ -230,6 +251,17 @@ print(type(batch_start_date),batch_start_date)
 print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
 print(f"Active tasks    : {len(tasks)}")
 
+# Route by source — one self-contained branch per family. Defined here so both
+# Job and standalone modes have it. IngestionOrchestrator is purely RDBMS
+# (JDBC + federated); SFTP / NoSQL / S3 get their own branch when built.
+_RDBMS_SOURCE_TYPES = {
+    "POSTGRES", "POSTGRESQL", "PG", "MYSQL", "ORACLE", "MSSQL", "SQLSERVER",
+    "POSTGRES_FEDERATED",
+}
+_source_type = (source_sys.source_type or "").strip().upper()
+is_mavis = (source_sys.source_name or "").strip().upper() == MAVIS_SOURCE_NAME.upper()
+is_rdbms = _source_type in _RDBMS_SOURCE_TYPES
+
 # Configure S3/Volume logging dynamically
 resolved_landing_path = source_sys.landing_volume_path
 if resolved_landing_path:
@@ -244,207 +276,229 @@ if not tasks:
 # NOTE: max_workers is now derived dynamically from the distinct batch_id count
 # for this pipeline in the execution section below.
 # COMMAND ----------
+if is_mavis:
 
-# MAGIC %md
-# MAGIC ### Execute Ingestion
-
-# COMMAND ----------
-
-# trigger_id also set to rootRunId for traceability in audit trigger_id column
-trigger_id = job_run_id
-job_context["trigger_id"] = trigger_id
-
-orchestrator = IngestionOrchestrator(
-    spark,
-    dbutils,
-    audit_table             = AUDIT_TABLE,
-    dependency_table        = DEPENDENCY_TABLE,
-    pipeline_name           = pipeline_name,
-    environment             = environment,
-    silver_notebook_path    = silver_notebook_path,
-    silver_notebook_timeout = silver_notebook_timeout,
-    config_mgr              = config_mgr,
-)
-
-
-
-def run_one(task: IngestionTaskConfig) -> dict:
-    logger.info(f"Processing table {task.source_object_name}")
-    """
-    Run a single ingestion task — works for RDBMS, NoSQL, and S3.
-
-    Retries happen inside IngestionOrchestrator.run(), scoped only to the
-    source connection pull (connector.extract), using the source system's
-    retry_count/retry_interval from config_source_system. Writing/transform
-    steps are not retried — a failure there fails the task outright.
-    """
-
-    return orchestrator.run(
-        source_sys          = source_sys,
-        ingest_obj          = task,
-        config_master_id    = config_master_id,   # ← routing table ID from widget
-        landing_volume_path = resolved_landing_path,
-        trigger_id          = trigger_id,
-        job_context          = job_context,
-        sink_batch_started_date = batch_start_date,
+    # Endpoint base URL (prod_api) comes from each task's own config row; retry /
+    # interval / timeout come from config_source_system. The parallel fan-out
+    # (one worker per distinct config_id), the audit row, child-config Status and
+    # the Silver notebook trigger are all owned by MavisApiExtractor.
+    extractor = MavisApiExtractor(
+        spark,
+        config_mgr,
+        audit_table=AUDIT_TABLE,
+        environment=environment,
+        dbutils=dbutils,
+        silver_notebook_path=silver_notebook_path,
+        silver_notebook_timeout=silver_notebook_timeout,
     )
 
-
-
-results = []
-
-# ── Batch-level parallelism ────────────────────────────────────────────────
-# batch_id  → controls PARALLEL execution: one thread per distinct batch.
-# priority  → controls SEQUENTIAL execution of tables WITHIN a batch (ascending).
-#
-# max_workers is derived dynamically from the distinct batch_id count for this
-# pipeline — NOT hardcoded, NOT taken from the widget/config. Tables are never
-# assigned to their own threads; a batch's tables run one-by-one inside the
-# batch's single thread. Per-table processing (load type, incremental/full,
-# retry, timeout, watermark, …) is unchanged — it all still happens in run_one.
-
-# Group tasks by batch_id, tables inside each batch ordered by priority ascending.
-batches = {}
-for task in sorted(tasks, key=lambda t: t.priority):
-    batches.setdefault(task.batch_id, []).append(task)
-
-max_workers = len(batches)   # distinct batch_id count for this pipeline
-
-
-def run_batch(batch_id, batch_tasks: list) -> list:
-    """Run every table in one batch sequentially, in priority order."""
-    batch_results = []
-    print(
-        f"[Batch {batch_id}] Starting {len(batch_tasks)} table(s) sequentially: "
-        f"{[t.source_object_name for t in batch_tasks]}"
+    # {config_id: ("SUCCESS", [zip, csv]) | ("FAILED", "<error>")}
+    results = extractor.run_all(
+        tasks, source_sys, pipeline_name, job_context, config_master_id
     )
-    for task in batch_tasks:
-        try:
-            batch_results.append(run_one(task))
-        except Exception as exc:
-            print(f"Task {task.source_object_name} (Config ID: {task.config_id}) failed with exception: {exc}")
-            batch_results.append({
-                "config_id": task.config_id,
-                "run_id":   None,
-                "status":   AUDIT_STATUS_FAILED,
-                "rows_read": 0,
-                "error":    str(exc),
-            })
-    return batch_results
 
+    succeeded = [c for c, (s, _) in results.items() if s == "SUCCESS"]
+    failed    = [c for c, (s, _) in results.items() if s == "FAILED"]
+    print(f"\n{'='*75}")
+    print(f"{'CONF ID':>8}  STATUS   DETAIL")
+    print(f"{'='*75}")
+    for cid, (status, detail) in sorted(results.items()):
+        icon = "✅" if status == "SUCCESS" else "❌"
+        print(f"{cid:>8}  {icon} {status:<7}  {str(detail)[:60]}")
+    print(f"{'='*75}")
+    print(f"Total: {len(results)} | ✅ {len(succeeded)} | ❌ {len(failed)}\n")
 
-print(
-    f"\nStarting {len(tasks)} tasks across {len(batches)} batch(es) with "
-    f"ThreadPoolExecutor (max_workers={max_workers})..."
-)
-with ThreadPoolExecutor(max_workers=max_workers) as executor:
-    future_to_batch = {
-        executor.submit(run_batch, batch_id, batch_tasks): batch_id
-        for batch_id, batch_tasks in batches.items()
-    }
+    if failed:
+        logger.critical(
+            f"API-export — {len(failed)} of {len(results)} task(s) FAILED. "
+            f"Failed Config IDs: {failed}. Check the audit table and logs above."
+        )
 
-    for future in as_completed(future_to_batch):
-        batch_id = future_to_batch[future]
-        try:
-            results.extend(future.result())
-        except Exception as exc:
-            print(f"Batch {batch_id} failed with exception: {exc}")
-            for task in batches[batch_id]:
-                results.append({
+    _upload_on_exit()
+    if failed:
+        raise RuntimeError(
+            f"{len(failed)} of {len(results)} API-export task(s) failed: {failed}"
+        )
+    dbutils.notebook.exit(
+        f"SUCCESS: {len(succeeded)}/{len(results)} API-export task(s) completed "
+        f"for {source_sys.source_name}."
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Connector path — RDBMS only (JDBC + federated). SFTP / NoSQL / S3 get their
+# own elif when built. NOTE: the whole if/elif/else is ONE notebook cell — no
+# `# COMMAND ----------` between branches or the elif/else breaks.
+# ─────────────────────────────────────────────────────────────────────────────
+elif is_rdbms:
+    # trigger_id also set to rootRunId for traceability in audit trigger_id column
+    trigger_id = job_run_id
+    job_context["trigger_id"] = trigger_id
+
+    orchestrator = IngestionOrchestrator(
+        spark,
+        dbutils,
+        audit_table             = AUDIT_TABLE,
+        dependency_table        = DEPENDENCY_TABLE,
+        pipeline_name           = pipeline_name,
+        environment             = environment,
+        silver_notebook_path    = silver_notebook_path,
+        silver_notebook_timeout = silver_notebook_timeout,
+        config_mgr              = config_mgr,
+    )
+
+    def run_one(task: IngestionTaskConfig) -> dict:
+        """
+        Run a single ingestion task — works for RDBMS, NoSQL, and S3.
+
+        Retries happen inside IngestionOrchestrator.run(), scoped only to the
+        source connection pull (connector.extract), using the source system's
+        retry_count/retry_interval from config_source_system. Writing/transform
+        steps are not retried — a failure there fails the task outright.
+        """
+        logger.info(f"Processing table {task.source_object_name}")
+        return orchestrator.run(
+            source_sys          = source_sys,
+            ingest_obj          = task,
+            config_master_id    = config_master_id,   # ← routing table ID from widget
+            landing_volume_path = resolved_landing_path,
+            trigger_id          = trigger_id,
+            job_context          = job_context,
+            sink_batch_started_date = batch_start_date,
+        )
+
+    results = []
+
+    # ── Batch-level parallelism ────────────────────────────────────────────
+    # batch_id → PARALLEL (one thread per distinct batch); priority → SEQUENTIAL
+    # within a batch (ascending). max_workers = distinct batch_id count, derived
+    # here — NOT hardcoded, NOT from a widget/config. A batch's tables run
+    # one-by-one inside that batch's single thread.
+    batches = {}
+    for task in sorted(tasks, key=lambda t: t.priority):
+        batches.setdefault(task.batch_id, []).append(task)
+
+    max_workers = len(batches)
+
+    def run_batch(batch_id, batch_tasks: list) -> list:
+        """Run every table in one batch sequentially, in priority order."""
+        batch_results = []
+        print(
+            f"[Batch {batch_id}] Starting {len(batch_tasks)} table(s) sequentially: "
+            f"{[t.source_object_name for t in batch_tasks]}"
+        )
+        for task in batch_tasks:
+            try:
+                batch_results.append(run_one(task))
+            except Exception as exc:
+                print(f"Task {task.source_object_name} (Config ID: {task.config_id}) failed with exception: {exc}")
+                batch_results.append({
                     "config_id": task.config_id,
                     "run_id":   None,
                     "status":   AUDIT_STATUS_FAILED,
                     "rows_read": 0,
                     "error":    str(exc),
                 })
+        return batch_results
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Close the dependency job
-# MAGIC
-# MAGIC pipeline_end_time isn't known until every table has finished — bulk-stamp
-# MAGIC it (and the derived dependency_resolve_time) onto every dependency_master_config
-# MAGIC row for this job_run_id in one shot, now that the fan-out above is done.
-
-# COMMAND ----------
-
-orchestrator.dependency.complete_job(job_run_id)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Results summary
-# MAGIC
-# MAGIC Silver now runs coupled — inline, synchronously — inside each table's
-# MAGIC own orchestrator.run() call (see IngestionOrchestrator._trigger_silver),
-# MAGIC right after that table's landing write and before its Bronze Delta
-# MAGIC write. By the time a task's future resolves above, its Silver run (if
-# MAGIC enabled) has already finished, so results already carry it under
-# MAGIC "silver_result" — no separate wait step needed.
-
-# COMMAND ----------
-# optional can be removed 
-STATUS_ICONS = {
-    AUDIT_STATUS_SUCCESS: "✅",
-    AUDIT_STATUS_SKIPPED: "⏭️",
-}
-
-print(f"\n{'='*75}")
-print(f"{'CONF ID':>8}  {'STATUS':<10}  {'ROWS':>8}  ERROR")
-print(f"{'='*75}")
-for r in sorted(results, key=lambda x: x["config_id"]):
-    icon   = STATUS_ICONS.get(r["status"], "❌")
-    error  = (r.get("error") or "")[:50]
-    print(f"{r['config_id']:>8}  {icon} {r['status']:<8}  {r.get('rows_read', 0):>8}  {error}")
-print(f"{'='*75}")
-
-succeeded = [r for r in results if r["status"] == AUDIT_STATUS_SUCCESS]
-skipped   = [r for r in results if r["status"] == AUDIT_STATUS_SKIPPED]
-failed    = [r for r in results if r["status"] == AUDIT_STATUS_FAILED]
-print(
-    f"Total: {len(results)} | ✅ Succeeded: {len(succeeded)} | "
-    f"⏭️ Skipped (0 rows): {len(skipped)} | ❌ Failed: {len(failed)}\n"
-)
-
-silver_results = [r["silver_result"] for r in results if r.get("silver_result")]
-
-if silver_results:
-    print(f"{'='*75}")
-    print(f"{'CONF ID':>8}  {'SILVER STATUS':<14}  TARGET")
-    print(f"{'='*75}")
-    for r in sorted(silver_results, key=lambda x: x["config_id"]):
-        icon = "✅" if r["status"] == "SUCCESS" else "❌"
-        print(f"{r['config_id']:>8}  {icon} {r['status']:<12}  {r.get('target', '')}")
-    print(f"{'='*75}")
-
-silver_failed = [r for r in silver_results if r["status"] == "FAILED"]
-print(
-    f"Silver — Total: {len(silver_results)} | "
-    f"✅ Succeeded: {len(silver_results) - len(silver_failed)} | ❌ Failed: {len(silver_failed)}\n"
-)
-
-# COMMAND ----------
-
-
-if failed:
-    failed_ids = [r["config_id"] for r in failed]
-    silver_failed_ids = [r["config_id"] for r in silver_failed]
-    logger.critical(
-        f"Pipeline cannot continue — {len(failed)} of {len(results)} ingestion object(s) FAILED. "
-        f"Failed Config IDs: {failed_ids}"
-        f"{len(silver_failed)} of {len(silver_results)} Silver trigger(s) FAILED "
-        f"(Config IDs: {silver_failed_ids}). "
-        f"Check the audit table and logs above for details."
+    print(
+        f"\nStarting {len(tasks)} tasks across {len(batches)} batch(es) with "
+        f"ThreadPoolExecutor (max_workers={max_workers})..."
     )
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_batch = {
+            executor.submit(run_batch, batch_id, batch_tasks): batch_id
+            for batch_id, batch_tasks in batches.items()
+        }
+        for future in as_completed(future_to_batch):
+            batch_id = future_to_batch[future]
+            try:
+                results.extend(future.result())
+            except Exception as exc:
+                print(f"Batch {batch_id} failed with exception: {exc}")
+                for task in batches[batch_id]:
+                    results.append({
+                        "config_id": task.config_id,
+                        "run_id":   None,
+                        "status":   AUDIT_STATUS_FAILED,
+                        "rows_read": 0,
+                        "error":    str(exc),
+                    })
+
+    # ── Close the dependency job ──────────────────────────────────────────
+    # pipeline_end_time isn't known until every table has finished — bulk-stamp
+    # it (and the derived dependency_resolve_time) onto every
+    # dependency_master_config row for this job_run_id now that the fan-out is done.
+    orchestrator.dependency.complete_job(job_run_id)
+
+    # ── Results summary ──────────────────────────────────────────────────
+    # Silver runs coupled inside each orchestrator.run() call, so results
+    # already carry it under "silver_result" — no separate wait step.
+    STATUS_ICONS = {
+        AUDIT_STATUS_SUCCESS: "✅",
+        AUDIT_STATUS_SKIPPED: "⏭️",
+    }
+
+    print(f"\n{'='*75}")
+    print(f"{'CONF ID':>8}  {'STATUS':<10}  {'ROWS':>8}  ERROR")
+    print(f"{'='*75}")
+    for r in sorted(results, key=lambda x: x["config_id"]):
+        icon   = STATUS_ICONS.get(r["status"], "❌")
+        error  = (r.get("error") or "")[:50]
+        print(f"{r['config_id']:>8}  {icon} {r['status']:<8}  {r.get('rows_read', 0):>8}  {error}")
+    print(f"{'='*75}")
+
+    succeeded = [r for r in results if r["status"] == AUDIT_STATUS_SUCCESS]
+    skipped   = [r for r in results if r["status"] == AUDIT_STATUS_SKIPPED]
+    failed    = [r for r in results if r["status"] == AUDIT_STATUS_FAILED]
+    print(
+        f"Total: {len(results)} | ✅ Succeeded: {len(succeeded)} | "
+        f"⏭️ Skipped (0 rows): {len(skipped)} | ❌ Failed: {len(failed)}\n"
+    )
+
+    silver_results = [r["silver_result"] for r in results if r.get("silver_result")]
+
+    if silver_results:
+        print(f"{'='*75}")
+        print(f"{'CONF ID':>8}  {'SILVER STATUS':<14}  TARGET")
+        print(f"{'='*75}")
+        for r in sorted(silver_results, key=lambda x: x["config_id"]):
+            icon = "✅" if r["status"] == "SUCCESS" else "❌"
+            print(f"{r['config_id']:>8}  {icon} {r['status']:<12}  {r.get('target', '')}")
+        print(f"{'='*75}")
+
+    silver_failed = [r for r in silver_results if r["status"] == "FAILED"]
+    print(
+        f"Silver — Total: {len(silver_results)} | "
+        f"✅ Succeeded: {len(silver_results) - len(silver_failed)} | ❌ Failed: {len(silver_failed)}\n"
+    )
+
+    if failed:
+        failed_ids = [r["config_id"] for r in failed]
+        silver_failed_ids = [r["config_id"] for r in silver_failed]
+        logger.critical(
+            f"Pipeline cannot continue — {len(failed)} of {len(results)} ingestion object(s) FAILED. "
+            f"Failed Config IDs: {failed_ids}"
+            f"{len(silver_failed)} of {len(silver_results)} Silver trigger(s) FAILED "
+            f"(Config IDs: {silver_failed_ids}). "
+            f"Check the audit table and logs above for details."
+        )
+        _upload_on_exit()
+
     _upload_on_exit()
+    dbutils.notebook.exit(
+        f"SUCCESS: {len(succeeded)}/{len(results)} objects ingested "
+        f"({len(skipped)} skipped — 0 rows in source)."
+    )
 
-
-_upload_on_exit()
-dbutils.notebook.exit(
-    f"SUCCESS: {len(succeeded)}/{len(results)} objects ingested "
-    f"({len(skipped)} skipped — 0 rows in source)."
-)
+else:
+    # No branch for this source family yet (SFTP / NoSQL / S3 get their own
+    # elif when built). Fail loudly rather than silently doing nothing.
+    _upload_on_exit()
+    dbutils.notebook.exit(
+        f"No handler for source '{source_sys.source_name}' "
+        f"(source_type={source_sys.source_type!r}, source_system_id={source_system_id}). "
+        f"Known: LSQ_Mavis (API) or RDBMS types {sorted(_RDBMS_SOURCE_TYPES)}."
+    )
 
 # COMMAND ----------
 

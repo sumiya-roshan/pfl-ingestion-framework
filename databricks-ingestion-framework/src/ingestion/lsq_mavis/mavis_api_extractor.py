@@ -28,14 +28,20 @@ Owned here, mirroring ``IngestionOrchestrator`` for the connector path:
 Entry point: ``src/ingestion/lsq_mavis/api_export_main.py``.
 
     extractor = MavisApiExtractor(spark, config_mgr, audit_table=AUDIT_TABLE,
-                                  environment=environment, dbutils=dbutils)
-    for task in tasks:            # tasks are MavisIngestionTaskConfig
-        extractor.run(task, source_sys, pipeline_name, job_context, config_master_id)
+                                  environment=environment, dbutils=dbutils,
+                                  silver_notebook_path=..., silver_notebook_timeout=...)
+    results = extractor.run_all(tasks, source_sys, pipeline_name,
+                                job_context, config_master_id)
+    # results: {config_id: ("SUCCESS", [zip, csv]) | ("FAILED", "<error>")}
+
+``run_all`` fans the tasks out one worker per distinct ``config_id``; ``run``
+does one task. The caller owns the summary print + ``dbutils.notebook.exit``.
 """
 
 from __future__ import annotations
 
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 from pyspark.dbutils import DBUtils
@@ -283,6 +289,67 @@ class MavisApiExtractor:
                 )
             raise
 
+    # ── parallel fan-out ──────────────────────────────────────────────────
+
+    def run_all(
+        self,
+        tasks,
+        source_sys,
+        pipeline_name: str,
+        job_context: dict | None = None,
+        config_master_id: int | None = None,
+    ) -> dict[int, tuple[str, object]]:
+        """
+        Run ``run()`` for every task in parallel — one worker per distinct
+        ``config_id`` (each Mavis export is independent). Never raises for a
+        single-task failure; the caller drives the summary + notebook exit.
+
+        Returns ``{config_id: (status, detail)}`` — ``("SUCCESS", [zip, csv])``
+        or ``("FAILED", "<error string>")``.
+        """
+        if not tasks:
+            return {}
+
+        def _one(task):
+            self.logger.info(
+                f"[api_export] config_id={task.config_id} START "
+                f"({task.source_object_name})"
+            )
+            try:
+                paths = self.run(
+                    task, source_sys, pipeline_name, job_context, config_master_id
+                )
+                self.logger.info(f"[api_export] config_id={task.config_id} SUCCESS")
+                return task.config_id, "SUCCESS", paths
+            except Exception as exc:  # run() already wrote Status=FAILED + audit
+                self.logger.error(
+                    f"[api_export] config_id={task.config_id} FAILED: {exc}"
+                )
+                return task.config_id, "FAILED", str(exc)
+
+        max_workers = len({t.config_id for t in tasks})
+        self.logger.info(
+            f"[api_export] running {len(tasks)} export task(s) "
+            f"(max_workers={max_workers})"
+        )
+
+        results: dict[int, tuple[str, object]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_cid = {
+                executor.submit(_one, task): task.config_id for task in tasks
+            }
+            for future in as_completed(future_to_cid):
+                cid = future_to_cid[future]
+                try:
+                    config_id, status, detail = future.result()
+                    results[config_id] = (status, detail)
+                except Exception as exc:  # defensive — _one shouldn't raise
+                    results[cid] = ("FAILED", str(exc))
+                    self.logger.error(
+                        f"[api_export] config_id={cid} FAILED (worker error): {exc}"
+                    )
+        return results
+
     # ── silver ─────────────────────────────────────────────────────────────
 
     def _trigger_silver(self, task, trigger_time_ist, plan) -> None:
@@ -339,3 +406,5 @@ class MavisApiExtractor:
     def _update_status(self, child_table_fqn, config_id, status) -> None:
         with self._status_lock:
             self.config_mgr.update_status(child_table_fqn, config_id, status)
+
+            
