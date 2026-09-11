@@ -176,7 +176,14 @@ class MavisApiExtractor:
         trigger_time = _parse_bsd(task.sink_batch_started_date)
         trigger_time_ist = trigger_time + _IST
         ts = trigger_time_ist.strftime("%Y_%m_%d_%H_%M_%S")
-        folder = (task.raw_folder_path or "").strip("/")
+
+        # folder = sink table name; file_name = schema_table
+        folder    = (task.sink_table_name or "export").strip("/")
+        file_name = (
+            f"{task.sink_schema_name}_{task.sink_table_name}"
+            if task.sink_schema_name
+            else folder
+        )
 
         # ADF-manner audit derivations (concat + IST formatDateTime).
         derived = dict(
@@ -188,12 +195,12 @@ class MavisApiExtractor:
                 f"mavis/{folder}/zip/"
                 f"{trigger_time_ist:%Y}/{trigger_time_ist:%b}/{trigger_time_ist:%d}"
             ),
-            source_table=f"{task.raw_file_name}_{ts}.zip",
+            source_table=f"{file_name}_{ts}.zip",
             target_schema=(
                 f"mavis/{folder}/unzip/"
                 f"{trigger_time_ist:%Y}/{trigger_time_ist:%b}/{trigger_time_ist:%d}"
             ),
-            target_table=f"{task.raw_file_name}_{ts}.csv",
+            target_table=f"{file_name}_{ts}.csv",
         )
 
         audit_run = self.audit.start_run(
@@ -239,6 +246,7 @@ class MavisApiExtractor:
                 lambda: self.connector.download_and_extract_to_s3(
                     task,
                     download_url,
+                    source_sys=source_sys,
                     trigger_time=trigger_time,
                     query_timeout=plan["query_timeout"],
                 ),
@@ -260,7 +268,7 @@ class MavisApiExtractor:
                 f"(ZIP: {paths['s3_zip_path']}, CSV: {paths['s3_csv_path']})"
             )
 
-            self._trigger_silver(task, trigger_time_ist, plan)
+            self._trigger_silver(task, source_sys, trigger_time_ist, plan)
 
             return [paths["s3_zip_path"], paths["s3_csv_path"]]
         except Exception as exc:
@@ -352,7 +360,7 @@ class MavisApiExtractor:
 
     # ── silver ─────────────────────────────────────────────────────────────
 
-    def _trigger_silver(self, task, trigger_time_ist, plan) -> None:
+    def _trigger_silver(self, task, source_sys, trigger_time_ist, plan) -> None:
         """
         Run the Mavis silver notebook for this task via ``dbutils.notebook.run``.
         Retried ``plan['silver']`` times. A Silver failure is logged and
@@ -371,14 +379,14 @@ class MavisApiExtractor:
         params = {
             "config_id": str(task.config_id),
             "load_type": task.load_type or "",
-            "raw_sa_name": task.s3_raw_landing_path or "",
+            "raw_sa_name": getattr(source_sys, "landing_volume_path", ""),
             "containerName": task.raw_container_name or "",
             "raw_folder_path": task.raw_folder_path or "",
             "raw_file_name": task.raw_file_name or "",
             # IST — the silver notebook subtracts 5:30 to get UTC.
             "triggerTime": trigger_time_ist.strftime("%Y-%m-%dT%H:%M:%S.%f"),
-            "sink_schema_name": task.target_schema or "",
-            "sink_table_name": task.target_table or "",
+            "sink_schema_name": task.sink_schema_name or "",
+            "sink_table_name": task.sink_table_name or "",
             "deltaColumn": task.delta_column or "",
             "key_column": task.key_column or "",
         }

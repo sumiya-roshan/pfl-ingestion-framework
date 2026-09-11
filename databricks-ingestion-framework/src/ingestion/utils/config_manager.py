@@ -87,6 +87,7 @@ class SourceSystemConfig(_DictSerializable):
     is_active: int
 
     landing_volume_path: str | None
+    temp_volume_path: str | None
 
     retry_count: int | None
     retry_interval: int | None
@@ -183,53 +184,62 @@ class MavisIngestionTaskConfig(_DictSerializable):
     every other source in this package.
     """
 
+    config_master_id: int | None
     config_id: int
+    source_name: str | None
+
+    prod_api: str | None
+    prod_api_key: str | None
 
     org_code: str | None
     database_id: str | None
     table_id: str | None
-
-    api_key: str | None
-
-    is_active: int | None
-    status: str | None
-    day_execution_count: int | None
-    sink_batch_started_date: str | None
+    table_description: str | None
 
     load_type: str | None
-    source_filter: str | None  # Source_Filter — the export request body template
-    to_date: str | None        # To_Date — previous INCREMENTAL window end
-    write_mode: str | None
-    priority: int | None
-    batch_id: int | None
-
-    target_catalog: str | None
-    target_schema: str | None
-    target_table: str | None
-
-    s3_raw_landing_path: str | None
-
-    # ── ADF path matching ──
+    key_column: str | None
+    
+    sink_catalog_name: str | None
+    sink_schema_name: str | None
+    sink_table_name: str | None
+    
     raw_container_name: str | None
     raw_folder_path: str | None
     raw_file_name: str | None
 
+    source_filter: str | None
+    delta_column: str | None
+    from_date: str | None
+    to_date: str | None
+
+    status: str | None
+    last_sink_date: str | None
+    is_active: int | None
+    sink_batch_started_date: str | None
+    recipients: str | None
+
+    pipeline_name: str | None
+    trigger_name: str | None
+
+    rownum: int | None
+    data_size: float | None
+
+    compute_policy_name: str | None
+    compute_policy_id: str | None
+    cluster_option: str | None
+    worker_number: int | None
+    day_execution_count: int | None
+
+    # Extras kept per instruction
+    write_mode: str | None
+    priority: int | None
+    batch_id: int | None
     source_object_name: str | None = None
-
-    # Base URL for the Mavis export API — the ADF ``Prod_API`` parameter, per
-    # child config row. Blank falls back to MavisApiConfig's default.
-    prod_api: str | None = None
-
-    # Silver-side columns (read from existing config columns; passed to the
-    # Silver notebook by MavisApiExtractor — never used by the export itself).
-    key_column: str | None = None
-    delta_column: str | None = None
-
     child_table_fqn: str | None = None
 
     @property
     def full_target_table(self) -> str:
-        return f"{self.target_catalog}.{self.target_schema}.{self.target_table}"
+        return f"{self.sink_catalog_name}.{self.sink_schema_name}.{self.sink_table_name}"
 
     @property
     def effective_load_type(self) -> str:
@@ -525,6 +535,7 @@ class ConfigManager:
             is_active=r.get("is_active", 1),
             extra_params=r.get("extra_params"),
             landing_volume_path=r.get("landing_volume_path"),
+            temp_volume_path=r.get("temp_volume_path"),
             retry_count=r.get("retry_count"),
             retry_interval=r.get("retry_interval"),
             query_timeout=r.get("query_timeout"),
@@ -654,41 +665,64 @@ class ConfigManager:
             r.get("Load_Type") or r.get("load_type") or "FULL"
         ).upper()
 
+        data_sz = r.get("data_size")
+        try:
+            data_sz_f = float(data_sz) if data_sz is not None else None
+        except ValueError:
+            data_sz_f = None
+
         return MavisIngestionTaskConfig(
-            config_id=self._to_int(r.get("Config_ID") or r.get("config_id")) or 0,
+            config_master_id=self._to_int(r.get("Config_Master_Id") or r.get("config_master_id")),
+            config_id=self._to_int(r.get("Config_Id") or r.get("config_id") or r.get("Config_ID")) or 0,
+            source_name=r.get("Source_Name") or r.get("source_name"),
+            
+            prod_api=r.get("Prod_API") or r.get("prod_api") or r.get("Prod_Api"),
+            prod_api_key=r.get("Prod_API_Key") or r.get("prod_api_key") or r.get("Api_Key") or r.get("api_key"),
+            
             org_code=r.get("Org_Code") or r.get("org_code"),
-            database_id=r.get("Database_Id") or r.get("database_id"),
-            table_id=r.get("Table_Id") or r.get("table_id"),
-            api_key=r.get("Api_Key") or r.get("api_key"),
-            is_active=self._to_int(r.get("is_active")),
-            status=r.get("Status") or r.get("status"),
-            day_execution_count=self._to_int(
-                r.get("Day_Execution_Count") or r.get("day_execution_count")
-            ),
-            sink_batch_started_date=r.get("sink_batch_started_date"),
+            database_id=r.get("Database_ID") or r.get("database_id") or r.get("Database_Id"),
+            table_id=r.get("Table_ID") or r.get("table_id") or r.get("Table_Id"),
+            table_description=r.get("Table_Description") or r.get("table_description"),
+            
             load_type=load_type,
-            source_filter=r.get("Source_Filter") or r.get("source_filter"),
-            to_date=r.get("To_Date") or r.get("to_date"),
-            write_mode=r.get("Write_Mode") or r.get("write_mode"),
-            priority=self._to_int(r.get("Priority") or r.get("priority")),
-            batch_id=self._to_int(r.get("Batch_ID") or r.get("batch_id")),
-            target_catalog=r.get("Target_Catalog") or r.get("target_catalog"),
-            target_schema=r.get("Target_Schema") or r.get("target_schema"),
-            target_table=r.get("Target_Table") or r.get("target_table"),
-            s3_raw_landing_path=r.get("S3_Raw_Landing_Path")
-            or r.get("s3_raw_landing_path")
-            or r.get("Raw_Landing_Path"),
+            key_column=r.get("Key_Column") or r.get("key_column"),
+            
+            sink_catalog_name=r.get("Sink_Catalog_Name") or r.get("sink_catalog_name") or r.get("Target_Catalog") or r.get("target_catalog"),
+            sink_schema_name=r.get("Sink_Schema_Name") or r.get("sink_schema_name") or r.get("Target_Schema") or r.get("target_schema"),
+            sink_table_name=r.get("Sink_Table_Name") or r.get("sink_table_name") or r.get("Target_Table") or r.get("target_table"),
+            
             raw_container_name=r.get("Raw_Container_Name") or r.get("raw_container_name"),
             raw_folder_path=r.get("Raw_Folder_Path") or r.get("raw_folder_path"),
             raw_file_name=r.get("Raw_File_Name") or r.get("raw_file_name"),
-            source_object_name=r.get("Source_Object_Name")
-            or r.get("source_object_name"),
-            prod_api=r.get("Prod_API") or r.get("prod_api") or r.get("Prod_Api"),
-            key_column=r.get("Key_Column") or r.get("key_column"),
-            delta_column=r.get("Delta_Column")
-            or r.get("delta_column")
-            or r.get("Delta_Column_1")
-            or r.get("delta_column_1"),
+            
+            source_filter=r.get("Source_Filter") or r.get("source_filter"),
+            delta_column=r.get("Delta_Column") or r.get("delta_column") or r.get("Delta_Column_1") or r.get("delta_column_1"),
+            from_date=r.get("From_Date") or r.get("from_date"),
+            to_date=r.get("To_Date") or r.get("to_date"),
+            
+            status=r.get("Status") or r.get("status"),
+            last_sink_date=r.get("Last_Sink_Date") or r.get("last_sink_date"),
+            is_active=self._to_int(r.get("Is_Active") or r.get("is_active")),
+            sink_batch_started_date=r.get("sink_batch_started_date") or r.get("Sink_Batch_Started_Date"),
+            recipients=r.get("Recipients") or r.get("recipients"),
+            
+            pipeline_name=r.get("Pipeline_Name") or r.get("pipeline_name"),
+            trigger_name=r.get("Trigger_Name") or r.get("trigger_name"),
+            
+            rownum=self._to_int(r.get("rownum") or r.get("Rownum")),
+            data_size=data_sz_f,
+            
+            compute_policy_name=r.get("Compute_Policy_Name") or r.get("compute_policy_name"),
+            compute_policy_id=r.get("Compute_Policy_ID") or r.get("compute_policy_id"),
+            cluster_option=r.get("Cluster_Option") or r.get("cluster_option"),
+            worker_number=self._to_int(r.get("Worker_Number") or r.get("worker_number")),
+            day_execution_count=self._to_int(r.get("Day_Execution_Count") or r.get("day_execution_count")),
+            
+            # Extras
+            write_mode=r.get("Write_Mode") or r.get("write_mode"),
+            priority=self._to_int(r.get("Priority") or r.get("priority")),
+            batch_id=self._to_int(r.get("Batch_ID") or r.get("batch_id")),
+            source_object_name=r.get("Source_Object_Name") or r.get("source_object_name"),
         )
 
 

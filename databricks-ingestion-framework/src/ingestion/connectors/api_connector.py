@@ -158,28 +158,60 @@ class MavisApiExportConnector:
         self,
         task,
         download_url: str,
+        source_sys=None,
         trigger_time=None,
         query_timeout: int | None = None,
     ) -> dict:
         """
-        Hit the download URL to stream the ZIP file to a temporary driver file,
+        Hit the download URL to stream the ZIP file to a temporary Volume path,
         upload that ZIP to the S3 raw landing path, then stream-extract the
         inner CSV and upload it to the S3 unzip path.
 
+        ``source_sys``   provides ``landing_volume_path`` (final S3 bucket root)
+                         and ``temp_volume_path`` (Unity Catalog Volume used for
+                         staging — avoids local-disk limits on shared/serverless
+                         clusters).
         ``trigger_time`` is the fixed run instant (naive UTC — the task's
-        ``sink_batch_started_date``); it drives the IST-dated path exactly like
-        ADF's ``triggerTime`` parameter, so the landed path matches the audit
-        row's source/target table. Falls back to "now" when not given.
-        ``query_timeout`` (seconds) is the streaming-download read timeout.
+                         ``sink_batch_started_date``); drives the IST-dated path
+                         exactly like ADF's ``triggerTime``. Falls back to "now".
+        ``query_timeout``(seconds) is the streaming-download read timeout.
+
+        Path convention (matches ADF):
+          bucket    = source_sys.landing_volume_path  (already includes container)
+          folder    = task.target_table               (sink / silver table name)
+          file_name = {target_schema}_{target_table}
+
+          s3_zip  : {bucket}/{folder}/zip/{yyyy}/{MMM}/{dd}/{file_name}_{ts}.zip
+          s3_csv  : {bucket}/{folder}/unzip/{yyyy}/{MMM}/{dd}/{file_name}_{ts}.csv
+
+        Temp staging (same inner structure under the Volume root):
+          tmp_zip : {temp_volume_path}/{folder}/zip/{yyyy}/{MMM}/{dd}/{file_name}_{ts}.zip
+          tmp_csv : {temp_volume_path}/{folder}/unzip/{yyyy}/{MMM}/{dd}/{file_name}_{ts}.csv
 
         Returns ``s3_zip_path`` / ``s3_csv_path`` plus copy metrics
         (``data_read_bytes``, ``data_written_bytes``, ``copy_duration_sec``,
         ``throughput_mb_per_sec``).
         """
-
-        landing = (task.s3_raw_landing_path or "").rstrip("/")
+        # ── resolve landing bucket from source_sys ───────────────────────────
+        landing = (
+            getattr(source_sys, "landing_volume_path", None)
+            or getattr(task, "s3_raw_landing_path", None)
+            or ""
+        ).rstrip("/")
         if not landing:
-            raise RuntimeError(f"config_id={task.config_id}: s3_raw_landing_path is not set")
+            raise RuntimeError(
+                f"config_id={task.config_id}: landing_volume_path is not set "
+                f"on the source system config"
+            )
+
+        temp_root = (
+            getattr(source_sys, "temp_volume_path", None) or ""
+        ).rstrip("/")
+        if not temp_root:
+            raise RuntimeError(
+                f"config_id={task.config_id}: temp_volume_path is not set "
+                f"on the source system config"
+            )
 
         # 1. Hit the download URL
         resp = requests.get(
@@ -189,64 +221,65 @@ class MavisApiExportConnector:
         )
         resp.raise_for_status()
 
-        # 2. Reconstruct the ADF exact path format — IST of the fixed trigger_time
+        # 2. Build IST-dated path components from the fixed trigger_time
         base = trigger_time or datetime.now(timezone.utc)
-        ist = base.replace(tzinfo=None) + timedelta(hours=5, minutes=30)
-        year = ist.strftime("%Y")
+        ist  = base.replace(tzinfo=None) + timedelta(hours=5, minutes=30)
+        year  = ist.strftime("%Y")
         month = ist.strftime("%b")
-        day = ist.strftime("%d")
-        ts = ist.strftime("%Y_%m_%d_%H_%M_%S")
+        day   = ist.strftime("%d")
+        ts    = ist.strftime("%Y_%m_%d_%H_%M_%S")
 
-        bucket = landing
-        container = (task.raw_container_name or "").strip("/")
-        folder = (task.raw_folder_path or "").strip("/")
-        file_name = (task.raw_file_name or "export")
+        # folder = sink table name; file_name = schema_table (matches ADF convention)
+        folder    = (task.target_table or "export").strip("/")
+        file_name = f"{task.target_schema}_{task.target_table}" if task.target_schema else folder
 
-        if container and folder:
-            s3_zip_path = f"{bucket}/{container}/{folder}/zip/{year}/{month}/{day}/{file_name}_{ts}.zip"
-            s3_csv_path = f"{bucket}/{container}/{folder}/unzip/{year}/{month}/{day}/{file_name}_{ts}.csv"
-        else:
-            s3_zip_path = f"{bucket}/{file_name}_{ts}.zip"
-            s3_csv_path = f"{bucket}/{file_name}_{ts}.csv"
+        # inner path shared by both the final S3 destination and the staging Volume
+        inner_zip  = f"{folder}/zip/{year}/{month}/{day}/{file_name}_{ts}.zip"
+        inner_csv  = f"{folder}/unzip/{year}/{month}/{day}/{file_name}_{ts}.csv"
 
-        tmp_fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip")
-        os.close(tmp_fd)
+        s3_zip_path  = f"{landing}/{inner_zip}"
+        s3_csv_path  = f"{landing}/{inner_csv}"
+        tmp_zip_path = f"{temp_root}/{inner_zip}"
+        tmp_csv_path = f"{temp_root}/{inner_csv}"
 
-        tmp_fd2, tmp_csv_path = tempfile.mkstemp(suffix=".csv")
-        os.close(tmp_fd2)
+        # 3. Create the folder structure inside the Volume before writing
+        os.makedirs(os.path.dirname(tmp_zip_path), exist_ok=True)
+        os.makedirs(os.path.dirname(tmp_csv_path), exist_ok=True)
 
         started = time.monotonic()
         try:
-            # 3. Stream download to local ZIP file
+            # 4. Stream download → Volume ZIP file (8 MB chunks, never loads whole file into RAM)
             with open(tmp_zip_path, "wb") as fh:
                 for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
                     fh.write(chunk)
 
             dbutils = DBUtils(self.spark)
 
-            # 4. Upload ZIP to S3
-            dbutils.fs.cp(f"file://{tmp_zip_path}", s3_zip_path)
+            # 5. Upload ZIP from Volume → final S3 path
+            dbutils.fs.cp(tmp_zip_path, s3_zip_path)
             print(f"[Mavis] config_id={task.config_id} uploaded ZIP -> {s3_zip_path}")
 
-            # 5. Disk-to-disk Unzip to prevent MemoryError
+            # 6. Disk-to-disk unzip inside the Volume to prevent MemoryError
             with zipfile.ZipFile(tmp_zip_path) as zf:
                 csv_members = [n for n in zf.namelist() if n.lower().endswith(".csv")]
                 if not csv_members:
                     csv_members = zf.namelist()
                 if not csv_members:
-                    raise ValueError(f"[Mavis] ZIP for config_id={task.config_id} is empty.")
+                    raise ValueError(
+                        f"[Mavis] ZIP for config_id={task.config_id} is empty."
+                    )
 
                 with zf.open(csv_members[0]) as source_file:
-                    with open(tmp_csv_path, 'wb') as target_file:
+                    with open(tmp_csv_path, "wb") as target_file:
                         shutil.copyfileobj(source_file, target_file, length=8 * 1024 * 1024)
 
-            # 6. Upload CSV to S3
-            dbutils.fs.cp(f"file://{tmp_csv_path}", s3_csv_path)
+            # 7. Upload CSV from Volume → final S3 path
+            dbutils.fs.cp(tmp_csv_path, s3_csv_path)
             print(f"[Mavis] config_id={task.config_id} uploaded CSV -> {s3_csv_path}")
 
             zip_bytes = os.path.getsize(tmp_zip_path)
             csv_bytes = os.path.getsize(tmp_csv_path)
-            duration = round(time.monotonic() - started, 2)
+            duration  = round(time.monotonic() - started, 2)
             return {
                 "s3_zip_path": s3_zip_path,
                 "s3_csv_path": s3_csv_path,
@@ -259,11 +292,13 @@ class MavisApiExportConnector:
             }
 
         finally:
-            # Clean up local temp files
-            if os.path.exists(tmp_zip_path):
-                os.unlink(tmp_zip_path)
-            if os.path.exists(tmp_csv_path):
-                os.unlink(tmp_csv_path)
+            pass
+            # ⚠️ TESTING ONLY — cleanup commented out so temp files stay in Volume for inspection
+            # if os.path.exists(tmp_zip_path):
+            #     os.unlink(tmp_zip_path)
+            # if os.path.exists(tmp_csv_path):
+            #     os.unlink(tmp_csv_path)
+
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -313,13 +348,13 @@ class MavisApiExportConnector:
         """
         import requests
 
-        if not task.api_key:
+        if not task.prod_api_key:
             raise RuntimeError(
                 f"config_id={task.config_id}: Api_Key is missing on the config row"
             )
         resp = requests.post(
             url,
-            headers={"x-api-key": task.api_key, "Content-Type": "application/json"},
+            headers={"x-api-key": task.prod_api_key, "Content-Type": "application/json"},
             data=body if isinstance(body, str) else json.dumps(body),
             timeout=self.api.request_timeout_seconds,
         )
