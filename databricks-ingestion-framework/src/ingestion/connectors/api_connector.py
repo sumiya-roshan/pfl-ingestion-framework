@@ -54,7 +54,7 @@ class MavisApiConfig:
       download_url   {prod_api}{database_id}/{table_id}/request/download?orgcode={org_code}
     """
 
-    prod_api: str = "https://mavis-api.leadsquared.com/"
+    prod_api: str = "https://api_url.com/"
     start_export_path: str = (
         "{database_id}/{table_id}/rows/export?orgcode={org_code}"
     )
