@@ -150,6 +150,14 @@ class LentraLoader:
                 # bucket/report as "source", the Silver sink as "target".
                 # source_sys only needs .source_name (see AuditLogger.start_run) —
                 # a SimpleNamespace avoids building a whole SourceSystemConfig.
+                #
+                # Every override below is guarded against None: start_run()'s own
+                # fallback for source_table/target_schema/target_table is a bare
+                # task.source_object_name/target_schema/target_table access (no
+                # getattr) — fine for RDBMS/Mavis, which always have those
+                # attributes, but LentraIngestionTaskConfig has none of them, and
+                # a config row with e.g. an empty Silver_Sink_table_Name would
+                # otherwise crash with AttributeError before the notebook even runs.
                 audit_run = self.audit.start_run(
                     task=task,
                     source_sys=SimpleNamespace(source_name=task.source_name),
@@ -158,10 +166,10 @@ class LentraLoader:
                     config_master_id=self.config_master_id,
                     delta_layer="SILVER",
                     frequency=task.frequency,
-                    source_schema=task.source_bucket_name,
-                    source_table=task.report_name,
-                    target_schema=task.silver_sink_schema_name,
-                    target_table=task.silver_sink_table_name,
+                    source_schema=task.source_bucket_name or "UNKNOWN",
+                    source_table=task.report_name or task.source_name or "UNKNOWN",
+                    target_schema=task.silver_sink_schema_name or "UNKNOWN",
+                    target_table=task.silver_sink_table_name or "UNKNOWN",
                 )
 
             params = self.build_params(task, self.raw_sa_name, self.run_id)
