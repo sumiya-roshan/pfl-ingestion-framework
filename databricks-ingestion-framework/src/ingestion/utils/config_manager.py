@@ -93,6 +93,7 @@ class SourceSystemConfig(_DictSerializable):
     retry_interval: int | None
     query_timeout: str | None = None
     uc_connection_name: str | None = None
+    silver_notebook_path: str | None = None
 
 
 @dataclass
@@ -540,6 +541,7 @@ class ConfigManager:
             retry_interval=r.get("retry_interval"),
             query_timeout=r.get("query_timeout"),
             uc_connection_name=r.get("uc_connection_name"),
+            silver_notebook_path=r.get("silver_notebook_path"),
         )
 
     def _build_ingestion_task(

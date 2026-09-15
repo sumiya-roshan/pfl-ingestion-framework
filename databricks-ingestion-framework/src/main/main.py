@@ -86,7 +86,6 @@ dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (re
 dbutils.widgets.text("job_run_id",          "",               "Job Run ID (required) — set to {{job.run_id}} in job config")
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
-dbutils.widgets.text("silver_notebook_path",    "",           "Workspace path to Silver transformation notebook (blank = skip Silver trigger)")
 dbutils.widgets.text("silver_notebook_timeout", "3600",       "Max seconds to wait for each Silver notebook run")
 
 # COMMAND ----------
@@ -114,7 +113,6 @@ environment          = dbutils.widgets.get("environment")          or "dev"
 batch_start_date     = dbutils.widgets.get("batch_start_date")     or "1"
 logger               = get_logger(environment=environment)
 
-silver_notebook_path    = dbutils.widgets.get("silver_notebook_path")    or None
 silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
 
 
@@ -250,6 +248,8 @@ else:
 print(type(batch_start_date),batch_start_date)
 print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
 print(f"Active tasks    : {len(tasks)}")
+
+silver_notebook_path = source_sys.silver_notebook_path
 
 # Route by source — one self-contained branch per family. Defined here so both
 # Job and standalone modes have it. IngestionOrchestrator is purely RDBMS
