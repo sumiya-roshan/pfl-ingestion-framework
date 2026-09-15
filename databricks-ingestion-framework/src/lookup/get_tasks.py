@@ -80,29 +80,23 @@ if is_mavis:
     mavis_fqn = config_mgr._child_table_fqn(config_master_id)
     _mcols = spark.table(mavis_fqn).columns
 
-    def _c(*names):
-        return config_mgr._resolve_col(_mcols, *names)
-
-    _src, _act = _c("source_name", "Source_Name"), _c("is_active", "is_active")
-    _st, _dec = _c("status", "Status"), _c("day_execution_count", "Day_Execution_Count")
-    _sink = _c("sink_batch_started_date", "sink_batch_started_date")
 
     if batch_start_date == "1":
         batch_start_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         spark.sql(f"""
             UPDATE {mavis_fqn}
-            SET {_st} = '{MAVIS_STATUS_NOT_STARTED}', {_dec} = 0,
-                {_sink} = TIMESTAMP '{batch_start_date}'
-            WHERE {_src} = '{mavis_source_name}' AND {_act} = 1
-              AND (to_date({_sink}) != DATE '{batch_start_date[:10]}'
-                   OR {_sink} IS NULL)
+            SET status = 'Not_started', Day_Execution_Count = 0,
+                sink_batch_started_date = TIMESTAMP '{batch_start_date}'
+            WHERE source_name = '{mavis_source_name}' AND is_active = 1
+              AND (to_date(sink_batch_started_date) != DATE '{batch_start_date[:10]}'
+                   OR sink_batch_started_date IS NULL)
         """)
     else:
         spark.sql(f"""
             UPDATE {mavis_fqn}
-            SET {_st} = '{MAVIS_STATUS_NOT_STARTED}'
-            WHERE {_src} = '{mavis_source_name}' AND {_act} = 1
-              AND date_format({_sink}, 'yyyy-MM-dd HH:mm:ss')
+            SET status = 'Not_started'
+            WHERE source_name = '{mavis_source_name}' AND is_active = 1
+              AND date_format(sink_batch_started_date, 'yyyy-MM-dd HH:mm:ss')
                   = date_format(TIMESTAMP '{batch_start_date}', 'yyyy-MM-dd HH:mm:ss')
         """)
     print("mavis batch_start_date", batch_start_date)
