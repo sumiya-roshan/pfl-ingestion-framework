@@ -295,63 +295,86 @@ wait_second_flag = spark.sql(f"""
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Step 4 - Build legacy source_name list (informational / backward compat)
+# MAGIC ### Step 4 - Build eligible_pipelines from all source types
 
 # COMMAND ----------
 
-eligible_source_name = []
+eligible_pipelines_raw = []
 
-# ADF / SourceDB Base Tables
+# Source DB Base Tables
 if spark.catalog.tableExists(ELIGIBLE_TEMP_TABLE):
     source_name_df = spark.sql(f"""
-        SELECT DISTINCT Source_Name
+        SELECT DISTINCT Pipeline_Name, Source_Name
         FROM {SINK_CFG_TABLE} a
         WHERE a.Config_ID IN (
             SELECT DISTINCT Config_ID FROM {ELIGIBLE_TEMP_TABLE}
         )
     """)
-    if source_name_df.count() > 0:
-        eligible_source_name = [row.Source_Name for row in source_name_df.collect()]
+    for row in source_name_df.collect():
+        eligible_pipelines_raw.append(
+            {"pipeline_name": row.Pipeline_Name, "source_name": row.Source_Name}
+        )
 
-# Email Delivery
+# Source DB Email Delivery
 email_source_name_df = spark.sql(f"""
-    SELECT DISTINCT Source_Type
+    SELECT DISTINCT Pipeline_Name, Source_Type
     FROM {admin_catalog_name}.config.tb_sourcedb_email_delivery a
-    WHERE date_format(sink_batch_started_on, 'yyyy-MM-dd HH:mm:ss.SSS') = date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss.SSS')
+    WHERE date_format(sink_batch_started_on, 'yyyy-MM-dd HH:mm:ss.SSS')
+          = date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss.SSS')
       AND is_active = 1
 """)
-if email_source_name_df.count() > 0:
-    eligible_source_name.append(email_source_name_df.select("Source_Type").collect()[0][0])
+for row in email_source_name_df.collect():
+    eligible_pipelines_raw.append(
+        {"pipeline_name": row.Pipeline_Name, "source_name": row.Source_Type}
+    )
 
 # Digital Prod NoSQL Tables
 nosql_source_name_df = spark.sql(f"""
-    SELECT DISTINCT Source_Name
+    SELECT DISTINCT Pipeline_Name, Source_Name
     FROM {admin_catalog_name}.config.tb_nosql_ingestion_config a
-    WHERE date_format(sink_batch_started_date, 'yyyy-MM-dd HH:mm:ss.SSS') = date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss.SSS')
+    WHERE date_format(sink_batch_started_date, 'yyyy-MM-dd HH:mm:ss.SSS')
+          = date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss.SSS')
       AND is_active = 1
 """)
-if nosql_source_name_df.count() > 0:
-    eligible_source_name.append(nosql_source_name_df.select("Source_Name").collect()[0][0])
+for row in nosql_source_name_df.collect():
+    eligible_pipelines_raw.append(
+        {"pipeline_name": row.Pipeline_Name, "source_name": row.Source_Name}
+    )
 
-# LSQ Mavis multi-refresh Tables
+# LSQ Mavis multi refresh Tables
 mavis_source_name_df = spark.sql(f"""
-    SELECT DISTINCT Source_Name
+    SELECT DISTINCT Pipeline_Name, Source_Name
     FROM {admin_catalog_name}.config.tb_mavis_db_ingestion_config a
-    WHERE date_format(sink_batch_started_date, 'yyyy-MM-dd HH:mm:ss.SSS') = date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss.SSS')
+    WHERE date_format(sink_batch_started_date, 'yyyy-MM-dd HH:mm:ss.SSS')
+          = date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss.SSS')
       AND is_active = 1
 """)
-if mavis_source_name_df.count() > 0:
-    eligible_source_name.append(mavis_source_name_df.select("Source_Name").collect()[0][0])
+for row in mavis_source_name_df.collect():
+    eligible_pipelines_raw.append(
+        {"pipeline_name": row.Pipeline_Name, "source_name": row.Source_Name}
+    )
 
-# Storage Delivery
+# Source DB Storage Delivery
 storage_data_refresh_df = spark.sql(f"""
-    SELECT DISTINCT Source_Type
+    SELECT DISTINCT Pipeline_Name, Source_Type
     FROM {admin_catalog_name}.config.tb_sourcedb_storage_delivery a
-    WHERE date_format(sink_batch_started_on, 'yyyy-MM-dd HH:mm:ss.SSS') = date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss.SSS')
+    WHERE date_format(sink_batch_started_on, 'yyyy-MM-dd HH:mm:ss.SSS')
+          = date_format('{trigger_time_str}', 'yyyy-MM-dd HH:mm:ss.SSS')
       AND is_active = 1
 """)
-if storage_data_refresh_df.count() > 0:
-    eligible_source_name.append(storage_data_refresh_df.select("Source_Type").collect()[0][0])
+for row in storage_data_refresh_df.collect():
+    eligible_pipelines_raw.append(
+        {"pipeline_name": row.Pipeline_Name, "source_name": row.Source_Type}
+    )
+
+# Dedupe by pipeline_name, keeping the first source_name seen for each
+eligible_pipelines = list(
+    {
+        p["pipeline_name"]: p
+        for p in eligible_pipelines_raw
+        if p.get("pipeline_name")
+    }.values()
+)
 
 # COMMAND ----------
 
@@ -395,11 +418,7 @@ wait_time = 1 if wait_time_row is None or wait_second_flag == 1 else wait_time_r
 spark.sql(f"DROP TABLE IF EXISTS {ELIGIBLE_TEMP_TABLE}")
 
 output_json = {
-    # v1 orchestrator reads this to fire Databricks Job runs
     "eligible_pipelines": eligible_pipelines,
-    # legacy / informational
-    "source_name":        eligible_source_name,
-    # orchestrator loop controls
     "is_completed":       is_completed,
     "wait_time":          wait_time,
 }
