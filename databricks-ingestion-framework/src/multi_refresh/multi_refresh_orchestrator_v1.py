@@ -44,10 +44,10 @@ dbutils.widgets.text(
 )
 dbutils.widgets.text("s3_log_path", "", "S3 Log Path (e.g. s3://bucket/logs/)")
 dbutils.widgets.text(
-    "silver_notebook_path", "", "Path to the eligibility (silver) notebook"
+    "multirefresh_notebook_path", "", "Path to the eligibility (silver) notebook"
 )
 dbutils.widgets.text(
-    "silver_notebook_timeout", "300", "Timeout in seconds for the silver notebook run"
+    "multirefresh_notebook_timeout", "300", "Timeout in seconds for the silver notebook run"
 )
 
 # COMMAND ----------
@@ -58,11 +58,11 @@ max_iterations = int(dbutils.widgets.get("max_iterations") or "200")
 secret_scope = dbutils.widgets.get("secret_scope") or None
 secret_key_pat = dbutils.widgets.get("secret_key_pat") or "databricks-pat-token"
 s3_log_path = dbutils.widgets.get("s3_log_path") or None
-silver_notebook_path = dbutils.widgets.get("silver_notebook_path") or None
-silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "300")
+multirefresh_notebook_path = dbutils.widgets.get("multirefresh_notebook_path") or None
+multirefresh_notebook_timeout = int(dbutils.widgets.get("multirefresh_notebook_timeout") or "300")
 
-if not silver_notebook_path:
-    dbutils.notebook.exit("Error: silver_notebook_path widget is required.")
+if not multirefresh_notebook_path:
+    dbutils.notebook.exit("Error: multirefresh_notebook_path widget is required.")
 
 if not secret_scope:
     dbutils.notebook.exit(
@@ -78,7 +78,6 @@ if s3_log_path:
 
     configure_s3_logging(f"{s3_log_path.rstrip('/')}/multi_refresh_{job_run_id}.log")
 
-print(f"admin_catalog_name : {admin_catalog_name}")
 print(f"environment        : {environment}")
 print(f"max_iterations     : {max_iterations}")
 
@@ -158,13 +157,13 @@ while iteration < max_iterations:
 
     try:
         raw_output = dbutils.notebook.run(
-            silver_notebook_path,
-            silver_notebook_timeout,
+            multirefresh_notebook_path,
+            multirefresh_notebook_timeout,
             {"triggerTime": trigger_time_str},
         )
     except Exception as exc:
         logger.error(f"[MultiRefresh] Silver notebook run failed: {exc}")
-        time.sleep(silver_notebook_timeout)
+        time.sleep(multirefresh_notebook_timeout)
         continue
 
     try:
@@ -174,7 +173,7 @@ while iteration < max_iterations:
             f"[MultiRefresh] Could not parse silver notebook output as JSON: {exc}. "
             f"raw_output={raw_output!r}"
         )
-        time.sleep(silver_notebook_timeout)
+        time.sleep(multirefresh_notebook_timeout)
         continue
 
     eligible_pipelines = result.get("eligible_pipelines", [])
