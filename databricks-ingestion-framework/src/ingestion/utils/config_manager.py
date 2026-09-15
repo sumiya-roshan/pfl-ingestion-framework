@@ -753,6 +753,7 @@ class ConfigManager:
             secret_key_credentials=None,
             is_active=1,
             landing_volume_path=None,
+            temp_volume_path=None,
             retry_count=None,
             retry_interval=None,
         )
