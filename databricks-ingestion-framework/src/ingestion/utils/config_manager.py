@@ -25,6 +25,7 @@ SOURCE_SYSTEM_TABLE = "migration_x_catalog.pfl_x_schema.config_source_system"
 CONFIG_MASTER_TABLE = "migration_x_catalog.pfl_x_schema.config_master"
 AUDIT_TABLE = "migration_x_catalog.pfl_x_schema.tb_audit_log"
 DEPENDENCY_TABLE = "migration_x_catalog.pfl_x_schema.dependency_master_config"
+PIPELINE_MASTER_CONFIG_TABLE = "migration_x_catalog.pfl_x_schema.tb_pipeline_master_config"
 
 # Audit lifecycle values shared by the entry point, orchestrator, and logger.
 AUDIT_STATUS_INPROGRESS = "INPROGRESS"
@@ -274,6 +275,65 @@ def resolve_child_table_fqn(spark, config_master_table: str, config_master_id: i
         f"{m.get('config_catalog_name')}."
         f"{m.get('config_schema_name')}."
         f"{m.get('config_table_name')}"
+    )
+
+
+def _split_recipients(raw) -> list[str]:
+    """
+    Parses a recipients STRING column into a list of addresses. Tries JSON
+    array first (["a@x.com","b@x.com"], the format IngestionTaskConfig's own
+    per-table `recipients` column uses); otherwise splits on ';' — the actual
+    format tb_pipeline_master_config's Success_Recipient / Failure_Recipient
+    columns use (e.g. "a@x.com;b@x.com;c@x.com") — falling back to ',' if no
+    ';' is present.
+    """
+    if not raw:
+        return []
+    raw = str(raw).strip()
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(a).strip() for a in parsed if str(a).strip()]
+        except (json.JSONDecodeError, TypeError):
+            pass
+    sep = ";" if ";" in raw else ","
+    return [a.strip() for a in raw.split(sep) if a.strip()]
+
+
+def get_pipeline_notification_recipients(
+    spark,
+    pipeline_name: str | None,
+    pipeline_master_table: str = PIPELINE_MASTER_CONFIG_TABLE,
+) -> tuple[list[str], list[str]]:
+    """
+    Looks up tb_pipeline_master_config for this pipeline's success/failure
+    recipient lists — used for the one pipeline-level (batch summary) email
+    per run, separate from each table's own per-row `recipients` column
+    (IngestionTaskConfig.recipient_list, consumed inside orchestrator.py).
+
+    Returns (success_recipients, failure_recipients), each possibly empty.
+    Never raises: a missing/misconfigured pipeline notification row must not
+    fail the pipeline itself — GraphMailNotifier.send_email() already skips
+    silently when recipients is empty.
+    """
+    if not pipeline_name:
+        return [], []
+    try:
+        safe_name = pipeline_name.replace("'", "''")
+        rows = (
+            spark.table(pipeline_master_table)
+            .filter(f"Pipeline_Name = '{safe_name}'")
+            .collect()
+        )
+    except Exception:
+        return [], []
+    if not rows:
+        return [], []
+    r = rows[0].asDict()
+    return (
+        _split_recipients(r.get("Success_Recipient")),
+        _split_recipients(r.get("Failure_Recipient")),
     )
 
 

@@ -50,7 +50,9 @@ from ingestion.utils.config_manager import (
     IngestionTaskConfig,
     LentraIngestionTaskConfig,
     SourceSystemConfig,
+    get_pipeline_notification_recipients,
 )
+from ingestion.utils.email_notifier import GraphMailNotifier
 from ingestion.utils.logger import _upload_on_exit, configure_s3_logging, get_logger
 from ingestion.utils.orchestrator import IngestionOrchestrator
 
@@ -367,6 +369,40 @@ if is_lentra:
         f"❌ Failed: {len(lentra_failed)}\n"
     )
 
+    # ── Pipeline-level (batch summary) notification ─────────────────────────
+    # One summary email for this run, separate from any per-row notification.
+    # Recipients come from tb_pipeline_master_config (Success_Recipient /
+    # Failure_Recipient), looked up by this task's own Pipeline_Name column —
+    # Lentra always resolves to exactly one task, so tasks[0].pipeline_name is
+    # unambiguous.
+    lentra_pipeline_name = tasks[0].pipeline_name
+    lentra_success_recipients, lentra_failure_recipients = get_pipeline_notification_recipients(
+        spark, lentra_pipeline_name
+    )
+    lentra_notifier = GraphMailNotifier(dbutils=dbutils, logger=logger)
+    lentra_summary_body = (
+        f"Pipeline: {lentra_pipeline_name}\n"
+        f"Source: {tasks[0].source_name}\n"
+        f"Job Run ID: {job_run_id}\n\n"
+        f"Total: {len(lentra_results)} | Succeeded: {len(lentra_succeeded)} | "
+        f"Failed: {len(lentra_failed)}\n"
+    )
+    if lentra_failed:
+        lentra_summary_body += "\nFailed Config IDs: " + ", ".join(
+            str(r["config_id"]) for r in lentra_failed
+        )
+        lentra_notifier.send_email(
+            subject=f"[FAILURE] PIPELINE — {lentra_pipeline_name} / {tasks[0].source_name} (job_run_id={job_run_id})",
+            body=lentra_summary_body,
+            recipients=lentra_failure_recipients,
+        )
+    else:
+        lentra_notifier.send_email(
+            subject=f"[SUCCESS] PIPELINE — {lentra_pipeline_name} / {tasks[0].source_name} (job_run_id={job_run_id})",
+            body=lentra_summary_body,
+            recipients=lentra_success_recipients,
+        )
+
     if lentra_failed:
         failed_ids = [r["config_id"] for r in lentra_failed]
         logger.critical(
@@ -573,6 +609,47 @@ print(
     f"Silver — Total: {len(silver_results)} | "
     f"✅ Succeeded: {len(silver_results) - len(silver_failed)} | ❌ Failed: {len(silver_failed)}\n"
 )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Pipeline-level (batch summary) notification
+# MAGIC
+# MAGIC One summary email for this whole run — separate from each table's own
+# MAGIC per-row email (orchestrator.py, driven by that row's `recipients`
+# MAGIC column). Recipients come from tb_pipeline_master_config
+# MAGIC (Success_Recipient / Failure_Recipient), looked up by pipeline_name.
+
+# COMMAND ----------
+
+pipeline_success_recipients, pipeline_failure_recipients = get_pipeline_notification_recipients(
+    spark, pipeline_name
+)
+pipeline_summary_body = (
+    f"Pipeline: {pipeline_name}\n"
+    f"Source: {source_sys.source_name} ({source_sys.source_type})\n"
+    f"Job Run ID: {job_run_id}\n\n"
+    f"Ingestion — Total: {len(results)} | Succeeded: {len(succeeded)} | "
+    f"Skipped: {len(skipped)} | Failed: {len(failed)}\n"
+    f"Silver     — Total: {len(silver_results)} | "
+    f"Succeeded: {len(silver_results) - len(silver_failed)} | Failed: {len(silver_failed)}\n"
+)
+if failed or silver_failed:
+    pipeline_summary_body += (
+        "\nFailed Config IDs: " + ", ".join(str(r["config_id"]) for r in failed)
+        + "\nSilver-failed Config IDs: " + ", ".join(str(r["config_id"]) for r in silver_failed)
+    )
+    orchestrator.notifier.send_email(
+        subject=f"[FAILURE] PIPELINE — {pipeline_name} (job_run_id={job_run_id})",
+        body=pipeline_summary_body,
+        recipients=pipeline_failure_recipients,
+    )
+else:
+    orchestrator.notifier.send_email(
+        subject=f"[SUCCESS] PIPELINE — {pipeline_name} (job_run_id={job_run_id})",
+        body=pipeline_summary_body,
+        recipients=pipeline_success_recipients,
+    )
 
 # COMMAND ----------
 
