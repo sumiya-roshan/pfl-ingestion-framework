@@ -29,6 +29,9 @@ IngestionOrchestrator.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from .audit import AuditLogger
 from .config_manager import (
     AUDIT_STATUS_FAILED,
     AUDIT_STATUS_INPROGRESS,
@@ -59,6 +62,9 @@ class LentraLoader:
         run_id: str,
         notebook_timeout: int = 3600,
         classify_notebook_path: str | None = None,
+        audit_table: str | None = None,
+        config_master_id: int | None = None,
+        job_context: dict | None = None,
     ):
         self.spark = spark
         self.dbutils = dbutils
@@ -68,6 +74,17 @@ class LentraLoader:
         self.run_id = run_id
         self.notebook_timeout = notebook_timeout
         self.classify_notebook_path = classify_notebook_path
+        # config_master_id here is the ROUTING id (config_master_id widget in
+        # main.py) — NOT task.source_config_master_id (that's the row's own
+        # business field; see LentraIngestionTaskConfig's docstring). Matches
+        # what orchestrator.py/MavisApiExtractor pass to AuditLogger.start_run.
+        self.config_master_id = config_master_id
+        self.job_context = job_context or {}
+        # audit_table=None (widget not configured) -> audit writes are skipped
+        # entirely in run(), same "best-effort, opt-in" spirit as everything
+        # else in this class. When given, one tb_audit_log row per task, same
+        # lifecycle (start_run -> complete_run/fail_run) as RDBMS/Mavis.
+        self.audit = AuditLogger(spark, audit_table=audit_table) if audit_table else None
 
     @staticmethod
     def build_params(
@@ -121,9 +138,31 @@ class LentraLoader:
         """
         fqn = task.child_table_fqn
         config_id = task.config_id
+        audit_run = None
 
         try:
             self.config_mgr.update_status(fqn, config_id, AUDIT_STATUS_INPROGRESS)
+
+            if self.audit:
+                # LentraIngestionTaskConfig has no source_schema/source_object_name/
+                # target_schema/target_table (those are RDBMS/Mavis-shaped
+                # concepts) — start_run's keyword overrides stand in: the source
+                # bucket/report as "source", the Silver sink as "target".
+                # source_sys only needs .source_name (see AuditLogger.start_run) —
+                # a SimpleNamespace avoids building a whole SourceSystemConfig.
+                audit_run = self.audit.start_run(
+                    task=task,
+                    source_sys=SimpleNamespace(source_name=task.source_name),
+                    job_context=self.job_context,
+                    pipeline_name=task.pipeline_name,
+                    config_master_id=self.config_master_id,
+                    delta_layer="SILVER",
+                    frequency=task.frequency,
+                    source_schema=task.source_bucket_name,
+                    source_table=task.report_name,
+                    target_schema=task.silver_sink_schema_name,
+                    target_table=task.silver_sink_table_name,
+                )
 
             params = self.build_params(task, self.raw_sa_name, self.run_id)
 
@@ -153,6 +192,19 @@ class LentraLoader:
 
             self.config_mgr.update_status(fqn, config_id, AUDIT_STATUS_SUCCESS)
             print(f"[LentraLoader] config_id={config_id} SUCCESS — {exit_value}")
+            if audit_run:
+                # rows_read/rows_copied=1: same "one export = one unit of work"
+                # convention MavisApiExtractor uses — dbutils.notebook.run()'s
+                # exit value is just a string, no real row/byte counts to report.
+                try:
+                    self.audit.complete_run(
+                        audit_run, AUDIT_STATUS_SUCCESS, rows_read=1, rows_copied=1
+                    )
+                except Exception as audit_exc:  # best effort
+                    print(
+                        f"[LentraLoader] config_id={config_id} could not write "
+                        f"audit SUCCESS row: {audit_exc}"
+                    )
             return {
                 "config_id": config_id,
                 "report_name": task.report_name,
@@ -170,6 +222,18 @@ class LentraLoader:
                     f"[LentraLoader] config_id={config_id} could not write "
                     f"Failed status: {update_exc}"
                 )
+            if audit_run:
+                try:
+                    self.audit.fail_run(
+                        audit_run,
+                        error_code=type(exc).__name__,
+                        error_message=str(exc),
+                    )
+                except Exception as audit_exc:  # best effort
+                    print(
+                        f"[LentraLoader] config_id={config_id} could not write "
+                        f"audit FAILED row: {audit_exc}"
+                    )
             return {
                 "config_id": config_id,
                 "report_name": task.report_name,

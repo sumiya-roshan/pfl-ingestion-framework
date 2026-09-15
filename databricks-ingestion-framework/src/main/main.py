@@ -324,6 +324,9 @@ if is_lentra:
         run_id                  = job_run_id,
         notebook_timeout        = lentra_notebook_timeout,
         classify_notebook_path  = lentra_classify_notebook_path,
+        audit_table             = AUDIT_TABLE,
+        config_master_id        = config_master_id,
+        job_context             = job_context,
     )
 
     # Publish the same values the client notebook receives as taskValues, so
