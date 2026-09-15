@@ -241,57 +241,52 @@ class MavisApiExportConnector:
         os.makedirs(os.path.dirname(tmp_csv_path), exist_ok=True)
 
         started = time.monotonic()
-        try:
-            # 4. Stream download → Volume ZIP file (8 MB chunks, never loads whole file into RAM)
-            with open(tmp_zip_path, "wb") as fh:
-                for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
-                    fh.write(chunk)
 
-            dbutils = DBUtils(self.spark)
+        # 4. Stream download → Volume ZIP file (8 MB chunks, never loads whole file into RAM)
+        with open(tmp_zip_path, "wb") as fh:
+            for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
+                fh.write(chunk)
 
-            # 5. Upload ZIP from Volume → final S3 path
-            dbutils.fs.cp(tmp_zip_path, s3_zip_path)
-            print(f"[Mavis] config_id={task.config_id} uploaded ZIP -> {s3_zip_path}")
+        # 5. Disk-to-disk unzip inside the Volume to prevent MemoryError
+        #    (must happen BEFORE moving the ZIP, since mv deletes the source)
+        with zipfile.ZipFile(tmp_zip_path) as zf:
+            csv_members = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+            if not csv_members:
+                csv_members = zf.namelist()
+            if not csv_members:
+                raise ValueError(
+                    f"[Mavis] ZIP for config_id={task.config_id} is empty."
+                )
 
-            # 6. Disk-to-disk unzip inside the Volume to prevent MemoryError
-            with zipfile.ZipFile(tmp_zip_path) as zf:
-                csv_members = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-                if not csv_members:
-                    csv_members = zf.namelist()
-                if not csv_members:
-                    raise ValueError(
-                        f"[Mavis] ZIP for config_id={task.config_id} is empty."
-                    )
+            with zf.open(csv_members[0]) as source_file:
+                with open(tmp_csv_path, "wb") as target_file:
+                    shutil.copyfileobj(source_file, target_file, length=8 * 1024 * 1024)
 
-                with zf.open(csv_members[0]) as source_file:
-                    with open(tmp_csv_path, "wb") as target_file:
-                        shutil.copyfileobj(source_file, target_file, length=8 * 1024 * 1024)
+        # Capture sizes before moving (mv deletes the source)
+        zip_bytes = os.path.getsize(tmp_zip_path)
+        csv_bytes = os.path.getsize(tmp_csv_path)
 
-            # 7. Upload CSV from Volume → final S3 path
-            dbutils.fs.cp(tmp_csv_path, s3_csv_path)
-            print(f"[Mavis] config_id={task.config_id} uploaded CSV -> {s3_csv_path}")
+        dbutils = DBUtils(self.spark)
 
-            zip_bytes = os.path.getsize(tmp_zip_path)
-            csv_bytes = os.path.getsize(tmp_csv_path)
-            duration  = round(time.monotonic() - started, 2)
-            return {
-                "s3_zip_path": s3_zip_path,
-                "s3_csv_path": s3_csv_path,
-                "data_read_bytes": zip_bytes,
-                "data_written_bytes": csv_bytes,
-                "copy_duration_sec": duration,
-                "throughput_mb_per_sec": (
-                    round(zip_bytes / 1e6 / duration, 2) if duration > 0 else None
-                ),
-            }
+        # 6. Move ZIP: Volume → final S3 path (atomic move — no separate cleanup needed)
+        dbutils.fs.mv(tmp_zip_path, s3_zip_path)
+        print(f"[Mavis] config_id={task.config_id} moved ZIP -> {s3_zip_path}")
 
-        finally:
-            pass
-            # ⚠️ TESTING ONLY — cleanup commented out so temp files stay in Volume for inspection
-            # if os.path.exists(tmp_zip_path):
-            #     os.unlink(tmp_zip_path)
-            # if os.path.exists(tmp_csv_path):
-            #     os.unlink(tmp_csv_path)
+        # 7. Move CSV: Volume → final S3 path (atomic move — no separate cleanup needed)
+        dbutils.fs.mv(tmp_csv_path, s3_csv_path)
+        print(f"[Mavis] config_id={task.config_id} moved CSV -> {s3_csv_path}")
+
+        duration = round(time.monotonic() - started, 2)
+        return {
+            "s3_zip_path": s3_zip_path,
+            "s3_csv_path": s3_csv_path,
+            "data_read_bytes": zip_bytes,
+            "data_written_bytes": csv_bytes,
+            "copy_duration_sec": duration,
+            "throughput_mb_per_sec": (
+                round(zip_bytes / 1e6 / duration, 2) if duration > 0 else None
+            ),
+        }
 
 
     # ── Helpers ────────────────────────────────────────────────────────────
