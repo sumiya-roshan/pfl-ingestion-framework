@@ -57,6 +57,7 @@ from ..utils.config_manager import (
 )
 from ..utils.logger import get_logger
 from ..utils.retry import retry_on_failure
+from ..utils.secrets import SecretResolver
 
 _IST = timedelta(hours=5, minutes=30)
 _DEFAULT_QUERY_TIMEOUT = 12 * 3600  # 43200s — fallback when query_timeout is blank
@@ -126,8 +127,32 @@ class MavisApiExtractor:
         )
         self.logger = get_logger(environment=environment)
         self._dbutils = dbutils
+        self.secrets = SecretResolver(dbutils)
         self.silver_notebook_path = silver_notebook_path
         self.silver_notebook_timeout = silver_notebook_timeout
+
+    # ── secrets ────────────────────────────────────────────────────────────
+
+    def _resolve_api_key(self, task: MavisIngestionTaskConfig, source_sys) -> str:
+        """
+        API key for this task's x-api-key header.
+
+        When ``source_sys`` has ``secret_scope``/``secret_key_credentials`` set
+        (e.g. scope='aws', key=<AWS Secrets Manager secret name>), the key is
+        fetched from there (plain-string secret — see ``SecretResolver.get``).
+        Otherwise falls back to the plaintext ``Prod_API_Key`` config column.
+        """
+        scope = getattr(source_sys, "secret_scope", None)
+        key = getattr(source_sys, "secret_key_credentials", None)
+        if scope and key:
+            return self.secrets.get(scope, key)
+        if not task.prod_api_key:
+            raise RuntimeError(
+                f"config_id={task.config_id}: no API key available — set "
+                f"source_sys.secret_scope/secret_key_credentials or the "
+                f"task's Api_Key column"
+            )
+        return task.prod_api_key
 
     # ── retry policy ────────────────────────────────────────────────────────
 
@@ -228,18 +253,21 @@ class MavisApiExtractor:
         try:
             self._update_status(fqn, task.config_id, AUDIT_STATUS_INPROGRESS)
 
+            api_key = self._resolve_api_key(task, source_sys)
+
             request_id = _step(
-                "start_export", lambda: self.connector.start_export(task)
+                "start_export",
+                lambda: self.connector.start_export(task, api_key=api_key),
             )
             _step(
                 "poll_until_ready",
                 lambda: self.connector.poll_until_ready(
-                    task, request_id, query_timeout=plan["query_timeout"]
+                    task, request_id, query_timeout=plan["query_timeout"], api_key=api_key
                 ),
             )
             download_url = _step(
                 "get_download_url",
-                lambda: self.connector.get_download_url(task, request_id),
+                lambda: self.connector.get_download_url(task, request_id, api_key=api_key),
             )
             paths = _step(
                 "download_and_extract_to_s3",

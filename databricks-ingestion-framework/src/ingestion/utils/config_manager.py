@@ -176,8 +176,10 @@ class IngestionTaskConfig(_DictSerializable):
 class MavisIngestionTaskConfig(_DictSerializable):
     """
     One row of the Mavis child config table resolved to typed fields — the
-    per-object export settings (including the API key, which is read straight
-    off the row, not dbutils.secrets). Built by
+    per-object export settings. ``prod_api_key`` is the plaintext fallback
+    column; when the source system's secret_scope/secret_key_credentials are
+    set, ``MavisApiExtractor._resolve_api_key`` resolves the key via
+    ``SecretResolver`` (e.g. AWS Secrets Manager) instead. Built by
     ``ConfigManager._build_mavis_task`` inside the normal ``get_active_tasks``
     flow.
 

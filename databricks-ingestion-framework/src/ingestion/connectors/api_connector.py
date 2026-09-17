@@ -15,7 +15,10 @@ Flow per task:
 The extracted files are picked up by the normal S3 ingestion config downstream;
 this module does not load them into Spark.
 
-The x-api-key header comes from the task's own Api_Key column (never logged).
+The x-api-key header comes from the resolved API key passed in by the caller
+(``MavisApiExtractor._resolve_api_key`` — AWS Secrets Manager when the source
+system's secret_scope/secret_key_credentials are set, else the task's own
+Api_Key column) and is never logged.
 Any failure raises; the extractor tags it with the step + config_id.
 """
 
@@ -88,12 +91,13 @@ class MavisApiExportConnector:
 
     # ── Export steps ───────────────────────────────────────────────────────
 
-    def start_export(self, task) -> str:
+    def start_export(self, task, api_key: str | None = None) -> str:
         """POST to start the export; return the RequestId."""
         resp = self._post(
             self._build_url(self.api.start_export_path, task),
             task,
             self._build_start_body(task),
+            api_key=api_key,
         )
         request_id = resp.get("RequestId") or resp.get("RequestID")
         if not request_id:
@@ -103,7 +107,9 @@ class MavisApiExportConnector:
         print(f"[Mavis] config_id={task.config_id} export started, id={request_id}")
         return str(request_id)
 
-    def poll_until_ready(self, task, request_id: str, query_timeout: int) -> str:
+    def poll_until_ready(
+        self, task, request_id: str, query_timeout: int, api_key: str | None = None
+    ) -> str:
         """
         POST every ``poll_interval_seconds`` until the status is done / failed.
 
@@ -118,7 +124,9 @@ class MavisApiExportConnector:
         attempt = 0
         while time.monotonic() < deadline:
             attempt += 1
-            resp = self._post(url, task, {"Parameter": {"RequestId": request_id}})
+            resp = self._post(
+                url, task, {"Parameter": {"RequestId": request_id}}, api_key=api_key
+            )
             status = self._extract_status(resp)
             print(f"[Mavis] config_id={task.config_id} poll {attempt}: '{status}'")
             if status.lower() in done:
@@ -134,12 +142,13 @@ class MavisApiExportConnector:
             f"({query_timeout}s query_timeout budget)"
         )
 
-    def get_download_url(self, task, request_id: str) -> str:
+    def get_download_url(self, task, request_id: str, api_key: str | None = None) -> str:
         """POST for the exported file's download URL."""
         resp = self._post(
             self._build_url(self.api.download_url_path, task),
             task,
             {"RequestID": request_id, "FileType": "ExportedFile"},
+            api_key=api_key,
         )
         file_url = resp.get("FileURL") or resp.get("FileUrl")
         if not file_url:
@@ -335,19 +344,25 @@ class MavisApiExportConnector:
             )
         return f"{base.rstrip('/')}/{path.lstrip('/')}"
 
-    def _post(self, url: str, task, body: dict | str) -> dict:
+    def _post(self, url: str, task, body: dict | str, api_key: str | None = None) -> dict:
         """POST ``body`` as JSON with the task's x-api-key; return the JSON object.
         ``body`` may be a dict or an already-serialised JSON string (Source_Filter).
+
+        ``api_key`` is the resolved key for this task (from Secrets Manager or
+        the plaintext config column — see ``MavisApiExtractor._resolve_api_key``).
+        Falls back to ``task.prod_api_key`` when not supplied, for callers that
+        still invoke this connector directly against the config row.
         """
         import requests
 
-        if not task.prod_api_key:
+        key = api_key or task.prod_api_key
+        if not key:
             raise RuntimeError(
                 f"config_id={task.config_id}: Api_Key is missing on the config row"
             )
         resp = requests.post(
             url,
-            headers={"x-api-key": task.prod_api_key, "Content-Type": "application/json"},
+            headers={"x-api-key": key, "Content-Type": "application/json"},
             data=body if isinstance(body, str) else json.dumps(body),
             timeout=self.api.request_timeout_seconds,
         )
