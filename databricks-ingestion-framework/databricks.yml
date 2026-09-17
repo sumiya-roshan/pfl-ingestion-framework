@@ -1,0 +1,41 @@
+bundle:
+  name: pfl-ingestion-framework
+
+include:
+  - resources/*.yml
+
+variables:
+  landing_volume_path:
+    description: "Base S3/Volume path for raw landing (e.g. s3://pfl-raw/landing)"
+    default: ""
+  node_type_id:
+    description: "Cluster node type — e.g. i3.xlarge (AWS) or Standard_DS3_v2 (Azure)"
+    default: "REPLACE_WITH_NODE_TYPE"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://REPLACE_WITH_YOUR_WORKSPACE_URL
+      # code + bundle state lands in each dev's own home folder
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+
+  uat:
+    mode: production
+    workspace:
+      host: https://REPLACE_WITH_YOUR_WORKSPACE_URL
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      landing_volume_path: "s3://pfl-raw-uat/landing"
+
+  prod:
+    mode: production
+    workspace:
+      host: https://REPLACE_WITH_YOUR_WORKSPACE_URL
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      landing_volume_path: "s3://pfl-raw/landing"
+    run_as:
+      # use a service principal for prod deploys (recommended for CI/CD)
+      service_principal_name: REPLACE_WITH_SERVICE_PRINCIPAL_APP_ID

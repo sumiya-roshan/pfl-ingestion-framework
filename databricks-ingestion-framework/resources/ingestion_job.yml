@@ -1,0 +1,57 @@
+resources:
+  jobs:
+    generic_source_to_bronze_ingestion:
+      name: generic_source_to_bronze_ingestion
+
+      tags:
+        team: data-engineering
+        framework: config-driven-ingestion
+
+      parameters:
+        - name: config_master_id
+          default: ""
+        - name: source_system_id
+          default: ""
+        - name: pipeline_name
+          default: ""
+        - name: job_run_id
+          default: "{{job.run_id}}"
+        - name: landing_volume_path
+          default: ${var.landing_volume_path}
+        - name: environment
+          default: ${bundle.target}
+        - name: max_workers
+          default: "4"
+
+      job_clusters:
+        - job_cluster_key: ingestion_cluster
+          new_cluster:
+            spark_version: 15.4.x-scala2.12
+            node_type_id: ${var.node_type_id}
+            num_workers: 2
+            data_security_mode: SINGLE_USER
+
+      tasks:
+        - task_key: run_source_ingestion
+          job_cluster_key: ingestion_cluster
+          notebook_task:
+            # relative to this file's location (resources/) -> ../src/main/main
+            notebook_path: ../src/main/main
+            base_parameters:
+              config_master_id: "{{job.parameters.config_master_id}}"
+              source_system_id: "{{job.parameters.source_system_id}}"
+              pipeline_name: "{{job.parameters.pipeline_name}}"
+              job_run_id: "{{job.run_id}}"
+              landing_volume_path: "{{job.parameters.landing_volume_path}}"
+              environment: "{{job.parameters.environment}}"
+              max_workers: "{{job.parameters.max_workers}}"
+              trigger_type: "SCHEDULED"
+          timeout_seconds: 14400
+          max_retries: 0
+
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"
+        timezone_id: UTC
+        pause_status: PAUSED
+
+      max_concurrent_runs: 1
