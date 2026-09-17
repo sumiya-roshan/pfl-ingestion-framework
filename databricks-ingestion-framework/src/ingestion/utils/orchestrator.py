@@ -8,7 +8,7 @@ Key behaviours
 - delta_layer   : read from ingestion_config.delta_layer (not a widget)
 - pipeline_name : read from ingestion_config.pipeline_name (auto-detected from
                   Databricks Job context in the calling notebook)
-- landing_volume_path : passed as a parameter from the job widget — NOT from
+- raw_bucket_path : passed as a parameter from the job widget — NOT from
                   config_source_system (removed)
 - Fault tolerance: run() catches all exceptions, records FAILED in audit, and
                   returns a result dict — it never re-raises. The calling
@@ -109,7 +109,7 @@ class IngestionOrchestrator:
         source_sys: SourceSystemConfig,
         ingest_obj: IngestionTaskConfig,
         config_master_id: int | None    = None,
-        landing_volume_path: str | None = None,
+        raw_bucket_path: str | None = None,
         trigger_id: str | None          = None,
         # trigger_type: Optional[str]        = None,
         business_date: date | None      = None,
@@ -128,7 +128,7 @@ class IngestionOrchestrator:
         task                : Pre-fetched IngestionTaskConfig
         config_master_id    : The config_master routing table ID (widget value from main.py);
                               written to the audit table's config_master_id column
-        landing_volume_path : base S3/Volume path for raw landing write (widget value);
+        raw_bucket_path : base S3/Volume path for raw landing write (widget value);
                               if None/empty, landing write is skipped
         trigger_id          : Databricks job run ID (for audit traceability)
         trigger_type        : 'SCHEDULED' | 'MANUAL' | 'EVENT'
@@ -296,10 +296,10 @@ class IngestionOrchestrator:
             # and land them in s3. Same flat rewrite as the lookup probe, just
             # without the row-limit clause (row_limit=False).
             if ingest_obj.staging_flag == 1 and isinstance(connector, (JdbcConnector, FederatedConnector)):
-                if not landing_volume_path:
+                if not raw_bucket_path:
                     raise ValueError(
                         f"Staging_Flag=1 for config_id={ingest_obj.config_id}, "
-                        "but landing_volume_path is not configured."
+                        "but raw_bucket_path is not configured."
                     )
 
                 key_col = ", ".join(ingest_obj.primary_key_list) if ingest_obj.primary_key_list else "*"
@@ -341,7 +341,7 @@ class IngestionOrchestrator:
 
                 pk_path = self.s3_writer.write(
                     pk_df,
-                    landing_volume_path = landing_volume_path,
+                    raw_bucket_path = raw_bucket_path,
                     source_name         = source_sys.source_name,
                     source_schema       = ingest_obj.source_schema,
                     source_object_name  = ingest_obj.source_object_name,
@@ -364,11 +364,11 @@ class IngestionOrchestrator:
             silver_result = None
             fmt = ingest_obj.file_format or "parquet"
             write_start_time = time.time()
-            if landing_volume_path:
+            if raw_bucket_path:
                 stage = "RAW_WRITE"
                 landing_path = self.s3_writer.write(
                     df,
-                    landing_volume_path = landing_volume_path,
+                    raw_bucket_path = raw_bucket_path,
                     source_name         = source_sys.source_name,
                     source_schema       = ingest_obj.source_schema,
                     source_object_name  = ingest_obj.source_object_name,
@@ -465,19 +465,19 @@ class IngestionOrchestrator:
                                     f"for config_id={ingest_obj.config_id}: {sink_exc}"
                                 )
 
-            # Raw layer never ran (no landing_volume_path) — nothing was
+            # Raw layer never ran (no raw_bucket_path) — nothing was
             # written, so don't report SUCCESS. Mark the config row Skipped.
             if not landing_path:
                 self.logger.warning(
                     f"[{run_id}] config_id={ingest_obj.config_id} — raw layer did not run "
-                    f"(no landing_volume_path). Marking Skipped."
+                    f"(no raw_bucket_path). Marking Skipped."
                 )
                 self._set_config_status(ingest_obj, "Skipped", run_id=run_id)
                 try:
                     self.audit.fail_run(
                         audit_run=audit_run,
                         error_code="RawSkipped",
-                        error_message="Raw layer did not run (no landing_volume_path configured).",
+                        error_message="Raw layer did not run (no raw_bucket_path configured).",
                     )
                 except Exception as audit_exc:
                     self.logger.error(f"[{run_id}] Could not write audit row: {audit_exc}")
@@ -584,7 +584,7 @@ class IngestionOrchestrator:
             if self.silver_processor and not landing_path:
                 print(
                     f"[SILVER] Skipped for config_id={ingest_obj.config_id} — "
-                    f"no landing_volume_path was set, nothing for Silver to read."
+                    f"no raw_bucket_path was set, nothing for Silver to read."
                 )
 
             return {

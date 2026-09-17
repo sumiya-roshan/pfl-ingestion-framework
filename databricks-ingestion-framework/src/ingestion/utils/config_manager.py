@@ -87,7 +87,7 @@ class SourceSystemConfig(_DictSerializable):
 
     is_active: int
 
-    landing_volume_path: str | None
+    raw_bucket_path: str | None
     temp_volume_path: str | None
 
     retry_count: int | None
@@ -726,11 +726,11 @@ class ConfigManager:
         """
         A minimal SourceSystemConfig for the Lentra source_name path, which
         has no config_source_system row — Lentra needs no shared connector
-        credentials or landing_volume_path there; its own AWS Secrets Manager
+        credentials or raw_bucket_path there; its own AWS Secrets Manager
         secret names live directly on the config table row. This keeps every
         caller's source_sys.* access (source_name, source_type,
-        landing_volume_path, ...) working without a None check at every call
-        site — landing_volume_path is None here, which callers already treat
+        raw_bucket_path, ...) working without a None check at every call
+        site — raw_bucket_path is None here, which callers already treat
         as "not configured, skip" (e.g. main.py's S3 log path setup).
         """
         return SourceSystemConfig(
@@ -752,7 +752,7 @@ class ConfigManager:
             secret_scope="",
             secret_key_credentials=None,
             is_active=1,
-            landing_volume_path=None,
+            raw_bucket_path=None,
             temp_volume_path=None,
             retry_count=None,
             retry_interval=None,
@@ -779,7 +779,7 @@ class ConfigManager:
             secret_key_credentials=r.get("secret_key_credentials"),
             is_active=r.get("is_active", 1),
             extra_params=r.get("extra_params"),
-            landing_volume_path=r.get("landing_volume_path"),
+            raw_bucket_path=r.get("raw_bucket_path"),
             temp_volume_path=r.get("temp_volume_path"),
             retry_count=r.get("retry_count"),
             retry_interval=r.get("retry_interval"),

@@ -161,7 +161,7 @@ class MavisApiExportConnector:
         upload that ZIP to the S3 raw landing path, then stream-extract the
         inner CSV and upload it to the S3 unzip path.
 
-        ``source_sys``   provides ``landing_volume_path`` (final S3 bucket root)
+        ``source_sys``   provides ``raw_bucket_path`` (final S3 bucket root)
                          and ``temp_volume_path`` (Unity Catalog Volume used for
                          staging — avoids local-disk limits on shared/serverless
                          clusters).
@@ -171,7 +171,7 @@ class MavisApiExportConnector:
         ``query_timeout``(seconds) is the streaming-download read timeout.
 
         Path convention (matches ADF):
-          bucket    = source_sys.landing_volume_path  (already includes container)
+          bucket    = source_sys.raw_bucket_path  (already includes container)
           folder    = task.target_table               (sink / silver table name)
           file_name = {target_schema}_{target_table}
 
@@ -188,13 +188,13 @@ class MavisApiExportConnector:
         """
         # ── resolve landing bucket from source_sys ───────────────────────────
         landing = (
-            getattr(source_sys, "landing_volume_path", None)
+            getattr(source_sys, "raw_bucket_path", None)
             or getattr(task, "s3_raw_landing_path", None)
             or ""
         ).rstrip("/")
         if not landing:
             raise RuntimeError(
-                f"config_id={task.config_id}: landing_volume_path is not set "
+                f"config_id={task.config_id}: raw_bucket_path is not set "
                 f"on the source system config"
             )
 

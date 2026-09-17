@@ -14,7 +14,7 @@ CREATE TABLE migration_x_catalog.pfl_x_schema.config_source_system (
   sftp_root_path           STRING,
   sftp_file_format         STRING,
   sftp_key_fingerprint     STRING,
-  landing_volume_path      STRING,
+  raw_bucket_path          STRING,
   auth_type                STRING,
   secret_scope             STRING,
   secret_key_credentials   STRING,

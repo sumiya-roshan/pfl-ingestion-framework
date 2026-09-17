@@ -51,7 +51,7 @@ resources:
               source_system_id: "1"
               target_catalog: migration_x_catalog
               pipeline_name: bronze_pipeline
-              landing_volume_path: s3://pfl-test/pfl_test_folder/
+              raw_bucket_path: s3://pfl-test/pfl_test_folder/
               job_run_id: "{{job.run_id}}"
               job_id: "{{job.id}}"
               batch_start_date: "{{job.parameters.batch_start_date}}"

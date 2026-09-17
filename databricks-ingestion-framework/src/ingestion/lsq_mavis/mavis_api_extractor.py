@@ -379,7 +379,7 @@ class MavisApiExtractor:
         params = {
             "config_id": str(task.config_id),
             "load_type": task.load_type or "",
-            "raw_sa_name": getattr(source_sys, "landing_volume_path", ""),
+            "raw_sa_name": getattr(source_sys, "raw_bucket_path", ""),
             "containerName": task.raw_container_name or "",
             "raw_folder_path": task.raw_folder_path or "",
             "raw_file_name": task.raw_file_name or "",

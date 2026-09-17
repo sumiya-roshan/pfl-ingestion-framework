@@ -18,7 +18,7 @@
       "sftp_root_path": null,
       "sftp_file_pattern": null,
       "sftp_host_key_fingerprint": null,
-      "landing_volume_path": "s3://my-raw-bucket/landing/postgres/sales",
+      "raw_bucket_path": "s3://my-raw-bucket/landing/postgres/sales",
       "secret_scope": "ingestion-secrets",
       "secret_key_credentials": "pg_sales_creds",
       "is_active": true
@@ -39,7 +39,7 @@
       "sftp_root_path": null,
       "sftp_file_pattern": null,
       "sftp_host_key_fingerprint": null,
-      "landing_volume_path": null,
+      "raw_bucket_path": null,
       "secret_scope": "ingestion-secrets",
       "secret_key_credentials": "mysql_crm_creds",
       "is_active": true
@@ -60,13 +60,13 @@
       "sftp_root_path": null,
       "sftp_file_pattern": null,
       "sftp_host_key_fingerprint": null,
-      "landing_volume_path": "s3://my-raw-bucket/landing/oracle/finance",
+      "raw_bucket_path": "s3://my-raw-bucket/landing/oracle/finance",
       "secret_scope": "ingestion-secrets",
       "secret_key_credentials": "oracle_finance_creds",
       "is_active": true
     },
     {
-      "_comment": "SFTP example — sftp_root_path + landing_volume_path for staging",
+      "_comment": "SFTP example — sftp_root_path + raw_bucket_path for staging",
       "source_id": 4,
       "source_name": "Reports SFTP Server",
       "source_type": "SFTP",
@@ -81,7 +81,7 @@
       "sftp_root_path": "/uploads/reports",
       "sftp_file_pattern": "*.csv",
       "sftp_host_key_fingerprint": null,
-      "landing_volume_path": "/Volumes/main/landing/sftp/reports",
+      "raw_bucket_path": "/Volumes/main/landing/sftp/reports",
       "secret_scope": "ingestion-secrets",
       "secret_key_credentials": "sftp_reports_creds",
       "is_active": true
@@ -102,7 +102,7 @@
       "sftp_root_path": null,
       "sftp_file_pattern": null,
       "sftp_host_key_fingerprint": null,
-      "landing_volume_path": null,
+      "raw_bucket_path": null,
       "secret_scope": "ingestion-secrets",
       "secret_key_credentials": "mongo_analytics_creds",
       "is_active": true

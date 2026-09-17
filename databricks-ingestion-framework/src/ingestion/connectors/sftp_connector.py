@@ -9,7 +9,7 @@ Field mapping from new config tables
     .sftp_file_pattern        → default glob (e.g. '*.csv'); overridable per object
     .sftp_host_key_fingerprint→ optional host-key check (logged; strict enforcement
                                 can be added when paramiko host-key policy is enabled)
-    .landing_volume_path      → local staging path (Databricks Volume recommended
+    .raw_bucket_path      → local staging path (Databricks Volume recommended
                                 in production, e.g. /Volumes/main/landing/sftp)
     .secret_scope             → Databricks secret scope
     .secret_key_credentials   → key holding JSON {"username":..,"password":..}
@@ -90,7 +90,7 @@ class SftpConnector(BaseConnector):
         """Return the local staging directory for downloaded files."""
         ss = self.source_system
         io = self.ingest_obj
-        root = ss.landing_volume_path.rstrip("/")
+        root = ss.raw_bucket_path.rstrip("/")
         print("_resolve_staging_dir:", root, io.ingestion_object_id)
         return os.path.join(root, str(io.ingestion_object_id))
 

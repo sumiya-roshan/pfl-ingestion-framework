@@ -276,7 +276,7 @@ is_mavis = (source_sys.source_name or "").strip().upper() == MAVIS_SOURCE_NAME.u
 is_rdbms = _source_type in _RDBMS_SOURCE_TYPES
 
 # Configure S3/Volume logging dynamically
-resolved_landing_path = source_sys.landing_volume_path
+resolved_landing_path = source_sys.raw_bucket_path
 if resolved_landing_path:
     s3_log_path = f"{resolved_landing_path.rstrip('/')}/logs/{pipeline_name or source_sys.source_name}_{job_run_id}.log"
     configure_s3_logging(s3_log_path, dbutils=dbutils)
@@ -539,7 +539,7 @@ elif is_rdbms:
             source_sys          = source_sys,
             ingest_obj          = task,
             config_master_id    = config_master_id,   # ← routing table ID from widget
-            landing_volume_path = resolved_landing_path,
+            raw_bucket_path = resolved_landing_path,
             trigger_id          = trigger_id,
             job_context          = job_context,
             sink_batch_started_date = batch_start_date,

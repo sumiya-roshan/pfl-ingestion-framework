@@ -6,9 +6,9 @@ read from config_source_system, so a single job can target a specific bucket.
 
 Output path structure
 ---------------------
-  <landing_volume_path> / <source_name> / <source_schema> / <source_object_name> / ingest_date=<YYYY-MM-DD> /
+  <raw_bucket_path> / <source_name> / <source_schema> / <source_object_name> / ingest_date=<YYYY-MM-DD> /
 
-  - landing_volume_path : base path from job widget (e.g. s3://pfl-raw/landing)
+  - raw_bucket_path : base path from job widget (e.g. s3://pfl-raw/landing)
   - source_name         : human-readable source system name → separates systems in the same bucket
   - source_schema       : DB schema / SFTP sub-folder
   - source_object_name  : table / file name
@@ -28,7 +28,7 @@ class S3RawWriter:
     def write(
         self,
         df: DataFrame,
-        landing_volume_path: str,
+        raw_bucket_path: str,
         source_name: str,
         source_schema: str | None,
         source_object_name: str,
@@ -42,7 +42,7 @@ class S3RawWriter:
 
         Parameters
         ----------
-        landing_volume_path : base path from job widget (S3 or Volume)
+        raw_bucket_path     : base path from job widget (S3 or Volume)
         source_name         : config_source_system.source_name (sub-folder)
         source_schema       : ingestion_config.source_schema (sub-folder; can be None)
         source_object_name  : ingestion_config.source_object_name (leaf folder)
@@ -53,7 +53,7 @@ class S3RawWriter:
         schema_part = f"{source_schema}/" if source_schema else ""
         print(type(file_timestamp),file_timestamp)
         target_path = (
-            f"{landing_volume_path.rstrip('/')}/"
+            f"{raw_bucket_path.rstrip('/')}/"
             f"{source_name}/"
             f"{schema_part}"
             f"{source_object_name}/"

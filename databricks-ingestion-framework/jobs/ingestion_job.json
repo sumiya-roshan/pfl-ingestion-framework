@@ -40,7 +40,7 @@
       "description": "Databricks job run ID — auto-populated from job context."
     },
     {
-      "name": "landing_volume_path",
+      "name": "raw_bucket_path",
       "default": "",
       "description": "Base S3/Volume path for raw landing (e.g. s3://pfl-raw/landing). Leave blank to skip."
     },
@@ -91,7 +91,7 @@
           "source_system_id":       "{{job.parameters.source_system_id}}",
           "pipeline_name":          "{{job.parameters.pipeline_name}}",
           "job_run_id":             "{{job.run_id}}",
-          "landing_volume_path":    "{{job.parameters.landing_volume_path}}",
+          "raw_bucket_path":    "{{job.parameters.raw_bucket_path}}",
           "environment":            "{{job.parameters.environment}}",
           "max_workers":            "{{job.parameters.max_workers}}",
           "trigger_type":           "SCHEDULED"
