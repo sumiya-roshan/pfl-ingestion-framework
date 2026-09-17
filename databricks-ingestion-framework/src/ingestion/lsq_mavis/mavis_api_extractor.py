@@ -40,6 +40,7 @@ does one task. The caller owns the summary print + ``dbutils.notebook.exit``.
 
 from __future__ import annotations
 
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -139,13 +140,32 @@ class MavisApiExtractor:
 
         When ``source_sys`` has ``secret_scope``/``secret_key_credentials`` set
         (e.g. scope='aws', key=<AWS Secrets Manager secret name>), the key is
-        fetched from there (plain-string secret — see ``SecretResolver.get``).
-        Otherwise falls back to the plaintext ``Prod_API_Key`` config column.
+        fetched from there via ``SecretResolver.get``. Otherwise falls back to
+        the plaintext ``Prod_API_Key`` config column.
+
+        AWS Secrets Manager's "Key/value" console tab always stores a JSON
+        object (e.g. ``{"lsq_mavis_api_secret": "..."}``) even for a single
+        value — a raw value only comes back as-is when the secret was created
+        via the "Plaintext" tab. To support either, a single-key JSON object
+        is unwrapped automatically; anything else (plain string, or JSON with
+        more than one key) is used as-is / raises, respectively.
         """
         scope = getattr(source_sys, "secret_scope", None)
         key = getattr(source_sys, "secret_key_credentials", None)
         if scope and key:
-            return self.secrets.get(scope, key)
+            raw = self.secrets.get(scope, key)
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                return raw
+            if isinstance(payload, dict) and len(payload) == 1:
+                return str(next(iter(payload.values())))
+            raise RuntimeError(
+                f"config_id={task.config_id}: secret scope='{scope}' key='{key}' "
+                f"is a JSON object but doesn't have exactly one field — store "
+                f"it as a single key/value pair or as a plain string. "
+                f"Keys found: {list(payload) if isinstance(payload, dict) else type(payload).__name__}"
+            )
         if not task.prod_api_key:
             raise RuntimeError(
                 f"config_id={task.config_id}: no API key available — set "
