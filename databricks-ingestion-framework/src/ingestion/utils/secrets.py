@@ -140,7 +140,17 @@ class SecretResolver:
             try:
                 import boto3
 
-                client = boto3.client("secretsmanager")
+                region = (
+                    os.environ.get("AWS_DEFAULT_REGION")
+                    or os.environ.get("AWS_REGION")
+                )
+                if not region:
+                    raise ValueError(
+                        "AWS region not set — export AWS_DEFAULT_REGION (or "
+                        "AWS_REGION) on the cluster, e.g. 'ap-south-1'."
+                    )
+
+                client = boto3.client("secretsmanager", region_name=region)
                 response = client.get_secret_value(SecretId=key)
                 if "SecretString" in response:
                     return response["SecretString"]
