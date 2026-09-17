@@ -152,7 +152,7 @@ class AuditLogger:
                     execution_duration_sec = CAST(
                         unix_timestamp(current_timestamp()) - unix_timestamp(trigger_time)
                         AS DECIMAL(10, 2)),
-                    status                  = {self._sql_literal(status)},
+                    Execution_Status        = {self._sql_literal(status)},
                     rows_read               = {int(rows_read or 0)},
                     rows_copied             = {int(rows_copied or 0)},
                     rows_deleted            = {int(rows_deleted or 0)},
@@ -164,7 +164,7 @@ class AuditLogger:
                     error_message           = {self._sql_literal(error_message)}
                 WHERE job_run_id = {self._sql_literal(audit_run["job_run_id"])}
                   AND table_id = {int(audit_run["table_id"])}
-                  AND status = {self._sql_literal(AUDIT_STATUS_INPROGRESS)}
+                  AND Execution_Status = {self._sql_literal(AUDIT_STATUS_INPROGRESS)}
             """)
 
     def fail_run(
@@ -304,7 +304,7 @@ class AuditLogger:
                 StructField("databricks_notebook_name", StringType(), True),
                 StructField("databricks_url", StringType(), True),
                 StructField("operation_performed", StringType(), True),
-                StructField("status", StringType(), True),
+                StructField("Execution_Status", StringType(), True),
                 StructField("error_code", StringType(), True),
                 StructField("error_message", StringType(), True),
             ]

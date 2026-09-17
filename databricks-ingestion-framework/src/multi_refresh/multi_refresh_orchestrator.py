@@ -171,7 +171,7 @@ def process_rdbms_multi_refresh(
             LEFT JOIN (
                 SELECT distinct config_master_id, config_id
                 FROM {DEP_MASTER_TABLE}
-                WHERE dependency_resolve_time IS NULL 
+                WHERE Dependency_Resolved_Time IS NULL 
                   AND Is_Active = true
             ) c ON a.Config_Master_ID = c.config_master_id AND a.Config_ID = c.config_id
         ) final
@@ -233,8 +233,8 @@ def process_rdbms_multi_refresh(
         ) s
         ON t.config_master_id = s.config_master_id
        AND t.config_id        = s.config_id
-       AND coalesce(to_date(t.dependency_resolve_time), '1900-01-01') = current_date()
-        WHEN MATCHED THEN UPDATE SET dependency_resolve_time = null
+       AND coalesce(to_date(t.Dependency_Resolved_Time), '1900-01-01') = current_date()
+        WHEN MATCHED THEN UPDATE SET Dependency_Resolved_Time = null
     """)
 
     # MERGE 3: Update Last_Sink_Date in schedule table
@@ -333,7 +333,7 @@ def _resolve_child_table_fqn(config_master_id: int) -> str:
     """
     master_rows = (
         spark.table(CONFIG_MASTER_TABLE)
-        .filter(f"config_id = {int(config_master_id)}")
+        .filter(f"Config_ID = {int(config_master_id)}")
         .collect()
     )
     if not master_rows:
@@ -341,7 +341,7 @@ def _resolve_child_table_fqn(config_master_id: int) -> str:
             f"No entry in {CONFIG_MASTER_TABLE} for config_id={config_master_id}"
         )
     m_row = master_rows[0].asDict()
-    return f"{m_row.get('config_catalog_name')}.{m_row.get('config_schema_name')}.{m_row.get('config_table_name')}"
+    return f"{m_row.get('Config_Catalog_Name')}.{m_row.get('Config_Schema_Name')}.{m_row.get('Config_Table_Name')}"
 
 
 def _active_pipeline_names(child_table_fqn: str) -> set:

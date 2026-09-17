@@ -114,7 +114,7 @@ class DependencyLogger:
                     target.config_master_id        = source.config_master_id,
                     target.table_name              = source.table_name,
                     target.pipeline_name           = source.pipeline_name,
-                    target.is_active               = true,
+                    target.Is_Active               = true,
                     target.job_run_id              = source.job_run_id,
                     target.business_date           = source.business_date,
                     target.pipeline_start_time     = source.pipeline_start_time,
@@ -123,14 +123,14 @@ class DependencyLogger:
                     target.source_to_raw_end_time   = NULL,
                     target.raw_to_silver_start_time = NULL,
                     target.raw_to_silver_end_time   = NULL,
-                    target.dependency_resolve_time  = NULL
+                    target.Dependency_Resolved_Time  = NULL
                 WHEN NOT MATCHED THEN INSERT (
                     config_master_id, source_system_id, config_id, table_name,
-                    pipeline_name, is_active, job_run_id, business_date,
+                    pipeline_name, Is_Active, job_run_id, business_date,
                     pipeline_start_time, pipeline_end_time,
                     source_to_raw_start_time, source_to_raw_end_time,
                     raw_to_silver_start_time, raw_to_silver_end_time,
-                    dependency_resolve_time
+                    Dependency_Resolved_Time
                 )
                 VALUES (
                     source.config_master_id, source.source_system_id, source.config_id, source.table_name,
@@ -171,7 +171,7 @@ class DependencyLogger:
         today's data for this table is safe to consume. Call this only after
         Silver has actually succeeded for this table's run.
         """
-        self._touch(dep_run, "dependency_resolve_time")
+        self._touch(dep_run, "Dependency_Resolved_Time")
 
     def mark_resolved_from_silver_last_sink(
         self, dep_run: dict[str, Any], silver_last_sink_date
@@ -191,7 +191,7 @@ class DependencyLogger:
         with self._write_lock:
             self.spark.sql(f"""
                 UPDATE {self.table}
-                SET dependency_resolve_time = {self._sql_literal(silver_last_sink_date)}
+                SET Dependency_Resolved_Time = {self._sql_literal(silver_last_sink_date)}
                 WHERE config_id        = {int(dep_run["config_id"])}
                   AND source_system_id = {int(dep_run["source_system_id"])}
             """)

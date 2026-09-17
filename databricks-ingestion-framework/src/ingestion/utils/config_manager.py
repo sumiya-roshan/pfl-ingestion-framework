@@ -20,11 +20,11 @@ import json
 from dataclasses import dataclass
 
 # ── Fully-qualified table name defaults ───────────────────────────────────────
-SOURCE_SYSTEM_TABLE = "migration_x_catalog.pfl_x_schema.config_source_system"
-CONFIG_MASTER_TABLE = "migration_x_catalog.pfl_x_schema.config_master"
-AUDIT_TABLE = "migration_x_catalog.pfl_x_schema.tb_audit_log"
-DEPENDENCY_TABLE = "migration_x_catalog.pfl_x_schema.dependency_master_config"
-PIPELINE_MASTER_CONFIG_TABLE = "migration_x_catalog.pfl_x_schema.tb_pipeline_master_config"
+SOURCE_SYSTEM_TABLE = "pfl_admin_catalog.config.tb_source_connection_config"
+CONFIG_MASTER_TABLE = "pfl_admin_catalog.config.tb_config_master"
+AUDIT_TABLE = "pfl_admin_catalog.logs.tb_audit_log"
+DEPENDENCY_TABLE = "pfl_admin_catalog.config.tb_dependency_master_config"
+PIPELINE_MASTER_CONFIG_TABLE = "pfl_admin_catalog.config.tb_pipeline_master_config"
 
 # Audit lifecycle values shared by the entry point, orchestrator, and logger.
 AUDIT_STATUS_INPROGRESS = "INPROGRESS"
@@ -347,7 +347,7 @@ def resolve_child_table_fqn(spark, config_master_table: str, config_master_id: i
     """
     rows = (
         spark.table(config_master_table)
-        .filter(f"config_id = {int(config_master_id)}")
+        .filter(f"Config_ID = {int(config_master_id)}")
         .collect()
     )
     if not rows:
@@ -356,9 +356,9 @@ def resolve_child_table_fqn(spark, config_master_table: str, config_master_id: i
         )
     m = rows[0].asDict()
     return (
-        f"{m.get('config_catalog_name')}."
-        f"{m.get('config_schema_name')}."
-        f"{m.get('config_table_name')}"
+        f"{m.get('Config_Catalog_Name')}."
+        f"{m.get('Config_Schema_Name')}."
+        f"{m.get('Config_Table_Name')}"
     )
 
 
@@ -604,8 +604,8 @@ class ConfigManager:
         business_date = sink_batch_started_date.date()
 
         set_clauses = [
-            f"status        = {self._sql_literal(AUDIT_STATUS_SUCCESS)}",
-            f"business_date  = {self._sql_literal(business_date)}",
+            f"Status        = {self._sql_literal(AUDIT_STATUS_SUCCESS)}",
+            f"Business_Date  = {self._sql_literal(business_date)}",
             f"rownum         = {int(rownum )}",
             f"data_size      = {int(data_size)}",
         ]
@@ -613,7 +613,7 @@ class ConfigManager:
         self.spark.sql(f"""
             UPDATE {child_table_fqn}
             SET {", ".join(set_clauses)}
-            WHERE config_id = {int(ingest_obj.config_id)}
+            WHERE Config_ID = {int(ingest_obj.config_id)}
         """)
 
     def update_silver_last_sink_date(
