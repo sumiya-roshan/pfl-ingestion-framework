@@ -1,0 +1,80 @@
+resources:
+  jobs:
+    finnone_kkk_load:
+      name: PL_Finnone_Recon_KKK_Load
+
+      # ── Job-level parameters ────────────────────────────────────────────────
+      # batch_start_date    : "1" → generate IST now; any real timestamp → replay.
+      # source_system_id    : PK in tb_source_connection_config for the FinnOne
+      #                       Oracle replica row. Drives JDBC creds + raw_s3_bucket.
+      # admin_catalog_name  : Unity Catalog admin catalog (e.g. pfl_admin_catalog).
+      # silver_catalog_name : Silver Unity Catalog (e.g. pfl_silver_catalog) —
+      #                       prefixed to Sink_Schema_Name in the audit target_schema.
+      # silver_notebook_path: Workspace path to the PFL KKK raw-to-silver notebook.
+      # email_to            : Completion notification recipient(s), comma-separated.
+      # environment         : dev | uat | prod — used in email subject.
+      parameters:
+        - name: batch_start_date
+          default: "1"
+        - name: source_system_id
+          default: ""
+        - name: admin_catalog_name
+          default: ""
+        - name: silver_catalog_name
+          default: ""
+        - name: silver_notebook_path
+          default: "/PFL/Delta-Lake/Silver/Finnone/load_kkk_raw_to_silver"
+        - name: email_to
+          default: "divyanshu.rathore@poonawallafincorp.com"
+        - name: environment
+          default: ${bundle.target}
+        - name: job_run_id
+          default: "{{job.run_id}}"
+
+      tags:
+        team: data-engineering
+        framework: config-driven-ingestion
+        source: FinnOne
+
+      # ── Tasks ───────────────────────────────────────────────────────────────
+      tasks:
+        # Single task — no DD validation step in this pipeline.
+        # Covers: LK_Get_Total_Dependent_Table_Count, LK_Get_KKK_Config_Details,
+        # CP_Load_KKK_Table_Source_To_Raw, NB_Load_KKK_Raw_To_Silver,
+        # EX_PL_Audit_Log_Insertion, SV_Status, Wait, PL_Email_Notification_Basic_SHIR.
+        - task_key: kkk_load
+          notebook_task:
+            notebook_path: ../src/finnone/finnone_kkk_load_orchestrator
+            base_parameters:
+              batch_start_date:    "{{job.parameters.batch_start_date}}"
+              source_system_id:    "{{job.parameters.source_system_id}}"
+              admin_catalog_name:  "{{job.parameters.admin_catalog_name}}"
+              silver_catalog_name: "{{job.parameters.silver_catalog_name}}"
+              silver_notebook_path: "{{job.parameters.silver_notebook_path}}"
+              email_to:            "{{job.parameters.email_to}}"
+              environment:         "{{job.parameters.environment}}"
+              job_run_id:          "{{job.run_id}}"
+            source: WORKSPACE
+          environment_key: Default
+          timeout_seconds: 43200    # 12 h ceiling — matches ADF Until loop timeout
+          max_retries: 0
+
+      # ── Queue & scheduling ──────────────────────────────────────────────────
+      queue:
+        enabled: true
+
+      # Adjust cron to match the FinnOne KKK load schedule.
+      # Paused by default until go-live.
+      schedule:
+        quartz_cron_expression: "0 0 1 * * ?"
+        timezone_id: UTC
+        pause_status: PAUSED
+
+      max_concurrent_runs: 1
+
+      environments:
+        - environment_key: Default
+          spec:
+            environment_version: "5"
+
+      performance_target: PERFORMANCE_OPTIMIZED

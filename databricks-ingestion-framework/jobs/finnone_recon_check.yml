@@ -1,0 +1,95 @@
+resources:
+  jobs:
+    finnone_recon_check:
+      name: PL_Finnone_Recon_Check
+
+      # ── Job-level parameters ────────────────────────────────────────────────
+      # batch_start_date : "1" → generate IST now (fresh run); any real
+      #                    timestamp → replay that specific batch.
+      # source_system_id : PK in tb_source_connection_config for the FinnOne
+      #                    Oracle replica row. Drives JDBC credentials and
+      #                    raw_bucket_path (base ADLS path for Parquet output).
+      # admin_catalog_name : Unity Catalog admin catalog (e.g. pfl_admin_catalog).
+      # main_job_id        : Databricks Job ID of the generic_source_to_bronze_ingestion
+      #                      job that runs FinnOne ingestion (PL_Finnone_Main equivalent).
+      # dd_validation_job_id : Databricks Job ID of the PL_DD_Validation job.
+      # environment        : dev | uat | prod — used in email subjects.
+      # recon_notebook_path : Workspace path to the PFL recon notebook (code_part=1/2).
+      parameters:
+        - name: batch_start_date
+          default: "1"
+        - name: source_system_id
+          default: ""
+        - name: admin_catalog_name
+          default: ""
+        - name: main_job_id
+          default: ""
+        - name: dd_validation_job_id
+          default: ""
+        - name: environment
+          default: ${bundle.target}
+        - name: recon_notebook_path
+          default: "/PFL/Admin/Config/Data_Reconciliation/finnone_kkk_replica_recon_check_by_adf"
+
+      tags:
+        team: data-engineering
+        framework: config-driven-ingestion
+        source: FinnOne
+
+      # ── Tasks ───────────────────────────────────────────────────────────────
+
+      tasks:
+        # ── Task 1: DD Validation ─────────────────────────────────────────────
+        # Equivalent of ADF activity PL_Finnone_Data_Dictionary (ExecutePipeline).
+        # Runs the existing PL_DD_Validation job (source_name = FinnOne) and
+        # waits for it to complete before proceeding.
+        - task_key: dd_validation
+          run_job_task:
+            job_id: "{{job.parameters.dd_validation_job_id}}"
+            job_parameters:
+              source_name: FinnOne
+              batch_start_date: "{{job.parameters.batch_start_date}}"
+
+        # ── Task 2: Recon Orchestrator ────────────────────────────────────────
+        # Single notebook that covers all remaining ADF activities in sequence:
+        #   • Recon Part 1 (code_part=1)  → replica_query + file_present
+        #   • Oracle Copy                  → JDBC read + Parquet write to ADLS
+        #   • Recon Part 2 (code_part=2)  → actual recon validation
+        #   • Trigger main ingestion job   → fire-and-forget REST API call
+        #   • Poll until complete          → 900 s loop + progress emails
+        - task_key: finnone_recon_main
+          depends_on:
+            - task_key: dd_validation
+          notebook_task:
+            notebook_path: ../src/finnone/finnone_recon_orchestrator
+            base_parameters:
+              batch_start_date:    "{{job.parameters.batch_start_date}}"
+              source_system_id:    "{{job.parameters.source_system_id}}"
+              admin_catalog_name:  "{{job.parameters.admin_catalog_name}}"
+              main_job_id:         "{{job.parameters.main_job_id}}"
+              environment:         "{{job.parameters.environment}}"
+              recon_notebook_path: "{{job.parameters.recon_notebook_path}}"
+            source: WORKSPACE
+          environment_key: Default
+          timeout_seconds: 86400    # 24 h ceiling — poll loop can run up to 12 h
+          max_retries: 0
+
+      # ── Queue & scheduling ──────────────────────────────────────────────────
+      queue:
+        enabled: true
+
+      # Daily at 00:00 IST (18:30 UTC previous day) — adjust as needed.
+      # Set pause_status: UNPAUSED when ready to go live.
+      schedule:
+        quartz_cron_expression: "0 30 18 * * ?"
+        timezone_id: UTC
+        pause_status: PAUSED
+
+      max_concurrent_runs: 1
+
+      environments:
+        - environment_key: Default
+          spec:
+            environment_version: "5"
+
+      performance_target: PERFORMANCE_OPTIMIZED
