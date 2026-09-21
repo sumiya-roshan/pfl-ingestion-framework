@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md
 # MAGIC # Get Ingestion Tasks Metadata
 # MAGIC
@@ -14,7 +18,7 @@ dbutils.library.restartPython()
 import sys
 sys.path.append("..")
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone,timedelta
 from ingestion.utils.config_manager import (
     CONFIG_MASTER_TABLE,
     MAVIS_STATUS_NOT_STARTED,
@@ -28,6 +32,8 @@ from ingestion.utils.config_manager import (
 # source_name/retry. This id only tells the notebook to run the Mavis-shaped
 # Stage-1 batch reset below (in place of the RDBMS one) and skip pipeline_name.
 MAVIS_CONFIG_MASTER_ID = 999
+ist = timezone(timedelta(hours=5, minutes=30))
+
 
 # COMMAND ----------
 
@@ -58,7 +64,7 @@ if is_mavis and not source_system_id_raw:
 if not is_mavis and not source_system_id_raw and not source_name:
     dbutils.notebook.exit("Error: either source_system_id or source_name is required.")
 
-source_system_id = int(source_system_id_raw) if source_system_id_raw else None
+
 
 # COMMAND ----------
 
@@ -67,20 +73,20 @@ config_mgr = ConfigManager(
     source_system_table=SOURCE_SYSTEM_TABLE,
     config_master_table=CONFIG_MASTER_TABLE,
 )
+source_system_id     = int(source_system_id_raw) if source_system_id_raw else None
+trigger_time         = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S.%f")
+if batch_start_date != "1":
+    trigger_time     = batch_start_date 
 
 # Resolve the child table early — before the pipeline_name check and batch
 # reset below — so the Lentra shape can be detected by its own columns
 # (ConfigManager.is_lentra_shaped), the same way get_active_tasks() does.
-# Skipped for Mavis — Mavis is routed by a reserved config_master_id, not
-# table-shape detection, and its own reset logic resolves child_table_fqn
-# itself below. Lentra doesn't use pipeline_name for filtering and has its
-# own reset shape (Report_Name like 'lentra%hdr', no
-# Day_Execution_Count/batch-date stamping).
+
 is_lentra = False
 if not is_mavis:
     child_table_fqn = resolve_child_table_fqn(spark, CONFIG_MASTER_TABLE, config_master_id)
-    _child_columns = spark.table(child_table_fqn).columns
-    is_lentra = config_mgr.is_lentra_shaped(_child_columns)
+    _child_columns  = spark.table(child_table_fqn).columns
+    is_lentra       = config_mgr.is_lentra_shaped(_child_columns)
 
 if not is_mavis and not is_lentra and not pipeline_name:
     dbutils.notebook.exit("Error: pipeline_name widget is required.")
@@ -94,21 +100,18 @@ if not is_mavis and not is_lentra and not pipeline_name:
 if is_mavis:
     # LSQ_Mavis two-stage reset (ported from ADF). source_name from
     # config_source_system, table FQN from config_master — resolved the normal
-    # ConfigManager way. batch_start_date "1" == fresh run (generate now()),
-    # any real value == re-run for that historical batch.
     mavis_source_name = config_mgr.get_source_system(source_system_id).source_name
     mavis_fqn = config_mgr._child_table_fqn(config_master_id)
     _mcols = spark.table(mavis_fqn).columns
 
 
     if batch_start_date == "1":
-        batch_start_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         spark.sql(f"""
             UPDATE {mavis_fqn}
             SET status = 'Not_started', Day_Execution_Count = 0,
-                sink_batch_started_date = TIMESTAMP '{batch_start_date}'
+                sink_batch_started_date = TIMESTAMP '{trigger_time}'
             WHERE source_name = '{mavis_source_name}' AND is_active = 1
-              AND (to_date(sink_batch_started_date) != DATE '{batch_start_date[:10]}'
+              AND (to_date(sink_batch_started_date) != DATE '{trigger_time[:10]}'
                    OR sink_batch_started_date IS NULL)
         """)
     else:
@@ -117,9 +120,9 @@ if is_mavis:
             SET status = 'Not_started'
             WHERE source_name = '{mavis_source_name}' AND is_active = 1
               AND date_format(sink_batch_started_date, 'yyyy-MM-dd HH:mm:ss')
-                  = date_format(TIMESTAMP '{batch_start_date}', 'yyyy-MM-dd HH:mm:ss')
+                  = date_format(TIMESTAMP '{trigger_time}', 'yyyy-MM-dd HH:mm:ss')
         """)
-    print("mavis batch_start_date", batch_start_date)
+    print("mavis trigger_time", trigger_time)
 
 elif is_lentra:
     # source_name given directly (the normal Lentra path — no
@@ -143,8 +146,8 @@ elif is_lentra:
     # the run (published to main.py as-is, never a real timestamp). Not
     # written back to the table — nothing reads it back for Lentra, it's
     # only needed as the in-memory value published downstream.
-    if batch_start_date == "1":
-        batch_start_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+    # if batch_start_date == "1":
+    #     batch_start_date = datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S.%f")
 
     spark.sql(f"""
         UPDATE {child_table_fqn}
@@ -155,31 +158,21 @@ elif is_lentra:
     """)
     print(
         f"[Lentra] reset Status for source_name={lentra_source_name!r}, "
-        f"batch_start_date={batch_start_date!r}"
+        f"batch_start_date={trigger_time!r}"
     )
 
-elif batch_start_date == "1":
-    # Batch start: flip to In Progress, reset Day_Execution_Count to 0, and stamp
-    # sink_batch_started_date ONCE. Generate the UTC timestamp here in Python and
-    # pass it as a literal so every matching row gets the exact same value (this is
-    # the only place this column is written per run). TODO: move to a batch-init notebook.
-    batch_start_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
-    spark.sql(f"""
-        UPDATE migration_x_catalog.pfl_x_schema.rdbms_ingestion_config
-        SET Status = 'In Progress', Day_Execution_Count = 0,
-            sink_batch_started_date = TIMESTAMP '{batch_start_date}'
-        WHERE Source_Name = 'PG_TEST_RDS'
-    """)
-    print("batch_start_date", batch_start_date, type(batch_start_date))
-
-# dbutils.notebook.run(
-#     "./start_batch",  # TODO: point to the actual batch-init notebook
-#     600,
-#     {
-#         "source_id": str(source_system_id),
-#         "batch_start_date": batch_start_date,
-#     },
-# )
+else:
+    
+    if config_mgr.get_source_system(source_system_id).source_name in ["CCA","PENANT"]:
+        dbutils.notebook.run(
+            "/Workspace/Deployed-Assets/.bundle/pfl-dbx-datalake/dev/files/PFL/Admin/Config/Initialize_Config_Status/initialize_execution_flag_&_status",  
+            1800,
+            {
+                "source_system": config_mgr.get_source_system(source_system_id).source_name,
+                "batch_start_date": batch_start_date,
+                "trigger_time": trigger_time,
+            },
+        )
 
 # COMMAND ----------
 
@@ -188,11 +181,11 @@ elif batch_start_date == "1":
 # LentraIngestionTaskConfig for a Lentra-shaped source, IngestionTaskConfig
 # otherwise; routing / filtering is identical.
 source_sys, tasks = config_mgr.get_active_tasks(
-    config_master_id=config_master_id,
-    source_system_id=source_system_id,
-    source_name=source_name,
-    pipeline_name=None if is_mavis else pipeline_name,
-    batch_start_date=batch_start_date,
+                    config_master_id =config_master_id,
+                    source_system_id =source_system_id,
+                    source_name      =source_name,
+                    pipeline_name    =pipeline_name,
+                    batch_start_date =trigger_time,
 )
 
 print(f"Resolved source : {source_sys.source_name} ({source_sys.source_type})")
@@ -215,7 +208,7 @@ if not tasks:
 payload = {
     "source_sys": source_sys.to_dict(),
     "tasks": [task.to_dict() for task in tasks],
-    "batch_start_date" : batch_start_date,
+    "batch_start_date" : trigger_time,
     "is_lentra": is_lentra,
 }
 payload_str = json.dumps(payload)
@@ -228,7 +221,6 @@ try:
 except Exception as e:
     print(f"[INFO] taskValues not available (standalone mode): {e}")
 
-_scope = "LSQ_Mavis" if is_mavis else f"pipeline '{pipeline_name}'"
 dbutils.notebook.exit(
-    f"Success: Fetched {len(tasks)} active tasks for {_scope}."
+    f"Success: Fetched {len(tasks)} active tasks for."
 )
