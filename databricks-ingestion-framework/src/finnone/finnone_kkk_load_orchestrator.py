@@ -463,7 +463,6 @@ while True:
             int(rows_read),                     # rows_read
             int(silver_output.get("row_count", 0)),   # rows_copied
             int(silver_output.get("rows_deleted", 0)),          # rows_deleted
-            int(silver_output.get("rows_affected", 0)),         # rows_affected
             int(silver_output.get("data_read_bytes", 0)),       # data_read_bytes
             int(silver_output.get("data_written_bytes", 0)),    # data_written_bytes
             None,                               # throughput_mb_per_sec

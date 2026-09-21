@@ -296,7 +296,6 @@ class AuditLogger:
                 StructField("rows_read", LongType(), True),
                 StructField("rows_copied", LongType(), True),
                 StructField("rows_deleted", LongType(), True),
-                StructField("rows_affected", LongType(), True),
                 StructField("data_read_bytes", LongType(), True),
                 StructField("data_written_bytes", LongType(), True),
                 StructField("throughput_mb_per_sec", DecimalType(10, 2), True),
