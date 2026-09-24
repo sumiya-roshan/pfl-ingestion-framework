@@ -1,4 +1,26 @@
-﻿# COMMAND ----------
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Batch Runner — Parallel Table Execution for One Batch
+# MAGIC
+# MAGIC Called by `main.py` via `dbutils.notebook.run()` — one instance per `batch_id`.
+# MAGIC Receives the pre-serialised tasks for its batch and runs them in parallel up to
+# MAGIC `batch_count` workers, submitted in priority order.
+# MAGIC
+# MAGIC This mirrors ADF ForEach activity with sequential = OFF and batchCount = N.
+# MAGIC Each batch pipeline runs as an independent notebook execution on the same cluster,
+# MAGIC so batches are isolated from each other failures while still sharing cluster resources.
+# MAGIC
+# MAGIC **Exit contract:** always calls dbutils.notebook.exit(json.dumps(results))
+# MAGIC where results is a list of per-table result dicts (same schema as
+# MAGIC IngestionOrchestrator.run() return value). Never raises partial failures
+# MAGIC are captured inside the results list so main.py can aggregate them.
+# MAGIC
+# MAGIC **Note:** dependency_master_config.complete_job() is intentionally NOT
+# MAGIC called here. main.py calls it once after all batch notebooks finish, so
+# MAGIC all rows for this job_run_id get bulk-stamped with pipeline_end_time in
+# MAGIC a single operation.
+
+# COMMAND ----------
 
 # MAGIC %pip install python-dotenv --quiet
 # MAGIC dbutils.library.restartPython()
@@ -39,7 +61,7 @@ from ingestion.utils.orchestrator import IngestionOrchestrator
 # COMMAND ----------
 
 dbutils.widgets.text("batch_id",                "",      "Batch ID to process (int)")
-dbutils.widgets.text("batch_count",             "10",    "Max parallel tables in this batch — mirrors ADF ForEach batchCount")
+dbutils.widgets.text("batch_count",             "10",    "Max parallel tables in this batch")
 dbutils.widgets.text("batch_tasks_json",        "",      "JSON-serialised list of IngestionTaskConfig dicts for this batch")
 dbutils.widgets.text("source_sys_json",         "",      "JSON-serialised SourceSystemConfig dict")
 dbutils.widgets.text("job_context_json",        "",      "JSON-serialised job context dict from main.py")
@@ -68,8 +90,6 @@ batch_start_date_str    = dbutils.widgets.get("batch_start_date") or ""
 silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
 resolved_landing_path   = dbutils.widgets.get("resolved_landing_path") or None
 
-# Validate required inputs — exit with a failed result list (not a raise) so
-# main.py can always json.loads() the exit value regardless of what went wrong.
 if not batch_id_raw:
     dbutils.notebook.exit(json.dumps([{
         "config_id": -1, "status": AUDIT_STATUS_FAILED,
@@ -90,21 +110,17 @@ batch_id = int(batch_id_raw)
 
 # COMMAND ----------
 
-# Parse batch_start_date
 if batch_start_date_str and batch_start_date_str.strip() not in ("", "1"):
     batch_start_date = datetime.fromisoformat(batch_start_date_str.strip())
 else:
     batch_start_date = datetime.now(timezone.utc)
 
-# Deserialise tasks, source system config, and job context
 tasks       = [IngestionTaskConfig.from_dict(t) for t in json.loads(batch_tasks_json)]
 source_sys  = SourceSystemConfig.from_dict(json.loads(source_sys_json))
 job_context = json.loads(job_context_json)
 
 logger = get_logger(environment=environment)
 
-# Per-batch S3 log file — keeps each batch`s logs separate from main.py`s
-# job-level log and from other concurrent batch notebooks.
 if resolved_landing_path:
     s3_log_path = (
         f"{resolved_landing_path.rstrip('/')}/logs/"
@@ -113,8 +129,7 @@ if resolved_landing_path:
     configure_s3_logging(s3_log_path, dbutils=dbutils)
 
 logger.info(
-    f"[Batch {batch_id}] Starting {len(tasks)} table(s) "
-    f"with batch_count={batch_count} workers"
+    f"[Batch {batch_id}] Starting {len(tasks)} table(s) with batch_count={batch_count} workers"
 )
 print(
     f"[Batch {batch_id}] Tables (priority order): "
@@ -159,11 +174,6 @@ def run_one(task: IngestionTaskConfig) -> dict:
 
 # MAGIC %md
 # MAGIC ### Execute — parallel within this batch (ADF ForEach batchCount parity)
-# MAGIC
-# MAGIC Tables are submitted to the pool in ascending priority order so that
-# MAGIC lower-priority values get scheduled first when pool slots are free.
-# MAGIC All tables up to `batch_count` fire concurrently — identical to ADF
-# MAGIC ForEach with `sequential = OFF, batchCount = batch_count`.
 
 # COMMAND ----------
 
@@ -223,7 +233,7 @@ print(
 _upload_on_exit()
 
 # Return all results to main.py as a JSON string for aggregation.
-# NOTE: dependency_logger.complete_job() is intentionally NOT called here —
-# main.py does it once after ALL batch notebooks return, bulk-stamping
+# NOTE: dependency_logger.complete_job() is intentionally NOT called here.
+# main.py calls it once after ALL batch notebooks return, bulk-stamping
 # pipeline_end_time onto every dependency_master_config row for this run.
 dbutils.notebook.exit(json.dumps(results))
