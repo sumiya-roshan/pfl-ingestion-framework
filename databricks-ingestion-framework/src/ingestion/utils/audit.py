@@ -122,7 +122,7 @@ class AuditLogger:
         with self._write_lock:
             self.spark.createDataFrame(row, schema=self._schema()).writeTo(
                 self.table
-            ).using("delta").append()
+            ).option("mergeSchema", "true").using("delta").append()
         return {"job_run_id": job_run_id, "table_id": table_id}
 
     def complete_run(
@@ -254,7 +254,7 @@ class AuditLogger:
         with self._write_lock:
             self.spark.createDataFrame(row, schema=self._schema()).writeTo(
                 self.table
-            ).using("delta").append()
+            ).option("mergeSchema", "true").using("delta").append()
 
     @staticmethod
     def _required_string(value: Any, default: str = "UNKNOWN") -> str:

@@ -44,16 +44,14 @@ from ingestion.utils.config_manager import (
     AUDIT_STATUS_FAILED,
     AUDIT_STATUS_SKIPPED,
     AUDIT_STATUS_SUCCESS,
-    AUDIT_TABLE,
-    CONFIG_MASTER_TABLE,
-    DEPENDENCY_TABLE,
+    DEFAULT_CATALOG,
     MAVIS_SOURCE_NAME,
-    SOURCE_SYSTEM_TABLE,
     ConfigManager,
     IngestionTaskConfig,
     LentraIngestionTaskConfig,
     MavisIngestionTaskConfig,
     SourceSystemConfig,
+    build_table_refs,
     get_pipeline_notification_recipients,
 )
 from ingestion.utils.email_notifier import GraphMailNotifier
@@ -73,6 +71,7 @@ dbutils.widgets.text("source_name",         "",               "Lentra only: sour
 dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (required for RDBMS/NoSQL/S3, not Lentra)")
 dbutils.widgets.text("job_run_id",          "",               "Job Run ID (required) — set to {{job.run_id}} in job config")
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
+dbutils.widgets.text("catalog_name",        DEFAULT_CATALOG,  "Unity Catalog name for admin/config tables — changes per environment")
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
 dbutils.widgets.text("silver_notebook_timeout", "3600",       "Max seconds to wait for each Silver notebook run")
 dbutils.widgets.text("lentra_load_notebook_path", "",       "Lentra only: workspace path to the client-provided load_raw_to_silver notebook")
@@ -106,8 +105,18 @@ if not job_run_id:
     dbutils.notebook.exit("Error: job_run_id widget is required and cannot be empty.")
 
 environment          = dbutils.widgets.get("environment")          or "dev"
+catalog_name         = dbutils.widgets.get("catalog_name")         or DEFAULT_CATALOG
 batch_start_date     = dbutils.widgets.get("batch_start_date")     or "1"
 logger               = get_logger(environment=environment)
+
+# Build fully-qualified table names from the catalog_name job parameter.
+# Schema/table names are fixed across environments — only the catalog changes.
+_refs                = build_table_refs(catalog_name)
+SOURCE_SYSTEM_TABLE          = _refs["source_system_table"]
+CONFIG_MASTER_TABLE          = _refs["config_master_table"]
+AUDIT_TABLE                  = _refs["audit_table"]
+DEPENDENCY_TABLE             = _refs["dependency_table"]
+PIPELINE_MASTER_CONFIG_TABLE = _refs["pipeline_master_config_table"]
 
 silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
 
@@ -137,16 +146,30 @@ def get_databricks_job_context():
             return getattr(context, method_name)().get()
         except Exception:
             return None
-    databricks_url = get_context_value("apiUrl")
+    def get_tag_value(tag_name):
+        try:
+            return context.tags().get(tag_name).get()
+        except Exception:
+            return None
+
+    # Prefer browserHostName (the dbc-xxx workspace URL) over apiUrl
+    host_name = get_tag_value("browserHostName")
+    if host_name:
+        databricks_url = f"https://{host_name}"
+    else:
+        databricks_url = get_context_value("apiUrl")
+
     try:
-        job_id     = dbutils.widgets.get("job_id")
+        job_id = dbutils.widgets.get("job_id")
     except Exception:
-        job_id     = None
-    databricks_url = (
-        f"{databricks_url}/#job/{job_id}"
-        if databricks_url and job_id
-        else None
-    )
+        job_id = None
+        
+    if databricks_url and job_id:
+        # Check if URL already has workspace id (o=) or we can just append #job/
+        databricks_url = f"{databricks_url}/#job/{job_id}"
+    else:
+        databricks_url = None
+
     return {
         "job_id": get_context_value("jobId"),
         "job_name": get_context_value("jobName"),

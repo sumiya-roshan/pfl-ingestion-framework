@@ -16,10 +16,10 @@ sys.path.append("..")
 import json
 from datetime import datetime, timezone
 from ingestion.utils.config_manager import (
-    CONFIG_MASTER_TABLE,
+    DEFAULT_CATALOG,
     MAVIS_STATUS_NOT_STARTED,
-    SOURCE_SYSTEM_TABLE,
     ConfigManager,
+    build_table_refs,
     resolve_child_table_fqn,
 )
 
@@ -36,6 +36,7 @@ dbutils.widgets.text("source_system_id", "", "Source System ID (RDBMS/NoSQL/S3)"
 dbutils.widgets.text("source_name", "", "Lentra only: source name directly (matches the config table's Source_Name exactly) — alternative to source_system_id")
 dbutils.widgets.text("pipeline_name", "", "Pipeline Name")
 dbutils.widgets.text("batch_start_date", "1", "Batch Start Date")
+dbutils.widgets.text("catalog_name", DEFAULT_CATALOG, "Unity Catalog name for admin/config tables — changes per environment")
 
 # COMMAND ----------
 
@@ -44,6 +45,13 @@ source_system_id_raw = dbutils.widgets.get("source_system_id") or None
 source_name   = dbutils.widgets.get("source_name") or None
 pipeline_name        = dbutils.widgets.get("pipeline_name") or None
 batch_start_date     = dbutils.widgets.get("batch_start_date") or "1"
+catalog_name         = dbutils.widgets.get("catalog_name") or DEFAULT_CATALOG
+
+# Build fully-qualified table names from the catalog_name job parameter.
+# Schema/table names are fixed across environments — only the catalog changes.
+_refs               = build_table_refs(catalog_name)
+SOURCE_SYSTEM_TABLE = _refs["source_system_table"]
+CONFIG_MASTER_TABLE = _refs["config_master_table"]
 
 if not config_master_id_raw:
     dbutils.notebook.exit("Error: config_master_id is required.")

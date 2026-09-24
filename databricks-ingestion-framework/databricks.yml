@@ -11,6 +11,9 @@ variables:
   node_type_id:
     description: "Cluster node type — e.g. i3.xlarge (AWS) or Standard_DS3_v2 (Azure)"
     default: "REPLACE_WITH_NODE_TYPE"
+  catalog_name:
+    description: "Unity Catalog name for admin/config tables — changes per environment"
+    default: "pfl_admin_catalog"
 
 targets:
   dev:

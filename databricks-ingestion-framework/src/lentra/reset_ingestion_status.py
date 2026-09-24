@@ -23,7 +23,7 @@ import sys
 
 sys.path.append("..")
 
-from ingestion.utils.config_manager import CONFIG_MASTER_TABLE, resolve_child_table_fqn
+from ingestion.utils.config_manager import DEFAULT_CATALOG, build_table_refs, resolve_child_table_fqn
 from ingestion.utils.logger import get_logger
 
 # COMMAND ----------
@@ -35,11 +35,13 @@ from ingestion.utils.logger import get_logger
 
 dbutils.widgets.text("config_master_id", "", "config_master.config_id routing to tb_aws_s3_ingestion_config")
 dbutils.widgets.text("source_name", "", "Source name — matches tb_aws_s3_ingestion_config.Source_Name exactly (e.g. lentra_dealer_dms_hdr, underscores)")
+dbutils.widgets.text("catalog_name", DEFAULT_CATALOG, "Unity Catalog name for admin/config tables — changes per environment")
 
 # COMMAND ----------
 
 config_master_id = dbutils.widgets.get("config_master_id") or None
 source_name        = dbutils.widgets.get("source_name") or None
+catalog_name       = dbutils.widgets.get("catalog_name") or DEFAULT_CATALOG
 
 if not config_master_id:
     dbutils.notebook.exit("Error: config_master_id widget is required and cannot be empty.")
@@ -47,6 +49,10 @@ if not source_name:
     dbutils.notebook.exit("Error: source_name widget is required and cannot be empty.")
 
 logger = get_logger()
+
+# Build the CONFIG_MASTER_TABLE FQN from the catalog_name parameter.
+_refs               = build_table_refs(catalog_name)
+CONFIG_MASTER_TABLE = _refs["config_master_table"]
 
 
 def _sql_literal(value: str) -> str:

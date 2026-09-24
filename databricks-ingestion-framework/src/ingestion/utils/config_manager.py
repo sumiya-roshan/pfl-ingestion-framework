@@ -20,11 +20,46 @@ import json
 from dataclasses import dataclass
 
 # ── Fully-qualified table name defaults ───────────────────────────────────────
-SOURCE_SYSTEM_TABLE = "pfl_admin_catalog.config.tb_source_connection_config"
-CONFIG_MASTER_TABLE = "pfl_admin_catalog.config.tb_config_master"
-AUDIT_TABLE = "pfl_admin_catalog.logs.tb_audit_log"
-DEPENDENCY_TABLE = "pfl_admin_catalog.config.tb_dependency_master_config"
-PIPELINE_MASTER_CONFIG_TABLE = "pfl_admin_catalog.config.tb_pipeline_master_config"
+# Only the catalog name changes across environments (dev / uat / prod).
+# Schema names (config, logs) and table names are fixed everywhere.
+DEFAULT_CATALOG              = "pfl_admin_catalog"
+SOURCE_SYSTEM_TABLE          = f"{DEFAULT_CATALOG}.config.tb_source_connection_config"
+CONFIG_MASTER_TABLE          = f"{DEFAULT_CATALOG}.config.tb_config_master"
+AUDIT_TABLE                  = f"{DEFAULT_CATALOG}.logs.tb_audit_log"
+DEPENDENCY_TABLE             = f"{DEFAULT_CATALOG}.config.tb_dependency_master_config"
+PIPELINE_MASTER_CONFIG_TABLE = f"{DEFAULT_CATALOG}.config.tb_pipeline_master_config"
+
+
+def build_table_refs(catalog_name: str) -> dict:
+    """
+    Build fully-qualified table names for a given catalog.
+
+    The schema and table names are fixed across environments — only the catalog
+    changes (dev / uat / prod). Call this in each notebook entry point with the
+    ``catalog_name`` job parameter, then pass the results into ConfigManager and
+    any logger/orchestrator constructors that accept table names.
+
+    Usage::
+
+        refs = build_table_refs(dbutils.widgets.get("catalog_name"))
+        config_mgr = ConfigManager(
+            spark,
+            source_system_table = refs["source_system_table"],
+            config_master_table = refs["config_master_table"],
+        )
+
+    Returns a dict with keys:
+        source_system_table, config_master_table, audit_table,
+        dependency_table, pipeline_master_config_table
+    """
+    return {
+        "source_system_table":          f"{catalog_name}.config.tb_source_connection_config",
+        "config_master_table":          f"{catalog_name}.config.tb_config_master",
+        "audit_table":                  f"{catalog_name}.logs.tb_audit_log",
+        "dependency_table":             f"{catalog_name}.config.tb_dependency_master_config",
+        "pipeline_master_config_table": f"{catalog_name}.config.tb_pipeline_master_config",
+    }
+
 
 # Audit lifecycle values shared by the entry point, orchestrator, and logger.
 AUDIT_STATUS_INPROGRESS = "INPROGRESS"

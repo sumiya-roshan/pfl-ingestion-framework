@@ -20,6 +20,8 @@ resources:
           default: ${var.landing_volume_path}
         - name: environment
           default: ${bundle.target}
+        - name: catalog_name
+          default: ${var.catalog_name}
         - name: max_workers
           default: "4"
 
@@ -44,6 +46,7 @@ resources:
               job_run_id: "{{job.run_id}}"
               landing_volume_path: "{{job.parameters.landing_volume_path}}"
               environment: "{{job.parameters.environment}}"
+              catalog_name: "{{job.parameters.catalog_name}}"
               max_workers: "{{job.parameters.max_workers}}"
               trigger_type: "SCHEDULED"
           timeout_seconds: 14400

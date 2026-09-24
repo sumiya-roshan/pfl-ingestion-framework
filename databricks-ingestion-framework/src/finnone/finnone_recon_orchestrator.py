@@ -51,9 +51,9 @@ sys.path.append("..")
 
 from ingestion.connectors.jdbc_connector import _build_url
 from ingestion.utils.config_manager import (
-    CONFIG_MASTER_TABLE,
-    SOURCE_SYSTEM_TABLE,
+    DEFAULT_CATALOG,
     ConfigManager,
+    build_table_refs,
     get_pipeline_notification_recipients,
 )
 from ingestion.utils.email_notifier import GraphMailNotifier
@@ -133,6 +133,12 @@ else:
 
 print(f"batch_start_date : {batch_start_date}")
 print(f"environment      : {environment}")
+
+# Build fully-qualified table names from the admin_catalog_name job parameter.
+# Schema/table names are fixed across environments — only the catalog changes.
+_refs               = build_table_refs(admin_catalog_name)
+SOURCE_SYSTEM_TABLE = _refs["source_system_table"]
+CONFIG_MASTER_TABLE = _refs["config_master_table"]
 
 # COMMAND ----------
 
