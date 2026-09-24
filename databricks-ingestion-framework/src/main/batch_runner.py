@@ -1,26 +1,4 @@
-﻿# Databricks notebook source
-# MAGIC %md
-# MAGIC # Batch Runner — Parallel Table Execution for One Batch
-# MAGIC
-# MAGIC Called by `main.py` via `dbutils.notebook.run()` — one instance per `batch_id`.
-# MAGIC Receives the pre-serialised tasks for its batch and runs them in parallel up to
-# MAGIC `batch_count` workers, submitted in priority order.
-# MAGIC
-# MAGIC This mirrors ADF`s `ForEach` activity with `sequential = OFF` and
-# MAGIC `batchCount = N` — each batch pipeline runs as an independent notebook
-# MAGIC execution on the same cluster, so batches are isolated from each other`s
-# MAGIC failures while still sharing cluster resources.
-# MAGIC
-# MAGIC **Exit contract:** always calls `dbutils.notebook.exit(json.dumps(results))`
-# MAGIC where `results` is a list of per-table result dicts (same schema as
-# MAGIC `IngestionOrchestrator.run()` return value). Never raises — partial failures
-# MAGIC are captured inside the results list so `main.py` can aggregate them.
-# MAGIC
-# MAGIC **Note:** `dependency_master_config.complete_job()` is intentionally NOT
-# MAGIC called here — `main.py` calls it once after all batch notebooks finish, so
-# MAGIC all rows for this `job_run_id` get bulk-stamped with `pipeline_end_time` in
-# MAGIC a single operation.
-
+﻿
 # COMMAND ----------
 
 # MAGIC %pip install python-dotenv --quiet
