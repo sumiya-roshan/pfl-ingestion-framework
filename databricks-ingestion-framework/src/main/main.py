@@ -79,6 +79,8 @@ dbutils.widgets.text("lentra_load_notebook_path", "",       "Lentra only: worksp
 dbutils.widgets.text("lentra_raw_sa_name",          "",       "Lentra only: base raw landing path (S3 URI / Volume path)")
 dbutils.widgets.text("lentra_notebook_timeout",     "3600",   "Lentra only: max seconds to wait for each notebook.run() call (load and classify)")
 dbutils.widgets.text("lentra_classify_notebook_path", "",      "Lentra only: workspace path to the classify notebook (only used for the 2 DMS-master sources)")
+dbutils.widgets.text("batch_count",          "10",             "Max parallel tables per batch — mirrors ADF ForEach sequential=OFF, batchCount=N")
+dbutils.widgets.text("batch_runner_path",    "",               "Workspace path to batch_runner notebook (auto-resolved to same dir as this notebook if empty)")
 
 # COMMAND ----------
 
@@ -110,6 +112,9 @@ batch_start_date     = dbutils.widgets.get("batch_start_date")     or "1"
 logger               = get_logger(environment=environment)
 
 silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
+
+batch_count              = int(dbutils.widgets.get("batch_count") or "10")
+batch_runner_path_widget = dbutils.widgets.get("batch_runner_path") or None
 
 
 # COMMAND ----------
@@ -513,6 +518,11 @@ elif is_rdbms:
     trigger_id = job_run_id
     job_context["trigger_id"] = trigger_id
 
+    # Orchestrator is kept here for two purposes only:
+    #   1. orchestrator.dependency.complete_job(job_run_id) — bulk-stamp
+    #      pipeline_end_time after all batch notebooks finish.
+    #   2. orchestrator.notifier — pipeline-level summary email.
+    # The actual table execution (run_one) moves into batch_runner.py.
     orchestrator = IngestionOrchestrator(
         spark,
         dbutils,
@@ -525,88 +535,118 @@ elif is_rdbms:
         config_mgr              = config_mgr,
     )
 
-    def run_one(task: IngestionTaskConfig) -> dict:
-        """
-        Run a single ingestion task — works for RDBMS, NoSQL, and S3.
-
-        Retries happen inside IngestionOrchestrator.run(), scoped only to the
-        source connection pull (connector.extract), using the source system's
-        retry_count/retry_interval from config_source_system. Writing/transform
-        steps are not retried — a failure there fails the task outright.
-        """
-        logger.info(f"Processing table {task.source_object_name}")
-        return orchestrator.run(
-            source_sys          = source_sys,
-            ingest_obj          = task,
-            config_master_id    = config_master_id,   # ← routing table ID from widget
-            landing_volume_path = resolved_landing_path,
-            trigger_id          = trigger_id,
-            job_context          = job_context,
-            sink_batch_started_date = batch_start_date,
-        )
-
     results = []
 
-    # ── Batch-level parallelism ────────────────────────────────────────────
-    # batch_id → PARALLEL (one thread per distinct batch); priority → SEQUENTIAL
-    # within a batch (ascending). max_workers = distinct batch_id count, derived
-    # here — NOT hardcoded, NOT from a widget/config. A batch's tables run
-    # one-by-one inside that batch's single thread.
-    batches = {}
-    for task in sorted(tasks, key=lambda t: t.priority):
+    # ── Build batch map ────────────────────────────────────────────────────
+    # batch_id → [tasks sorted by priority ascending].
+    # Each batch will be handed off to batch_runner.py as its own
+    # dbutils.notebook.run() call — all batches fire concurrently from
+    # the ThreadPoolExecutor below, mirroring ADF's parallel If-Condition
+    # branches. Within each batch notebook, tables run concurrently up to
+    # batch_count workers (ADF ForEach sequential=OFF, batchCount=N).
+    batches: dict = {}
+    for task in sorted(tasks, key=lambda t: (t.batch_id, t.priority)):
         batches.setdefault(task.batch_id, []).append(task)
 
-    max_workers = len(batches)
-
-    def run_batch(batch_id, batch_tasks: list) -> list:
-        """Run every table in one batch sequentially, in priority order."""
-        batch_results = []
-        print(
-            f"[Batch {batch_id}] Starting {len(batch_tasks)} table(s) sequentially: "
-            f"{[t.source_object_name for t in batch_tasks]}"
+    # Auto-resolve batch_runner path: same directory as this notebook unless
+    # the batch_runner_path widget is explicitly set.
+    if batch_runner_path_widget:
+        batch_runner_path = batch_runner_path_widget
+    else:
+        _ctx = (
+            dbutils.notebook.entry_point
+            .getDbutils()
+            .notebook()
+            .getContext()
         )
-        for task in batch_tasks:
-            try:
-                batch_results.append(run_one(task))
-            except Exception as exc:
-                print(f"Task {task.source_object_name} (Config ID: {task.config_id}) failed with exception: {exc}")
-                batch_results.append({
-                    "config_id": task.config_id,
-                    "run_id":   None,
-                    "status":   AUDIT_STATUS_FAILED,
-                    "rows_read": 0,
-                    "error":    str(exc),
-                })
-        return batch_results
+        _this_nb = _ctx.notebookPath().get()          # e.g. /Repos/…/src/main/main
+        batch_runner_path = _this_nb.rsplit("/", 1)[0] + "/batch_runner"
 
+    print(f"\n[Dispatch] batch_runner notebook: {batch_runner_path}")
     print(
-        f"\nStarting {len(tasks)} tasks across {len(batches)} batch(es) with "
-        f"ThreadPoolExecutor (max_workers={max_workers})..."
+        f"[Dispatch] {len(tasks)} tables across {len(batches)} batch(es), "
+        f"batch_count={batch_count} per batch"
     )
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_batch = {
-            executor.submit(run_batch, batch_id, batch_tasks): batch_id
-            for batch_id, batch_tasks in batches.items()
+    for bid, btasks in batches.items():
+        print(
+            f"  [Batch {bid}] {len(btasks)} table(s): "
+            f"{[t.source_object_name for t in btasks]}"
+        )
+
+    # Serialise source_sys and job_context once — shared across all batches.
+    source_sys_json  = json.dumps(source_sys.to_dict())
+    job_context_json = json.dumps(job_context)
+    batch_start_date_iso = (
+        batch_start_date.isoformat()
+        if hasattr(batch_start_date, "isoformat")
+        else str(batch_start_date)
+    )
+
+    def dispatch_batch(bid: int, batch_tasks: list) -> list:
+        """
+        Serialise this batch's tasks and invoke batch_runner.py via
+        dbutils.notebook.run(). Returns the deserialised results list.
+
+        dbutils.notebook.run() blocks until the child notebook finishes,
+        so ThreadPoolExecutor below runs all dispatches concurrently.
+        Timeout = 10 800 s (3 h) — adjust if individual batches can exceed that.
+        """
+        tasks_json = json.dumps([t.to_dict() for t in batch_tasks])
+        params = {
+            "batch_id":                str(bid),
+            "batch_count":             str(batch_count),
+            "batch_tasks_json":        tasks_json,
+            "source_sys_json":         source_sys_json,
+            "job_context_json":        job_context_json,
+            "config_master_id":        str(config_master_id),
+            "pipeline_name":           pipeline_name or "",
+            "job_run_id":              job_run_id or "",
+            "trigger_id":              trigger_id or "",
+            "environment":             environment,
+            "batch_start_date":        batch_start_date_iso,
+            "silver_notebook_timeout": str(silver_notebook_timeout),
+            "resolved_landing_path":   resolved_landing_path or "",
         }
-        for future in as_completed(future_to_batch):
-            batch_id = future_to_batch[future]
+        print(f"[Dispatch] Launching batch_runner for batch_id={bid} …")
+        exit_value = dbutils.notebook.run(
+            batch_runner_path,
+            timeout_seconds=10800,
+            arguments=params,
+        )
+        print(f"[Dispatch] batch_id={bid} finished.")
+        return json.loads(exit_value)
+
+    # ── Dispatch all batches in parallel ──────────────────────────────────
+    # One thread per batch — each thread blocks on its dbutils.notebook.run()
+    # call until that batch notebook returns. max_workers = number of batches
+    # so every batch starts immediately without waiting for a free slot.
+    with ThreadPoolExecutor(max_workers=len(batches)) as executor:
+        future_to_bid = {
+            executor.submit(dispatch_batch, bid, btasks): bid
+            for bid, btasks in batches.items()
+        }
+        for future in as_completed(future_to_bid):
+            bid = future_to_bid[future]
             try:
                 results.extend(future.result())
             except Exception as exc:
-                print(f"Batch {batch_id} failed with exception: {exc}")
-                for task in batches[batch_id]:
+                # The batch notebook itself crashed (not just a table failure).
+                # Mark every table in that batch as FAILED so the summary is
+                # complete and the pipeline-level email reflects the true count.
+                print(f"[Dispatch] Batch {bid} notebook raised an exception: {exc}")
+                for task in batches[bid]:
                     results.append({
                         "config_id": task.config_id,
-                        "run_id":   None,
-                        "status":   AUDIT_STATUS_FAILED,
+                        "run_id":    None,
+                        "status":    AUDIT_STATUS_FAILED,
                         "rows_read": 0,
-                        "error":    str(exc),
+                        "error":     f"Batch {bid} notebook failed: {exc}",
                     })
 
     # ── Close the dependency job ──────────────────────────────────────────
-    # pipeline_end_time isn't known until every table has finished — bulk-stamp
-    # it (and the derived dependency_resolve_time) onto every
-    # dependency_master_config row for this job_run_id now that the fan-out is done.
+    # pipeline_end_time isn't known until every batch notebook has returned —
+    # bulk-stamp it (and dependency_resolve_time) onto every
+    # dependency_master_config row for this job_run_id now that all are done.
     orchestrator.dependency.complete_job(job_run_id)
 
     # ── Results summary ──────────────────────────────────────────────────

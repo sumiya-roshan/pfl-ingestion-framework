@@ -53,6 +53,11 @@
       "name": "max_workers",
       "default": "4",
       "description": "Max parallel workers — each worker runs a presence check then extraction for one table."
+    },
+    {
+      "name": "batch_count",
+      "default": "10",
+      "description": "Max parallel tables per batch — mirrors ADF ForEach sequential=OFF, batchCount=N."
     }
   ],
 
@@ -94,6 +99,7 @@
           "landing_volume_path":    "{{job.parameters.landing_volume_path}}",
           "environment":            "{{job.parameters.environment}}",
           "max_workers":            "{{job.parameters.max_workers}}",
+          "batch_count":            "{{job.parameters.batch_count}}",
           "trigger_type":           "SCHEDULED"
         }
       },
