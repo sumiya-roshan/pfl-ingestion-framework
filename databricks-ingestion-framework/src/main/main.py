@@ -616,7 +616,6 @@ elif is_rdbms:
             "environment":             environment,
             "batch_start_date":        batch_start_date_iso,
             "silver_notebook_timeout": str(silver_notebook_timeout),
-            "resolved_landing_path":   resolved_landing_path or "",
         }
         print(f"[Dispatch] Launching batch_runner for batch_id={bid} …")
         exit_value = dbutils.notebook.run(
