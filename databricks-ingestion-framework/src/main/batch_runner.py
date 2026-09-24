@@ -255,4 +255,4 @@ _upload_on_exit()
 # Return all results to main.py as a JSON string for aggregation.
 # dependency_logger.complete_job() is NOT called here.
 # main.py calls it once after ALL batch notebooks return.
-dbutils.notebook.exit(json.dumps(results))
+dbutils.notebook.exit(json.dumps(results, indent=2))

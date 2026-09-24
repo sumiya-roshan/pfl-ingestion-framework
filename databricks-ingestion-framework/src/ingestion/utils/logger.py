@@ -201,12 +201,13 @@ def configure_s3_logging(
     _S3_LOG_PATH = s3_log_path
     _DBUTILS = dbutils
 
-    # Include the process ID in the filename so concurrent batch_runner
-    # notebooks (each a separate Python process via dbutils.notebook.run())
+    import uuid
+    # Include the process ID and a UUID in the filename so concurrent notebooks
+    # (which often share the same Python process and PID on Databricks clusters)
     # never collide on the same /tmp/ file — which would cause PermissionError.
     _LOCAL_LOG_FILE = os.path.join(
         tempfile.gettempdir(),
-        f"{logger_name}_execution_{os.getpid()}.log",
+        f"{logger_name}_execution_{os.getpid()}_{uuid.uuid4().hex[:8]}.log",
     )
 
     lgr = logging.getLogger(logger_name)
