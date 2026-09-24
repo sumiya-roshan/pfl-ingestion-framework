@@ -1,25 +1,34 @@
-# Databricks notebook source
+Ôªø# Databricks notebook source
 # MAGIC %md
-# MAGIC # Batch Runner ó Parallel Table Execution for One Batch
+# MAGIC # Batch Runner ‚Äî Parallel Table Execution for One Batch
 # MAGIC
-# MAGIC Called by `main.py` via `dbutils.notebook.run()` ó one instance per `batch_id`.
+# MAGIC Called by `main.py` via `dbutils.notebook.run()` ‚Äî one instance per `batch_id`.
 # MAGIC Receives the pre-serialised tasks for its batch and runs them in parallel up to
 # MAGIC `batch_count` workers, submitted in priority order.
 # MAGIC
-# MAGIC This mirrors ADF'"'"'s `ForEach` activity with `sequential = OFF` and
-# MAGIC `batchCount = N` ó each batch pipeline runs as an independent notebook
-# MAGIC execution on the same cluster, so batches are isolated from each other'"'"'s
+# MAGIC This mirrors ADF`s `ForEach` activity with `sequential = OFF` and
+# MAGIC `batchCount = N` ‚Äî each batch pipeline runs as an independent notebook
+# MAGIC execution on the same cluster, so batches are isolated from each other`s
 # MAGIC failures while still sharing cluster resources.
 # MAGIC
 # MAGIC **Exit contract:** always calls `dbutils.notebook.exit(json.dumps(results))`
 # MAGIC where `results` is a list of per-table result dicts (same schema as
-# MAGIC `IngestionOrchestrator.run()` return value). Never raises ó partial failures
+# MAGIC `IngestionOrchestrator.run()` return value). Never raises ‚Äî partial failures
 # MAGIC are captured inside the results list so `main.py` can aggregate them.
 # MAGIC
 # MAGIC **Note:** `dependency_master_config.complete_job()` is intentionally NOT
-# MAGIC called here ó `main.py` calls it once after all batch notebooks finish, so
+# MAGIC called here ‚Äî `main.py` calls it once after all batch notebooks finish, so
 # MAGIC all rows for this `job_run_id` get bulk-stamped with `pipeline_end_time` in
 # MAGIC a single operation.
+
+# COMMAND ----------
+
+# MAGIC %pip install python-dotenv --quiet
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
+# MAGIC %pip install paramiko boto3 --quiet
 
 # COMMAND ----------
 
@@ -53,7 +62,7 @@ from ingestion.utils.orchestrator import IngestionOrchestrator
 # COMMAND ----------
 
 dbutils.widgets.text("batch_id",                "",      "Batch ID to process (int)")
-dbutils.widgets.text("batch_count",             "10",    "Max parallel tables in this batch ó mirrors ADF ForEach batchCount")
+dbutils.widgets.text("batch_count",             "10",    "Max parallel tables in this batch ‚Äî mirrors ADF ForEach batchCount")
 dbutils.widgets.text("batch_tasks_json",        "",      "JSON-serialised list of IngestionTaskConfig dicts for this batch")
 dbutils.widgets.text("source_sys_json",         "",      "JSON-serialised SourceSystemConfig dict")
 dbutils.widgets.text("job_context_json",        "",      "JSON-serialised job context dict from main.py")
@@ -82,7 +91,7 @@ batch_start_date_str    = dbutils.widgets.get("batch_start_date") or ""
 silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
 resolved_landing_path   = dbutils.widgets.get("resolved_landing_path") or None
 
-# Validate required inputs ó exit with a failed result list (not a raise) so
+# Validate required inputs ‚Äî exit with a failed result list (not a raise) so
 # main.py can always json.loads() the exit value regardless of what went wrong.
 if not batch_id_raw:
     dbutils.notebook.exit(json.dumps([{
@@ -117,7 +126,7 @@ job_context = json.loads(job_context_json)
 
 logger = get_logger(environment=environment)
 
-# Per-batch S3 log file ó keeps each batch'"'"'s logs separate from main.py'"'"'s
+# Per-batch S3 log file ‚Äî keeps each batch`s logs separate from main.py`s
 # job-level log and from other concurrent batch notebooks.
 if resolved_landing_path:
     s3_log_path = (
@@ -157,7 +166,7 @@ orchestrator = IngestionOrchestrator(
 
 
 def run_one(task: IngestionTaskConfig) -> dict:
-    """Run a single ingestion task ó JDBC extract + optional Silver trigger."""
+    """Run a single ingestion task ‚Äî JDBC extract + optional Silver trigger."""
     logger.info(f"[Batch {batch_id}] Processing table: {task.source_object_name}")
     return orchestrator.run(
         source_sys              = source_sys,
@@ -172,11 +181,11 @@ def run_one(task: IngestionTaskConfig) -> dict:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Execute ó parallel within this batch (ADF ForEach batchCount parity)
+# MAGIC ### Execute ‚Äî parallel within this batch (ADF ForEach batchCount parity)
 # MAGIC
 # MAGIC Tables are submitted to the pool in ascending priority order so that
 # MAGIC lower-priority values get scheduled first when pool slots are free.
-# MAGIC All tables up to `batch_count` fire concurrently ó identical to ADF
+# MAGIC All tables up to `batch_count` fire concurrently ‚Äî identical to ADF
 # MAGIC ForEach with `sequential = OFF, batchCount = batch_count`.
 
 # COMMAND ----------
@@ -213,13 +222,13 @@ with ThreadPoolExecutor(max_workers=batch_count) as executor:
 
 # COMMAND ----------
 
-STATUS_ICONS = {AUDIT_STATUS_SUCCESS: "?", AUDIT_STATUS_SKIPPED: "??"}
+STATUS_ICONS = {AUDIT_STATUS_SUCCESS: "‚úÖ", AUDIT_STATUS_SKIPPED: "‚è≠Ô∏è"}
 print(f"\n{'='*75}")
 print(f"[Batch {batch_id}] Results")
 print(f"{'CONF ID':>8}  {'STATUS':<10}  {'ROWS':>8}  ERROR")
 print(f"{'='*75}")
 for r in sorted(results, key=lambda x: x["config_id"]):
-    icon  = STATUS_ICONS.get(r["status"], "?")
+    icon  = STATUS_ICONS.get(r["status"], "‚ùå")
     error = (r.get("error") or "")[:50]
     print(f"{r['config_id']:>8}  {icon} {r['status']:<8}  {r.get('rows_read', 0):>8}  {error}")
 print(f"{'='*75}")
@@ -229,15 +238,15 @@ skipped   = [r for r in results if r["status"] == AUDIT_STATUS_SKIPPED]
 failed    = [r for r in results if r["status"] == AUDIT_STATUS_FAILED]
 print(
     f"[Batch {batch_id}] Total: {len(results)} | "
-    f"? Succeeded: {len(succeeded)} | "
-    f"??  Skipped: {len(skipped)} | "
-    f"? Failed: {len(failed)}"
+    f"‚úÖ Succeeded: {len(succeeded)} | "
+    f"‚è≠Ô∏è  Skipped: {len(skipped)} | "
+    f"‚ùå Failed: {len(failed)}"
 )
 
 _upload_on_exit()
 
 # Return all results to main.py as a JSON string for aggregation.
-# NOTE: dependency_logger.complete_job() is intentionally NOT called here ó
+# NOTE: dependency_logger.complete_job() is intentionally NOT called here ‚Äî
 # main.py does it once after ALL batch notebooks return, bulk-stamping
 # pipeline_end_time onto every dependency_master_config row for this run.
 dbutils.notebook.exit(json.dumps(results))
