@@ -29,6 +29,7 @@
 
 import json
 import sys
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -120,7 +121,7 @@ resolved_landing_path = source_sys.landing_volume_path
 logger = get_logger(environment=environment)
 
 # Configure per-batch S3 log file.
-# logger.py now appends os.getpid() to the temp filename, so concurrent
+# logger.py appends os.getpid() to the temp filename so concurrent
 # batch_runner processes never collide on the same /tmp/ file.
 if resolved_landing_path:
     s3_log_path = (
@@ -195,16 +196,23 @@ with ThreadPoolExecutor(max_workers=batch_count) as executor:
         try:
             results.append(fut.result())
         except Exception as exc:
+            # Use repr(exc) to always get the exception class name + args even
+            # when str(exc) is empty (e.g. plain "raise SomeError()").
+            # traceback.format_exc() gives the full stack trace for debugging.
+            exc_repr  = repr(exc)
+            exc_trace = traceback.format_exc()
             print(
-                f"[Batch {batch_id}] Task {task.source_object_name} "
-                f"(Config ID: {task.config_id}) failed with exception: {exc}"
+                f"[Batch {batch_id}] ❌ Task {task.source_object_name} "
+                f"(Config ID: {task.config_id}) FAILED\n"
+                f"  Exception : {exc_repr}\n"
+                f"  Traceback :\n{exc_trace}"
             )
             results.append({
                 "config_id":     task.config_id,
                 "run_id":        None,
                 "status":        AUDIT_STATUS_FAILED,
                 "rows_read":     0,
-                "error":         str(exc),
+                "error":         exc_repr,
                 "silver_result": None,
             })
 
@@ -222,7 +230,7 @@ print(f"{'CONF ID':>8}  {'STATUS':<10}  {'ROWS':>8}  ERROR")
 print(f"{'='*75}")
 for r in sorted(results, key=lambda x: x["config_id"]):
     icon  = STATUS_ICONS.get(r["status"], "❌")
-    error = (r.get("error") or "")[:50]
+    error = (r.get("error") or "")[:80]
     print(f"{r['config_id']:>8}  {icon} {r['status']:<8}  {r.get('rows_read', 0):>8}  {error}")
 print(f"{'='*75}")
 
