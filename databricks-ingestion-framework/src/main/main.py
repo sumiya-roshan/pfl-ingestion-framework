@@ -573,9 +573,20 @@ elif is_rdbms:
             f"{[t.source_object_name for t in btasks]}"
         )
 
+    # ── JSON serialisation helper ──────────────────────────────────────────
+    # job_context carries pipeline_start_time (a datetime); config fields may
+    # also surface decimal.Decimal values from Spark — handle both here so
+    # every json.dumps call in this block never raises TypeError.
+    def _json_default(obj):
+        if hasattr(obj, "isoformat"):          # datetime, date, Timestamp
+            return obj.isoformat()
+        if hasattr(obj, "__float__"):          # decimal.Decimal
+            return float(obj)
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
     # Serialise source_sys and job_context once — shared across all batches.
-    source_sys_json  = json.dumps(source_sys.to_dict())
-    job_context_json = json.dumps(job_context)
+    source_sys_json  = json.dumps(source_sys.to_dict(), default=_json_default)
+    job_context_json = json.dumps(job_context,          default=_json_default)
     batch_start_date_iso = (
         batch_start_date.isoformat()
         if hasattr(batch_start_date, "isoformat")
@@ -591,7 +602,7 @@ elif is_rdbms:
         so ThreadPoolExecutor below runs all dispatches concurrently.
         Timeout = 10 800 s (3 h) — adjust if individual batches can exceed that.
         """
-        tasks_json = json.dumps([t.to_dict() for t in batch_tasks])
+        tasks_json = json.dumps([t.to_dict() for t in batch_tasks], default=_json_default)
         params = {
             "batch_id":                str(bid),
             "batch_count":             str(batch_count),
