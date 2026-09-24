@@ -1,5 +1,4 @@
-﻿
-# COMMAND ----------
+﻿# COMMAND ----------
 
 # MAGIC %pip install python-dotenv --quiet
 # MAGIC dbutils.library.restartPython()
