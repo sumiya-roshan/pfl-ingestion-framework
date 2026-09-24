@@ -579,6 +579,8 @@ elif is_rdbms:
     # every json.dumps call in this block never raises TypeError.
     def _json_default(obj):
         if hasattr(obj, "isoformat"):          # datetime, date, Timestamp
+            if hasattr(obj, "replace"):        # Strip microseconds
+                obj = obj.replace(microsecond=0)
             return obj.isoformat()
         if hasattr(obj, "__float__"):          # decimal.Decimal
             return float(obj)
@@ -588,8 +590,8 @@ elif is_rdbms:
     source_sys_json  = json.dumps(source_sys.to_dict(), default=_json_default)
     job_context_json = json.dumps(job_context,          default=_json_default)
     batch_start_date_iso = (
-        batch_start_date.isoformat()
-        if hasattr(batch_start_date, "isoformat")
+        batch_start_date.replace(microsecond=0).isoformat()
+        if hasattr(batch_start_date, "replace")
         else str(batch_start_date)
     )
 

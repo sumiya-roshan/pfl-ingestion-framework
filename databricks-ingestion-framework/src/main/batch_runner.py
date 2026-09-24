@@ -114,6 +114,12 @@ tasks       = [IngestionTaskConfig.from_dict(t) for t in json.loads(batch_tasks_
 source_sys  = SourceSystemConfig.from_dict(json.loads(source_sys_json))
 job_context = json.loads(job_context_json)
 
+# job_context["pipeline_start_time"] was serialized as an ISO string in main.py.
+# We must convert it back to a datetime object, because PySpark's TimestampType
+# strictly expects a datetime object in createDataFrame().
+if "pipeline_start_time" in job_context and isinstance(job_context["pipeline_start_time"], str):
+    job_context["pipeline_start_time"] = datetime.fromisoformat(job_context["pipeline_start_time"])
+
 # Derive landing path from source_sys -- same as main.py does, no separate widget needed.
 # source_sys.landing_volume_path is already present in source_sys_json (passed by main.py).
 resolved_landing_path = source_sys.landing_volume_path
