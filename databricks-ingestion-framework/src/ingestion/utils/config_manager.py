@@ -23,7 +23,7 @@ SOURCE_SYSTEM_TABLE = "migration_x_catalog.pfl_x_schema.config_source_system"
 CONFIG_MASTER_TABLE = "migration_x_catalog.pfl_x_schema.config_master"
 AUDIT_TABLE = "migration_x_catalog.pfl_x_schema.tb_audit_log"
 DEPENDENCY_TABLE = "migration_x_catalog.pfl_x_schema.dependency_master_config"
-
+PIPELINE_MASTER_CONFIG_TABLE = "migration_x_catalog.pfl_x_schema.tb_pipeline_master_config"
 # ── Fully-qualified table name defaults ───────────────────────────────────────
 # Only the catalog name changes across environments (dev / uat / prod).
 # Schema names (config, logs) and table names are fixed everywhere.
@@ -62,7 +62,7 @@ def build_table_refs(catalog_name: str) -> dict:
         "config_master_table":          CONFIG_MASTER_TABLE,
         "audit_table":                  AUDIT_TABLE,
         "dependency_table":             DEPENDENCY_TABLE,
-        # "pipeline_master_config_table": f"{catalog_name}.config.tb_pipeline_master_config",
+        "pipeline_master_config_table": PIPELINE_MASTER_CONFIG_TABLE,
     }
 
 
