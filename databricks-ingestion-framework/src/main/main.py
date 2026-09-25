@@ -66,6 +66,8 @@ dbutils.widgets.text("pipeline_name",       "",               "Pipeline Name (re
 dbutils.widgets.text("job_run_id",          "",               "Job Run ID (required) — set to {{job.run_id}} in job config")
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
+dbutils.widgets.text("source_to_raw_notebook_path", "",       "Workspace path to src/raw/source_to_raw (required for RDBMS/NoSQL/S3)")
+dbutils.widgets.text("source_to_raw_notebook_timeout", "3600", "Max seconds to wait for each Source→Raw notebook run")
 dbutils.widgets.text("silver_notebook_path",    "",           "Workspace path to Silver transformation notebook (blank = skip Silver trigger)")
 dbutils.widgets.text("silver_notebook_timeout", "3600",       "Max seconds to wait for each Silver notebook run")
 
@@ -94,6 +96,8 @@ environment          = dbutils.widgets.get("environment")          or "dev"
 batch_start_date     = dbutils.widgets.get("batch_start_date")     or "1"
 logger               = get_logger(environment=environment)
 
+source_to_raw_notebook_path    = dbutils.widgets.get("source_to_raw_notebook_path") or None
+source_to_raw_notebook_timeout = int(dbutils.widgets.get("source_to_raw_notebook_timeout") or "3600")
 silver_notebook_path    = dbutils.widgets.get("silver_notebook_path")    or None
 silver_notebook_timeout = int(dbutils.widgets.get("silver_notebook_timeout") or "3600")
 
@@ -261,6 +265,8 @@ orchestrator = IngestionOrchestrator(
     dependency_table        = DEPENDENCY_TABLE,
     pipeline_name           = pipeline_name,
     environment             = environment,
+    source_to_raw_notebook_path    = source_to_raw_notebook_path,
+    source_to_raw_notebook_timeout = source_to_raw_notebook_timeout,
     silver_notebook_path    = silver_notebook_path,
     silver_notebook_timeout = silver_notebook_timeout,
     config_mgr              = config_mgr,
