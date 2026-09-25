@@ -57,7 +57,8 @@ class SourceToRawProcessor:
         directly off ingest_obj.to_dict() so this can't drift out of sync
         with the dataclass — no field list duplicated here.
 
-        Returns dict with keys: status, rows_read, landing_path, error.
+        Returns dict with keys: status, rows_read, landing_path, data_read,
+        data_written, throughput, copy_duration_in_seconds, error.
         Never raises — a dbutils.notebook.run() failure (crash, timeout) is
         caught and returned as status=FAILED, same contract as a notebook
         that ran but reported its own failure via the exit-value JSON.
@@ -96,6 +97,10 @@ class SourceToRawProcessor:
                 "status": "FAILED",
                 "rows_read": 0,
                 "landing_path": None,
+                "data_read": 0,
+                "data_written": 0,
+                "throughput": None,
+                "copy_duration_in_seconds": 0.0,
                 "error": str(exc),
             }
 
@@ -117,16 +122,26 @@ class SourceToRawProcessor:
                 "status": "FAILED",
                 "rows_read": 0,
                 "landing_path": None,
+                "data_read": 0,
+                "data_written": 0,
+                "throughput": None,
+                "copy_duration_in_seconds": 0.0,
                 "error": error,
             }
 
         log.info(
             f"[SOURCE_TO_RAW] config_id={ingest_obj.config_id} SUCCESS — "
-            f"{outcome.get('rows_read')} rows → {outcome.get('landing_path')}"
+            f"{outcome.get('rows_read')} rows → {outcome.get('landing_path')} "
+            f"({outcome.get('data_written')} bytes, {outcome.get('copy_duration_in_seconds')}s, "
+            f"{outcome.get('throughput')} MB/s)"
         )
         return {
             "status": "SUCCESS",
             "rows_read": int(outcome.get("rows_read") or 0),
             "landing_path": outcome.get("landing_path"),
+            "data_read": int(outcome.get("data_read") or 0),
+            "data_written": int(outcome.get("data_written") or 0),
+            "throughput": outcome.get("throughput"),
+            "copy_duration_in_seconds": float(outcome.get("copy_duration_in_seconds") or 0.0),
             "error": None,
         }

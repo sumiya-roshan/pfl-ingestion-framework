@@ -24,6 +24,7 @@ import sys
 sys.path.append("..")
 
 import json
+import time
 from datetime import datetime, timezone
 
 from ingestion.connectors.factory import get_connector
@@ -188,12 +189,30 @@ file_timestamp = (
 
 # COMMAND ----------
 
-secrets      = SecretResolver(dbutils)
-error_msg    = "No error"
-rows_read    = 0
-landing_path = None
+def _dir_size_bytes(path: str) -> int:
+    """
+    Recursively sums file sizes under a Volume/S3 path via dbutils.fs.ls —
+    kept off sparkContext._jvm / df._jdf on purpose since those are
+    unavailable under Spark Connect / serverless (see S3RawWriter's own
+    dbutils.fs-based rename for the same reasoning).
+    """
+    total = 0
+    for f in dbutils.fs.ls(path):
+        total += _dir_size_bytes(f.path) if f.isDir() else f.size
+    return total
+
+
+secrets                  = SecretResolver(dbutils)
+error_msg                = "No error"
+rows_read                = 0
+landing_path             = None
+data_read                = 0
+data_written             = 0
+throughput               = None
+copy_duration_in_seconds = 0.0
 
 try:
+    copy_start_time = time.time()
     watermark_start = resolve_watermark(ingest_obj)
     print(
         f"[SOURCE_TO_RAW] config_id={ingest_obj.config_id} "
@@ -221,9 +240,24 @@ try:
         file_format         = fmt,
         file_timestamp      = file_timestamp,
     )
+    copy_duration_in_seconds = round(time.time() - copy_start_time, 2)
+
+    # Straight extract→write with no transform in between, so the source
+    # byte count and the landing byte count are the same data — there's no
+    # per-connector "bytes read" figure to pull separately (JDBC/API/S3
+    # connectors all hand back a materialized DataFrame, not a byte count).
+    data_written = _dir_size_bytes(landing_path)
+    data_read = data_written
+    throughput = (
+        round((data_written / (1024.0 * 1024.0)) / copy_duration_in_seconds, 2)
+        if copy_duration_in_seconds > 0
+        else None
+    )
+
     print(
         f"[SOURCE_TO_RAW] config_id={ingest_obj.config_id} "
-        f"Landing write → {landing_path} ({rows_read} rows, format={fmt})"
+        f"Landing write → {landing_path} ({rows_read} rows, format={fmt}, "
+        f"{data_written} bytes, {copy_duration_in_seconds}s, {throughput} MB/s)"
     )
 except Exception as e:
     error_msg = str(e)
@@ -233,15 +267,23 @@ except Exception as e:
 
 if error_msg == "No error":
     dbutils.notebook.exit(json.dumps({
-        "status":       "SUCCESS",
-        "rows_read":    rows_read,
-        "landing_path": landing_path,
-        "error":        None,
+        "status":                   "SUCCESS",
+        "rows_read":                rows_read,
+        "landing_path":             landing_path,
+        "data_read":                data_read,
+        "data_written":             data_written,
+        "throughput":               throughput,
+        "copy_duration_in_seconds": copy_duration_in_seconds,
+        "error":                    None,
     }))
 else:
     dbutils.notebook.exit(json.dumps({
-        "status":       "FAILED",
-        "rows_read":    0,
-        "landing_path": None,
-        "error":        error_msg,
+        "status":                   "FAILED",
+        "rows_read":                0,
+        "landing_path":             None,
+        "data_read":                0,
+        "data_written":             0,
+        "throughput":               None,
+        "copy_duration_in_seconds": copy_duration_in_seconds,
+        "error":                    error_msg,
     }))
