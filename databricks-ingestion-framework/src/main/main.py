@@ -73,7 +73,7 @@ dbutils.widgets.text("job_run_id",          "",               "Job Run ID (requi
 dbutils.widgets.text("environment",         "dev",            "Environment: dev | uat | prod")
 dbutils.widgets.text("catalog_name",        DEFAULT_CATALOG,  "Unity Catalog name for admin/config tables — changes per environment")
 dbutils.widgets.text("batch_start_date",    "1",              "Batch Start Date")
-dbutils.widgets.text("source_to_raw_notebook_path", "",       "Workspace path to src/ingestion/source_to_raw (required for RDBMS/NoSQL/S3)")
+dbutils.widgets.text("source_to_raw_notebook_path", "",       "Workspace path to src/raw/source_to_raw (required for RDBMS/NoSQL/S3)")
 dbutils.widgets.text("source_to_raw_notebook_timeout", "3600", "Max seconds to wait for each Source→Raw notebook run")
 dbutils.widgets.text("silver_notebook_timeout", "3600",       "Max seconds to wait for each Silver notebook run")
 dbutils.widgets.text("lentra_load_notebook_path", "",       "Lentra only: workspace path to the client-provided load_raw_to_silver notebook")

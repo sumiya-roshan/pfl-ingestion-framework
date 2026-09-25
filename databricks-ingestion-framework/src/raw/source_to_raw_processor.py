@@ -26,7 +26,7 @@ class SourceToRawProcessor:
     Parameters
     ----------
     dbutils                 : Databricks dbutils object (passed from the calling notebook)
-    source_to_raw_notebook_path : Workspace path to src/ingestion/source_to_raw
+    source_to_raw_notebook_path : Workspace path to src/raw/source_to_raw
     timeout_seconds         : Max seconds to wait for the notebook to finish (default 3600)
     """
 

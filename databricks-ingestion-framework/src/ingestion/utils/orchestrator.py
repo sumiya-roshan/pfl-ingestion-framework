@@ -25,9 +25,9 @@ from datetime import date, datetime, timezone
 
 from lookup.lookup_executor import LookupExecutor
 from lookup.lookup_query_builder import build_lookup_query
+from raw.source_to_raw_processor import SourceToRawProcessor
 from silver.silver_processor import SilverProcessor
 
-from .source_to_raw_processor import SourceToRawProcessor
 from ..connectors.factory import get_connector
 from ..connectors.federated_connector import FederatedConnector
 from ..connectors.jdbc_connector import JdbcConnector
@@ -300,7 +300,7 @@ class IngestionOrchestrator:
             # Workflows), not inline in this notebook's own execution.
             # Handles every source type (JDBC/NoSQL/S3/Federated) via the same
             # get_connector() factory this used to call directly — see
-            # src/ingestion/source_to_raw.py. Skipped entirely (not attempted)
+            # src/raw/source_to_raw.py. Skipped entirely (not attempted)
             # when raw_bucket_path isn't configured, same as the old inline
             # write-skip did — falls through to the "not landing_path" Skipped
             # branch below.
