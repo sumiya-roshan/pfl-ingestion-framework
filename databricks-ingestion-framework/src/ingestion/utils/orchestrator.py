@@ -27,6 +27,7 @@ from lookup.lookup_executor import LookupExecutor
 from lookup.lookup_query_builder import build_lookup_query
 from silver.silver_processor import SilverProcessor
 
+from .source_to_raw_processor import SourceToRawProcessor
 from ..connectors.factory import get_connector
 from ..connectors.federated_connector import FederatedConnector
 from ..connectors.jdbc_connector import JdbcConnector
@@ -70,8 +71,10 @@ class IngestionOrchestrator:
         audit_table: str,
         dependency_table: str ,
         pipeline_name: str,
+        source_to_raw_notebook_path: str,
         environment: str   = "dev",
         department_id: int = 0,
+        source_to_raw_notebook_timeout: int = 3600,
         silver_notebook_path: str | None = None,
         silver_notebook_timeout: int        = 3600,
         config_mgr: ConfigManager | None = None,
@@ -91,6 +94,16 @@ class IngestionOrchestrator:
         self.logger        = get_logger(environment=environment)
         self.lookup_executor = LookupExecutor(spark, self.secrets, self.logger)
         self.notifier      = GraphMailNotifier(dbutils=dbutils, logger=self.logger)
+
+        # Source→Raw: runs as its own notebook step (Notebook Workflows in
+        # the Jobs UI), triggered synchronously, inline, on this table's own
+        # thread — same coupling style Silver already uses. Not optional:
+        # this is the only way Source→Raw runs now, there's no inline
+        # fallback, so a missing path fails loudly here rather than deep
+        # inside run().
+        self.source_to_raw_processor = SourceToRawProcessor(
+            dbutils, source_to_raw_notebook_path, source_to_raw_notebook_timeout
+        )
 
         # Silver trigger: runs inline, coupled to the landing write — a table's
         # Bronze Delta write does not start until that table's Silver run has
@@ -282,99 +295,106 @@ class IngestionOrchestrator:
                 f"watermark_start={watermark_start}"
             )
 
-            connector = get_connector(self.spark, source_sys, ingest_obj, self.secrets)
-            df, _watermark_end = retry_on_failure(
-                lambda: connector.extract(watermark_start),
-                max_retries    = int(source_sys.retry_count or 0),
-                retry_interval = int(source_sys.retry_interval or 0),
-                logger         = self.logger,
-                description    = f"[{run_id}] extract config_id={ingest_obj.config_id} object='{ingest_obj.source_object_name}'",
-            )
-            rows_read = df.count()
+            # ── Source→Raw, delegated to the generic notebook ──────────────────
+            # Runs as its own step in the Databricks Jobs UI (Notebook
+            # Workflows), not inline in this notebook's own execution.
+            # Handles every source type (JDBC/NoSQL/S3/Federated) via the same
+            # get_connector() factory this used to call directly — see
+            # src/ingestion/source_to_raw.py. Skipped entirely (not attempted)
+            # when raw_bucket_path isn't configured, same as the old inline
+            # write-skip did — falls through to the "not landing_path" Skipped
+            # branch below.
+            rows_read    = 0
+            landing_path = None
+            fmt = ingest_obj.file_format or "parquet"
+            write_start_time = time.time()
+            if raw_bucket_path:
+                stage = "SOURCE_TO_RAW"
+                source_to_raw_result = self.source_to_raw_processor.trigger(
+                    source_sys      = source_sys,
+                    ingest_obj      = ingest_obj,
+                    raw_bucket_path = raw_bucket_path,
+                    file_timestamp  = sink_batch_started_date or run_start_time,
+                    run_id          = run_id,
+                )
+                if source_to_raw_result.get("status") == "FAILED":
+                    raise RuntimeError(
+                        source_to_raw_result.get("error")
+                        or "Source→Raw notebook reported failure."
+                    )
+                rows_read    = source_to_raw_result.get("rows_read", 0)
+                landing_path = source_to_raw_result.get("landing_path")
 
             # Staging_Flag=1 → pull ALL primary-key rows from source (unfiltered)
-            # and land them in s3. Same flat rewrite as the lookup probe, just
+            # and land them in s3. Stays inline (not moved to the notebook
+            # above) — its own connector, separate query, unrelated to the
+            # main extract. Same flat rewrite as the lookup probe, just
             # without the row-limit clause (row_limit=False).
-            if ingest_obj.staging_flag == 1 and isinstance(connector, (JdbcConnector, FederatedConnector)):
+            if ingest_obj.staging_flag == 1:
                 if not raw_bucket_path:
                     raise ValueError(
                         f"Staging_Flag=1 for config_id={ingest_obj.config_id}, "
                         "but raw_bucket_path is not configured."
                     )
+                connector = get_connector(self.spark, source_sys, ingest_obj, self.secrets)
+                if isinstance(connector, (JdbcConnector, FederatedConnector)):
+                    key_col = ", ".join(ingest_obj.primary_key_list) if ingest_obj.primary_key_list else "*"
+                    is_federated = isinstance(connector, FederatedConnector)
 
-                key_col = ", ".join(ingest_obj.primary_key_list) if ingest_obj.primary_key_list else "*"
-                is_federated = isinstance(connector, FederatedConnector)
-
-                base_sql = (
-                    connector._base_sql(connector._foreign_catalog())
-                    if is_federated
-                    else connector._base_sql()
-                )
-
-                key_query = build_lookup_query(base_sql, key_col, "full", row_limit=False)
-                self.logger.info(f"[{run_id}] PK staging query → {key_query}")
-
-                if is_federated:
-                    pk_df = retry_on_failure(
-                        lambda: self.spark.sql(key_query),
-                        max_retries    = int(source_sys.retry_count or 0),
-                        retry_interval = int(source_sys.retry_interval or 0),
-                        logger         = self.logger,
-                        description    = f"[{run_id}] primary-key extract config_id={ingest_obj.config_id} object='{ingest_obj.source_object_name}'",
-                    )
-                else:
-                    pk_df = retry_on_failure(
-                        lambda: (
-                            self.spark.read.format("jdbc")
-                            .options(**connector._read_options())
-                            .option("query", key_query)
-                            .load()
-                        ),
-                        max_retries    = int(source_sys.retry_count or 0),
-                        retry_interval = int(source_sys.retry_interval or 0),
-                        logger         = self.logger,
-                        description    = f"[{run_id}] primary-key extract config_id={ingest_obj.config_id} object='{ingest_obj.source_object_name}'",
+                    base_sql = (
+                        connector._base_sql(connector._foreign_catalog())
+                        if is_federated
+                        else connector._base_sql()
                     )
 
-                pk_rows = pk_df.count()
-                fmt = ingest_obj.file_format or "parquet"
+                    key_query = build_lookup_query(base_sql, key_col, "full", row_limit=False)
+                    self.logger.info(f"[{run_id}] PK staging query → {key_query}")
 
-                pk_path = self.s3_writer.write(
-                    pk_df,
-                    raw_bucket_path = raw_bucket_path,
-                    source_name         = source_sys.source_name,
-                    source_schema       = ingest_obj.source_schema,
-                    source_object_name  = ingest_obj.source_object_name,
-                    file_format         = fmt,
-                    file_prefix         = 'all_key',
-                    file_timestamp      = sink_batch_started_date,
-                )
+                    if is_federated:
+                        pk_df = retry_on_failure(
+                            lambda: self.spark.sql(key_query),
+                            max_retries    = int(source_sys.retry_count or 0),
+                            retry_interval = int(source_sys.retry_interval or 0),
+                            logger         = self.logger,
+                            description    = f"[{run_id}] primary-key extract config_id={ingest_obj.config_id} object='{ingest_obj.source_object_name}'",
+                        )
+                    else:
+                        pk_df = retry_on_failure(
+                            lambda: (
+                                self.spark.read.format("jdbc")
+                                .options(**connector._read_options())
+                                .option("query", key_query)
+                                .load()
+                            ),
+                            max_retries    = int(source_sys.retry_count or 0),
+                            retry_interval = int(source_sys.retry_interval or 0),
+                            logger         = self.logger,
+                            description    = f"[{run_id}] primary-key extract config_id={ingest_obj.config_id} object='{ingest_obj.source_object_name}'",
+                        )
 
-                self.logger.info(
-                    f"[{run_id}] PK staging write → {pk_path} ({pk_rows} rows)"
-                )
+                    pk_rows = pk_df.count()
+
+                    pk_path = self.s3_writer.write(
+                        pk_df,
+                        raw_bucket_path = raw_bucket_path,
+                        source_name         = source_sys.source_name,
+                        source_schema       = ingest_obj.source_schema,
+                        source_object_name  = ingest_obj.source_object_name,
+                        file_format         = fmt,
+                        file_prefix         = 'all_key',
+                        file_timestamp      = sink_batch_started_date,
+                    )
+
+                    self.logger.info(
+                        f"[{run_id}] PK staging write → {pk_path} ({pk_rows} rows)"
+                    )
 
             rows_copied  = 0
             rows_deleted = 0
-
-            # ── Landing / raw write (optional) ────────────────────────────────
-            # landing_path/fmt/silver_result stay in scope past the if-block
-            # (None/default when landing write is skipped).
-            landing_path  = None
             silver_result = None
-            fmt = ingest_obj.file_format or "parquet"
-            write_start_time = time.time()
-            if raw_bucket_path:
+
+            if landing_path:
                 stage = "RAW_WRITE"
-                landing_path = self.s3_writer.write(
-                    df,
-                    raw_bucket_path = raw_bucket_path,
-                    source_name         = source_sys.source_name,
-                    source_schema       = ingest_obj.source_schema,
-                    source_object_name  = ingest_obj.source_object_name,
-                    file_format         = fmt,
-                    file_timestamp      = sink_batch_started_date or run_start_time,
-                )
                 self.logger.info(
                     f"[{run_id}] Landing write → {landing_path} ({rows_read} rows, format={fmt})"
                 )
