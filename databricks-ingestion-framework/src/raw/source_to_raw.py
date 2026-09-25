@@ -38,32 +38,88 @@ from ingestion.utils.writers.s3_writer import S3RawWriter
 # MAGIC %md
 # MAGIC ### Widgets
 # MAGIC
-# MAGIC `source_sys_json`/`ingest_obj_json` carry everything `get_connector()`
-# MAGIC and `connector.extract()` need (credentials, host, query, load type,
-# MAGIC watermark columns, ...) — both already have `to_dict()`/`from_dict()`,
-# MAGIC so this reuses that instead of flattening 20+ fields into individual
-# MAGIC widgets the way the Silver notebook does.
+# MAGIC `source_sys_json` carries the source connection info `get_connector()`
+# MAGIC needs (host, port, driver_class, secret_scope, ...) as one JSON blob —
+# MAGIC not broken out field-by-field, since it's plumbing rather than anything
+# MAGIC useful to see at a glance in the Run Parameters panel.
+# MAGIC
+# MAGIC Every `IngestionTaskConfig` field (the per-table config — config_id,
+# MAGIC source_schema, load_type, target_catalog/schema/table, ...) is its own
+# MAGIC widget instead, so each one is individually visible there, the same way
+# MAGIC the Silver notebook's parameters are.
 
 # COMMAND ----------
 
 dbutils.widgets.text("source_sys_json", "", "JSON — SourceSystemConfig.to_dict()")
-dbutils.widgets.text("ingest_obj_json", "", "JSON — IngestionTaskConfig.to_dict()")
+
+# One widget per IngestionTaskConfig field, name-for-name.
+dbutils.widgets.text("config_id", "", "IngestionTaskConfig.config_id")
+dbutils.widgets.text("source_schema", "", "IngestionTaskConfig.source_schema")
+dbutils.widgets.text("source_object_name", "", "IngestionTaskConfig.source_object_name")
+dbutils.widgets.text("custom_query", "", "IngestionTaskConfig.custom_query")
+dbutils.widgets.text("load_type", "", "IngestionTaskConfig.load_type")
+dbutils.widgets.text("incremental_column", "", "IngestionTaskConfig.incremental_column")
+dbutils.widgets.text("primary_key_cols", "", "IngestionTaskConfig.primary_key_cols")
+dbutils.widgets.text("target_catalog", "", "IngestionTaskConfig.target_catalog")
+dbutils.widgets.text("target_schema", "", "IngestionTaskConfig.target_schema")
+dbutils.widgets.text("target_table", "", "IngestionTaskConfig.target_table")
+dbutils.widgets.text("pipeline_name", "", "IngestionTaskConfig.pipeline_name")
+dbutils.widgets.text("delta_layer", "", "IngestionTaskConfig.delta_layer")
+dbutils.widgets.text("data_read_size", "", "IngestionTaskConfig.data_read_size")
+dbutils.widgets.text("file_format", "", "IngestionTaskConfig.file_format")
+dbutils.widgets.text("write_mode", "", "IngestionTaskConfig.write_mode")
+dbutils.widgets.text("priority", "", "IngestionTaskConfig.priority")
+dbutils.widgets.text("batch_id", "", "IngestionTaskConfig.batch_id")
+dbutils.widgets.text("s3_source_bucket_name", "", "IngestionTaskConfig.s3_source_bucket_name")
+dbutils.widgets.text("s3_external_path", "", "IngestionTaskConfig.s3_external_path")
+dbutils.widgets.text("s3_column_delimiter", "", "IngestionTaskConfig.s3_column_delimiter")
+dbutils.widgets.text("s3_first_row_header", "", "IngestionTaskConfig.s3_first_row_header")
+dbutils.widgets.text("s3_raw_sink_bucket_name", "", "IngestionTaskConfig.s3_raw_sink_bucket_name")
+dbutils.widgets.text("s3_raw_sink_file_path", "", "IngestionTaskConfig.s3_raw_sink_file_path")
+dbutils.widgets.text("schema_evolution_mode", "", "IngestionTaskConfig.schema_evolution_mode")
+dbutils.widgets.text("partition_column", "", "IngestionTaskConfig.partition_column")
+dbutils.widgets.text("source_filter", "", "IngestionTaskConfig.source_filter")
+dbutils.widgets.text("staging_flag", "", "IngestionTaskConfig.staging_flag")
+dbutils.widgets.text("config_master_id", "", "IngestionTaskConfig.config_master_id")
+dbutils.widgets.text("silver_last_sink_date", "", "IngestionTaskConfig.silver_last_sink_date")
+dbutils.widgets.text("delta_column_2", "", "IngestionTaskConfig.delta_column_2")
+dbutils.widgets.text("lookback_hours", "", "IngestionTaskConfig.lookback_hours")
+dbutils.widgets.text("child_table_fqn", "", "IngestionTaskConfig.child_table_fqn")
+dbutils.widgets.text("recipients", "", "IngestionTaskConfig.recipients")
+
 dbutils.widgets.text("raw_bucket_path", "", "Base S3/Volume path for the raw landing write")
 dbutils.widgets.text("file_timestamp", "", "ISO datetime — the batch's sink_batch_started_date, used to build the dated landing folder")
 dbutils.widgets.text("run_id", "", "Job run ID — for retry/log message tagging only")
 
 # COMMAND ----------
 
+def _str(name):
+    """None if the widget is empty, otherwise its raw string value."""
+    v = dbutils.widgets.get(name)
+    return v if v else None
+
+
+def _int(name):
+    v = dbutils.widgets.get(name)
+    return int(v) if v else None
+
+
+def _bool(name):
+    v = dbutils.widgets.get(name)
+    if not v:
+        return None
+    return v.strip().lower() in ("true", "1", "yes")
+
+
 source_sys_json    = dbutils.widgets.get("source_sys_json")
-ingest_obj_json    = dbutils.widgets.get("ingest_obj_json")
-raw_bucket_path    = dbutils.widgets.get("raw_bucket_path") or None
-file_timestamp_raw = dbutils.widgets.get("file_timestamp") or None
+raw_bucket_path    = _str("raw_bucket_path")
+file_timestamp_raw = _str("file_timestamp")
 run_id             = dbutils.widgets.get("run_id") or ""
 
-if not source_sys_json or not ingest_obj_json:
+if not source_sys_json:
     dbutils.notebook.exit(json.dumps({
         "status": "FAILED",
-        "error": "source_sys_json and ingest_obj_json widgets are both required.",
+        "error": "source_sys_json widget is required.",
     }))
 if not raw_bucket_path:
     dbutils.notebook.exit(json.dumps({
@@ -72,7 +128,48 @@ if not raw_bucket_path:
     }))
 
 source_sys = SourceSystemConfig.from_dict(json.loads(source_sys_json))
-ingest_obj = IngestionTaskConfig.from_dict(json.loads(ingest_obj_json))
+
+# config_id/source_object_name/load_type/target_catalog/target_schema/
+# target_table/pipeline_name/write_mode/priority/batch_id have no default on
+# IngestionTaskConfig (required fields) — every one of them is sent by
+# SourceToRawProcessor.trigger() (driven off ingest_obj.to_dict(), so it
+# can't leave one out), so _str()/_int() returning None here would mean a
+# genuinely missing widget, not an expected-empty one.
+ingest_obj = IngestionTaskConfig(
+    config_id              = _int("config_id"),
+    source_schema           = _str("source_schema"),
+    source_object_name      = _str("source_object_name"),
+    custom_query             = _str("custom_query"),
+    load_type                = _str("load_type"),
+    incremental_column       = _str("incremental_column"),
+    primary_key_cols         = _str("primary_key_cols"),
+    target_catalog           = _str("target_catalog"),
+    target_schema            = _str("target_schema"),
+    target_table             = _str("target_table"),
+    pipeline_name            = _str("pipeline_name"),
+    delta_layer              = _str("delta_layer"),
+    data_read_size           = _int("data_read_size"),
+    file_format               = _str("file_format"),
+    write_mode                = _str("write_mode"),
+    priority                  = _int("priority"),
+    batch_id                  = _int("batch_id"),
+    s3_source_bucket_name     = _str("s3_source_bucket_name"),
+    s3_external_path          = _str("s3_external_path"),
+    s3_column_delimiter       = _str("s3_column_delimiter"),
+    s3_first_row_header       = _bool("s3_first_row_header"),
+    s3_raw_sink_bucket_name   = _str("s3_raw_sink_bucket_name"),
+    s3_raw_sink_file_path     = _str("s3_raw_sink_file_path"),
+    schema_evolution_mode     = _str("schema_evolution_mode"),
+    partition_column          = _str("partition_column"),
+    source_filter             = _str("source_filter"),
+    staging_flag              = _int("staging_flag"),
+    config_master_id          = _int("config_master_id"),
+    silver_last_sink_date     = _str("silver_last_sink_date"),
+    delta_column_2            = _str("delta_column_2"),
+    lookback_hours            = _int("lookback_hours"),
+    child_table_fqn           = _str("child_table_fqn"),
+    recipients                = _str("recipients"),
+)
 
 # file_timestamp drives the dated landing folder (S3RawWriter appends
 # YYYY/Mon/DD) — parsed the same way the client Silver notebook's trigger_time

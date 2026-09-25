@@ -47,10 +47,15 @@ class SourceToRawProcessor:
         Runs the Source→Raw notebook synchronously for one table and returns
         a result dict.
 
-        source_sys/ingest_obj are serialised via their own to_dict() — the
-        notebook reconstructs them with SourceSystemConfig.from_dict()/
-        IngestionTaskConfig.from_dict() and calls get_connector() itself,
-        exactly what orchestrator.py used to do inline.
+        source_sys is still sent as one JSON blob — it carries the actual
+        source connection info get_connector() needs (host, port,
+        driver_class, secret_scope, ...), which isn't meaningfully useful to
+        see broken out field-by-field in the Run Parameters panel. ingest_obj
+        (the per-table config — config_id, source_schema, load_type,
+        target_catalog/schema/table, ...) is flattened into individual
+        parameters instead, one per IngestionTaskConfig field, driven
+        directly off ingest_obj.to_dict() so this can't drift out of sync
+        with the dataclass — no field list duplicated here.
 
         Returns dict with keys: status, rows_read, landing_path, error.
         Never raises — a dbutils.notebook.run() failure (crash, timeout) is
@@ -62,13 +67,22 @@ class SourceToRawProcessor:
             f"config_id={ingest_obj.config_id} object='{ingest_obj.source_object_name}'"
         )
 
+        # Every IngestionTaskConfig field becomes its own widget, named
+        # exactly after the field (e.g. "config_id", "target_schema").
+        # Databricks widget values are always strings — None becomes "",
+        # everything else is str()'d; the notebook coerces types back on
+        # its own end, per field, when reconstructing IngestionTaskConfig.
+        ingest_obj_params = {
+            k: ("" if v is None else str(v)) for k, v in ingest_obj.to_dict().items()
+        }
+
         try:
             exit_value = self.dbutils.notebook.run(
                 self.source_to_raw_notebook_path,
                 self.timeout_seconds,
                 {
                     "source_sys_json": json.dumps(source_sys.to_dict()),
-                    "ingest_obj_json": json.dumps(ingest_obj.to_dict()),
+                    **ingest_obj_params,
                     "raw_bucket_path": raw_bucket_path or "",
                     "file_timestamp": file_timestamp.isoformat() if file_timestamp else "",
                     "run_id": str(run_id or ""),
