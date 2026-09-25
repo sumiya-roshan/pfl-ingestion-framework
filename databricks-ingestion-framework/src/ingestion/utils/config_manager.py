@@ -19,15 +19,20 @@ import decimal
 import json
 from dataclasses import dataclass
 
+SOURCE_SYSTEM_TABLE = "migration_x_catalog.pfl_x_schema.config_source_system"
+CONFIG_MASTER_TABLE = "migration_x_catalog.pfl_x_schema.config_master"
+AUDIT_TABLE = "migration_x_catalog.pfl_x_schema.tb_audit_log"
+DEPENDENCY_TABLE = "migration_x_catalog.pfl_x_schema.dependency_master_config"
+
 # ── Fully-qualified table name defaults ───────────────────────────────────────
 # Only the catalog name changes across environments (dev / uat / prod).
 # Schema names (config, logs) and table names are fixed everywhere.
-DEFAULT_CATALOG              = "pfl_admin_catalog"
-SOURCE_SYSTEM_TABLE          = f"{DEFAULT_CATALOG}.config.tb_source_connection_config"
-CONFIG_MASTER_TABLE          = f"{DEFAULT_CATALOG}.config.tb_config_master"
-AUDIT_TABLE                  = f"{DEFAULT_CATALOG}.logs.tb_audit_log"
-DEPENDENCY_TABLE             = f"{DEFAULT_CATALOG}.config.tb_dependency_master_config"
-PIPELINE_MASTER_CONFIG_TABLE = f"{DEFAULT_CATALOG}.config.tb_pipeline_master_config"
+# DEFAULT_CATALOG              = "pfl_admin_catalog"
+# SOURCE_SYSTEM_TABLE          = f"{DEFAULT_CATALOG}.config.tb_source_connection_config"
+# CONFIG_MASTER_TABLE          = f"{DEFAULT_CATALOG}.config.tb_config_master"
+# AUDIT_TABLE                  = f"{DEFAULT_CATALOG}.logs.tb_audit_log"
+# DEPENDENCY_TABLE             = f"{DEFAULT_CATALOG}.config.tb_dependency_master_config"
+# PIPELINE_MASTER_CONFIG_TABLE = f"{DEFAULT_CATALOG}.config.tb_pipeline_master_config"
 
 
 def build_table_refs(catalog_name: str) -> dict:
@@ -53,11 +58,11 @@ def build_table_refs(catalog_name: str) -> dict:
         dependency_table, pipeline_master_config_table
     """
     return {
-        "source_system_table":          f"{catalog_name}.config.tb_source_connection_config",
-        "config_master_table":          f"{catalog_name}.config.tb_config_master",
-        "audit_table":                  f"{catalog_name}.logs.tb_audit_log",
-        "dependency_table":             f"{catalog_name}.config.tb_dependency_master_config",
-        "pipeline_master_config_table": f"{catalog_name}.config.tb_pipeline_master_config",
+        "source_system_table":          SOURCE_SYSTEM_TABLE,
+        "config_master_table":          CONFIG_MASTER_TABLE,
+        "audit_table":                  AUDIT_TABLE,
+        "dependency_table":             DEPENDENCY_TABLE,
+        # "pipeline_master_config_table": f"{catalog_name}.config.tb_pipeline_master_config",
     }
 
 
