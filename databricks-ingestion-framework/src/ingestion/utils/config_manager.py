@@ -20,11 +20,19 @@ import json
 from dataclasses import dataclass
 
 # ── Fully-qualified table name defaults ───────────────────────────────────────
-SOURCE_SYSTEM_TABLE = "migration_x_catalog.pfl_x_schema.config_source_system"
-CONFIG_MASTER_TABLE = "migration_x_catalog.pfl_x_schema.config_master"
-AUDIT_TABLE = "migration_x_catalog.pfl_x_schema.tb_audit_log"
-DEPENDENCY_TABLE = "migration_x_catalog.pfl_x_schema.dependency_master_config"
-PIPELINE_MASTER_CONFIG_TABLE = "migration_x_catalog.pfl_x_schema.tb_pipeline_master_config"
+# SOURCE_SYSTEM_TABLE = "migration_x_catalog.pfl_x_schema.config_source_system"
+# CONFIG_MASTER_TABLE = "migration_x_catalog.pfl_x_schema.config_master"
+# AUDIT_TABLE = "migration_x_catalog.pfl_x_schema.tb_audit_log"
+# DEPENDENCY_TABLE = "migration_x_catalog.pfl_x_schema.dependency_master_config"
+# PIPELINE_MASTER_CONFIG_TABLE = "migration_x_catalog.pfl_x_schema.tb_pipeline_master_config"
+
+import os
+DEFAULT_CATALOG              = os.getenv("admin_catalog_name")
+SOURCE_SYSTEM_TABLE          = f"{DEFAULT_CATALOG}.config.tb_source_connection_config"
+CONFIG_MASTER_TABLE          = f"{DEFAULT_CATALOG}.config.tb_config_master"
+AUDIT_TABLE                  = f"{DEFAULT_CATALOG}.logs.tb_audit_log"
+DEPENDENCY_TABLE             = f"{DEFAULT_CATALOG}.config.tb_dependency_master_config"
+PIPELINE_MASTER_CONFIG_TABLE = f"{DEFAULT_CATALOG}.config.tb_pipeline_master_config"
 
 # Audit lifecycle values shared by the entry point, orchestrator, and logger.
 AUDIT_STATUS_INPROGRESS = "INPROGRESS"
