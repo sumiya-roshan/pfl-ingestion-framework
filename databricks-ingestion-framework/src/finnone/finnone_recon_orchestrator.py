@@ -77,11 +77,6 @@ dbutils.widgets.text(
     "Source System ID — FinnOne Oracle replica row in tb_source_connection_config",
 )
 dbutils.widgets.text(
-    "admin_catalog_name",
-    "",
-    "Admin catalog name (e.g. pfl_admin_catalog) — used for recon count queries",
-)
-dbutils.widgets.text(
     "main_job_id",
     "",
     "Databricks Job ID of the existing FinnOne ingestion job (generic_source_to_bronze_ingestion)",
@@ -104,9 +99,10 @@ source_system_id_raw = dbutils.widgets.get("source_system_id") or None
 if not source_system_id_raw:
     dbutils.notebook.exit("Error: source_system_id is required.")
 
-admin_catalog_name = dbutils.widgets.get("admin_catalog_name") or None
+import os
+admin_catalog_name = os.getenv("admin_catalog_name")
 if not admin_catalog_name:
-    dbutils.notebook.exit("Error: admin_catalog_name is required.")
+    dbutils.notebook.exit("Error: admin_catalog_name is required in environment variables.")
 
 main_job_id_raw = dbutils.widgets.get("main_job_id") or None
 if not main_job_id_raw:

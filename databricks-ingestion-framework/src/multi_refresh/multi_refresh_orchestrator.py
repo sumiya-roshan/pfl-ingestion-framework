@@ -36,9 +36,6 @@ from multi_refresh.job_trigger import JobTrigger
 
 # COMMAND ----------
 
-dbutils.widgets.text(
-    "admin_catalog_name", "", "Admin Catalog Name (e.g. migration_x_catalog)"
-)
 dbutils.widgets.text("environment", "dev", "Environment: dev | uat | prod")
 dbutils.widgets.text("job_run_id", "", "Job Run ID - set to {{job.run_id}}")
 dbutils.widgets.text("max_iterations", "200", "Safety: max loop iterations before exit")
@@ -50,7 +47,8 @@ dbutils.widgets.text("s3_log_path", "", "S3 Log Path (e.g. s3://bucket/logs/)")
 
 # COMMAND ----------
 
-admin_catalog_name = dbutils.widgets.get("admin_catalog_name") or None
+import os
+admin_catalog_name = os.getenv("admin_catalog_name")
 environment = dbutils.widgets.get("environment") or "dev"
 job_run_id = dbutils.widgets.get("job_run_id") or "MANUAL"
 max_iterations = int(dbutils.widgets.get("max_iterations") or "200")
@@ -59,7 +57,7 @@ secret_key_pat = dbutils.widgets.get("secret_key_pat") or "databricks-pat-token"
 s3_log_path = dbutils.widgets.get("s3_log_path") or None
 
 if not admin_catalog_name:
-    dbutils.notebook.exit("Error: admin_catalog_name widget is required.")
+    dbutils.notebook.exit("Error: admin_catalog_name environment variable is required.")
 if not secret_scope:
     dbutils.notebook.exit(
         "Error: secret_scope widget is required (needed for REST API PAT token)."

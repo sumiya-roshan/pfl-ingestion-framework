@@ -9,7 +9,6 @@ resources:
       # source_system_id : PK in tb_source_connection_config for the FinnOne
       #                    Oracle replica row. Drives JDBC credentials and
       #                    raw_bucket_path (base ADLS path for Parquet output).
-      # admin_catalog_name : Unity Catalog admin catalog (e.g. pfl_admin_catalog).
       # main_job_id        : Databricks Job ID of the generic_source_to_bronze_ingestion
       #                      job that runs FinnOne ingestion (PL_Finnone_Main equivalent).
       # dd_validation_job_id : Databricks Job ID of the PL_DD_Validation job.
@@ -19,8 +18,6 @@ resources:
         - name: batch_start_date
           default: "1"
         - name: source_system_id
-          default: ""
-        - name: admin_catalog_name
           default: ""
         - name: main_job_id
           default: ""
@@ -65,7 +62,6 @@ resources:
             base_parameters:
               batch_start_date:    "{{job.parameters.batch_start_date}}"
               source_system_id:    "{{job.parameters.source_system_id}}"
-              admin_catalog_name:  "{{job.parameters.admin_catalog_name}}"
               main_job_id:         "{{job.parameters.main_job_id}}"
               environment:         "{{job.parameters.environment}}"
               recon_notebook_path: "{{job.parameters.recon_notebook_path}}"

@@ -105,7 +105,8 @@ if not job_run_id:
     dbutils.notebook.exit("Error: job_run_id widget is required and cannot be empty.")
 
 environment          = dbutils.widgets.get("environment")          or "dev"
-catalog_name         = dbutils.widgets.get("catalog_name")         or DEFAULT_CATALOG
+import os
+catalog_name         = os.getenv("admin_catalog_name")         or DEFAULT_CATALOG
 batch_start_date     = dbutils.widgets.get("batch_start_date")     or "1"
 logger               = get_logger(environment=environment)
 

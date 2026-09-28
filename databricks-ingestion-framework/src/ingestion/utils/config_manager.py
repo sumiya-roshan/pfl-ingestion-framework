@@ -22,7 +22,8 @@ from dataclasses import dataclass
 # ── Fully-qualified table name defaults ───────────────────────────────────────
 # Only the catalog name changes across environments (dev / uat / prod).
 # Schema names (config, logs) and table names are fixed everywhere.
-DEFAULT_CATALOG              = "pfl_admin_catalog"
+import os
+DEFAULT_CATALOG              = os.getenv("admin_catalog_name") or "pfl_admin_catalog"
 SOURCE_SYSTEM_TABLE          = f"{DEFAULT_CATALOG}.config.tb_source_connection_config"
 CONFIG_MASTER_TABLE          = f"{DEFAULT_CATALOG}.config.tb_config_master"
 AUDIT_TABLE                  = f"{DEFAULT_CATALOG}.logs.tb_audit_log"
@@ -41,7 +42,7 @@ def build_table_refs(catalog_name: str) -> dict:
 
     Usage::
 
-        refs = build_table_refs(dbutils.widgets.get("catalog_name"))
+        refs = build_table_refs(os.getenv("admin_catalog_name"))
         config_mgr = ConfigManager(
             spark,
             source_system_table = refs["source_system_table"],

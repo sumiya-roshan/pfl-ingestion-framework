@@ -7,7 +7,6 @@ resources:
       # batch_start_date    : "1" → generate IST now; any real timestamp → replay.
       # source_system_id    : PK in tb_source_connection_config for the FinnOne
       #                       Oracle replica row. Drives JDBC creds + raw_s3_bucket.
-      # admin_catalog_name  : Unity Catalog admin catalog (e.g. pfl_admin_catalog).
       # silver_catalog_name : Silver Unity Catalog (e.g. pfl_silver_catalog) —
       #                       prefixed to Sink_Schema_Name in the audit target_schema.
       # silver_notebook_path: Workspace path to the PFL KKK raw-to-silver notebook.
@@ -17,8 +16,6 @@ resources:
         - name: batch_start_date
           default: "1"
         - name: source_system_id
-          default: ""
-        - name: admin_catalog_name
           default: ""
         - name: silver_catalog_name
           default: ""
@@ -48,7 +45,6 @@ resources:
             base_parameters:
               batch_start_date:    "{{job.parameters.batch_start_date}}"
               source_system_id:    "{{job.parameters.source_system_id}}"
-              admin_catalog_name:  "{{job.parameters.admin_catalog_name}}"
               silver_catalog_name: "{{job.parameters.silver_catalog_name}}"
               silver_notebook_path: "{{job.parameters.silver_notebook_path}}"
               email_to:            "{{job.parameters.email_to}}"
