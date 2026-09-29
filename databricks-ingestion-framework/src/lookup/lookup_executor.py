@@ -67,19 +67,27 @@ class LookupExecutor:
 
             ``{cutoff}``           — resolved cutoff (silver_last_sink - lookback_hours)
             ``{delta_column_1}``   — task.incremental_column
-            ``{delta_column_2}``   — task.delta_column_2, or empty string
+            ``{delta_column_2}``   — task.delta_column_2 (see note below)
             ``{key_col}``          — first primary-key column, or '1'
 
-          Note: ``{cutoff}`` is intentionally different from the ``trigger_time``
-          placeholder used in Source_Query (an ADF convention for batch start
-          time). In the lookup template the substituted value is always
+          Note on ``{cutoff}``: intentionally different from the ``trigger_time``
+          placeholder in Source_Query (an ADF convention for batch start time).
+          In the lookup template the substituted value is always
           silver_last_sink - lookback_hours, so ``{cutoff}`` is used to make
           that unambiguous.
+
+          Note on ``{delta_column_2}``: the template may include an OR clause
+          referencing ``{delta_column_2}``. If the config row's delta_column_2
+          is NULL/empty the code automatically removes the entire OR clause from
+          the template — the SQL remains valid regardless of whether the row has
+          one or two delta columns. No conditional logic needed in the template.
 
           This supports special-case pipelines (e.g. FinnOne ARD) whose lookup
           query joins multiple tables and cannot be derived from Source_Query
           alone, while still using the same cutoff logic as the standard path.
         """
+        import re
+
         incremental = task.load_type == "INCREMENTAL"
         cutoff = resolve_watermark(task) if incremental else None
 
@@ -87,18 +95,37 @@ class LookupExecutor:
         ps = pipeline_settings
         if ps and ps.lookup_query_template:
             template = ps.lookup_query_template
-            key_col = (task.primary_key_list[0] if task.primary_key_list else "1")
+            key_col     = task.primary_key_list[0] if task.primary_key_list else "1"
             delta_col_1 = task.incremental_column or ""
             delta_col_2 = task.delta_column_2 or ""
 
-            # Substitute structural tokens (column names, key, cutoff).
-            # {cutoff} → silver_last_sink - lookback_hours (NOT the ADF trigger
-            # time / batch_start_date — that is trigger_time in Source_Query).
+            # ── Handle optional {delta_column_2} ─────────────────────────────
+            # If delta_col_2 is set, substitute the token normally.
+            # If not, strip the entire OR clause that references it from the
+            # template BEFORE any other substitution — while {delta_column_2}
+            # is still a literal token it can be located unambiguously.
+            #
+            # Pattern: optional whitespace + OR + whitespace + {delta_column_2}
+            # + everything up to and including the next closing paren ')'.
+            # This covers the common case of a function-wrapped predicate like:
+            #   OR {delta_column_2} >= to_date('{cutoff}','YYYY-MM-DD HH24:MI:SS')
+            # Removing the whole clause (including the closing ')' of the
+            # function) leaves the surrounding SQL structurally valid.
+            if delta_col_2:
+                template = template.replace("{delta_column_2}", delta_col_2)
+            else:
+                template = re.sub(
+                    r"\s+OR\s+\{delta_column_2\}[^)]*\)",
+                    "",
+                    template,
+                    flags=re.IGNORECASE,
+                )
+
+            # Substitute remaining structural tokens then the cutoff value.
             query = (
                 template
                 .replace("{delta_column_1}", delta_col_1)
-                .replace("{delta_column_2}", delta_col_2)
-                .replace("{key_col}", key_col)
+                .replace("{key_col}",        key_col)
             )
             if cutoff:
                 query = query.replace("{cutoff}", cutoff)
