@@ -32,6 +32,7 @@
 # MAGIC
 
 # COMMAND ----------
+
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -56,7 +57,8 @@ from ingestion.utils.config_manager import (
     SourceSystemConfig,
     get_pipeline_notification_recipients,
 )
-from ingestion.utils.email_notifier import GraphMailNotifier
+# from ingestion.utils.email_notifier import GraphMailNotifier
+from ingestion.utils.smtp_notifier import SmtpMailNotifier
 from ingestion.utils.logger import _upload_on_exit, configure_s3_logging, get_logger
 from ingestion.utils.orchestrator import IngestionOrchestrator
 
@@ -454,7 +456,9 @@ if is_lentra:
 
 # NOTE: max_workers is now derived dynamically from the distinct batch_id count
 # for this pipeline in the execution section below.
+
 # COMMAND ----------
+
 if is_mavis:
 
     # Endpoint base URL (prod_api) comes from each task's own config row; retry /

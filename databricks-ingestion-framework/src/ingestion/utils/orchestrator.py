@@ -41,7 +41,7 @@ from .config_manager import (
 )
 from .dependency_logger import DependencyLogger
 from .email_notifier import GraphMailNotifier
-from .ses_notifier import SesMailNotifier
+from .smtp_notifier import SmtpMailNotifier
 from .logger import get_logger
 from .retry import retry_on_failure
 from .secrets import SecretResolver
@@ -92,7 +92,7 @@ class IngestionOrchestrator:
         self.logger        = get_logger(environment=environment)
         self.lookup_executor = LookupExecutor(spark, self.secrets, self.logger)
         # self.notifier      = GraphMailNotifier(dbutils=dbutils, logger=self.logger)
-        self.notifier      = SesMailNotifier(dbutils=dbutils, logger=self.logger)
+        self.notifier      = SmtpMailNotifier(dbutils=dbutils, logger=self.logger)
 
         # Silver trigger: runs inline, coupled to the landing write — a table's
         # Bronze Delta write does not start until that table's Silver run has
