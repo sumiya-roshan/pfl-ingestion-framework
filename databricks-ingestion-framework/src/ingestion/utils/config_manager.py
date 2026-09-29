@@ -393,6 +393,77 @@ def _split_recipients(raw) -> list[str]:
     return [a.strip() for a in raw.split(sep) if a.strip()]
 
 
+@dataclass
+class PipelineIngestionSettings:
+    """
+    Pipeline-level ingestion overrides read from tb_pipeline_master_config.
+
+    These apply uniformly to every table processed by a given pipeline and
+    exist to support special-case pipelines (e.g. FinnOne ARD) that deviate
+    from the standard lookup / source-query behaviour without requiring a
+    separate code path.
+
+    Attributes
+    ----------
+    lookup_query_template : str | None
+        A SQL template used as the row-presence lookup query instead of the
+        auto-derived one.  Supported substitution tokens (all optional):
+
+          ``trigger_time``       — resolved cutoff (silver_last_sink - lookback)
+          ``{delta_column_1}``   — task.incremental_column
+          ``{delta_column_2}``   — task.delta_column_2  (empty string if unset)
+          ``{key_col}``          — first primary-key column, or ``1``
+
+        When NULL / not set the existing build_lookup_query() logic is used
+        unchanged (standard behaviour for all non-special-case pipelines).
+
+    source_query_watermark : str | None
+        Controls which timestamp replaces the ``trigger_time`` placeholder in
+        Source_Query during extraction.
+
+          ``None`` / ``'batch_start'``  — use batch_start_date  (default /
+                                          standard FinnOne behaviour)
+          ``'silver_last_sink'``        — use silver_last_sink_date - lookback
+                                          (FinnOne ARD behaviour)
+    """
+
+    lookup_query_template: str | None = None
+    source_query_watermark: str | None = None   # 'batch_start' | 'silver_last_sink'
+
+
+def get_pipeline_ingestion_settings(
+    spark,
+    pipeline_name: str | None,
+    pipeline_master_table: str = PIPELINE_MASTER_CONFIG_TABLE,
+) -> "PipelineIngestionSettings":
+    """
+    Loads pipeline-level ingestion overrides from tb_pipeline_master_config.
+
+    Returns a PipelineIngestionSettings with all fields None when the pipeline
+    has no row, the row has no override columns, or pipeline_name is empty —
+    meaning the caller should use the standard (non-override) behaviour.
+    Never raises: a missing/misconfigured row must not fail the pipeline.
+    """
+    if not pipeline_name:
+        return PipelineIngestionSettings()
+    try:
+        safe_name = pipeline_name.replace("'", "''")
+        rows = (
+            spark.table(pipeline_master_table)
+            .filter(f"Pipeline_Name = '{safe_name}'")
+            .collect()
+        )
+    except Exception:
+        return PipelineIngestionSettings()
+    if not rows:
+        return PipelineIngestionSettings()
+    r = rows[0].asDict()
+    return PipelineIngestionSettings(
+        lookup_query_template=r.get("Lookup_Query_Template") or r.get("lookup_query_template"),
+        source_query_watermark=r.get("Source_Query_Watermark") or r.get("source_query_watermark"),
+    )
+
+
 def get_pipeline_notification_recipients(
     spark,
     pipeline_name: str | None,

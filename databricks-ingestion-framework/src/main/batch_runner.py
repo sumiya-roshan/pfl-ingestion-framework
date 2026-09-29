@@ -46,6 +46,7 @@ from ingestion.utils.config_manager import (
     ConfigManager,
     IngestionTaskConfig,
     SourceSystemConfig,
+    get_pipeline_ingestion_settings,
 )
 from ingestion.utils.logger import _upload_on_exit, configure_s3_logging, get_logger
 from ingestion.utils.orchestrator import IngestionOrchestrator
@@ -152,6 +153,17 @@ config_mgr = ConfigManager(
     config_master_table=CONFIG_MASTER_TABLE,
 )
 
+# Load pipeline-level ingestion overrides (e.g. Lookup_Query_Template and
+# Source_Query_Watermark for FinnOne ARD-style pipelines).  Returns an object
+# with all fields None for standard pipelines — zero behavioural change.
+pipeline_settings = get_pipeline_ingestion_settings(spark, pipeline_name)
+if pipeline_settings.lookup_query_template or pipeline_settings.source_query_watermark:
+    print(
+        f"[Batch {batch_id}] Pipeline settings loaded for '{pipeline_name}': "
+        f"lookup_query_template={'SET' if pipeline_settings.lookup_query_template else 'None'}, "
+        f"source_query_watermark={pipeline_settings.source_query_watermark!r}"
+    )
+
 orchestrator = IngestionOrchestrator(
     spark,
     dbutils,
@@ -162,6 +174,7 @@ orchestrator = IngestionOrchestrator(
     silver_notebook_path    = source_sys.silver_notebook_path,
     silver_notebook_timeout = silver_notebook_timeout,
     config_mgr              = config_mgr,
+    pipeline_settings       = pipeline_settings,
 )
 
 

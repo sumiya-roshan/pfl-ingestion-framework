@@ -15,6 +15,7 @@ from ingestion.connectors.factory import get_connector
 from ingestion.connectors.federated_connector import FederatedConnector
 from ingestion.connectors.jdbc_connector import JdbcConnector
 from ingestion.connectors.mongo_connector import MongoConnector
+from ingestion.utils.config_manager import PipelineIngestionSettings
 from ingestion.utils.watermark import resolve_watermark
 from lookup.lookup_query_builder import build_lookup_query, detect_pattern_type
 
@@ -42,27 +43,74 @@ class LookupExecutor:
     # ── Probe query construction ────────────────────────────────────────────
 
     @staticmethod
-    def _build_jdbc_probe_query(source_sys, task) -> str:
+    def _build_jdbc_probe_query(
+        source_sys,
+        task,
+        pipeline_settings: PipelineIngestionSettings | None = None,
+    ) -> str:
         """
         The single place the JDBC row-presence query is constructed.
 
-        Reads the task's Source_Query (custom_query, or a plain
-        ``SELECT * FROM schema.table``) and hands it to
-        lookup_query_builder.build_lookup_query, which does the pure SQL
-        rewrite:
+        Standard path (pipeline_settings.lookup_query_template is None):
+          Reads the task's Source_Query (custom_query, or a plain
+          ``SELECT * FROM schema.table``) and hands it to
+          lookup_query_builder.build_lookup_query, which does the pure SQL
+          rewrite:
 
-          FULL        → SELECT <key> FROM <src> <row-limit>
-          INCREMENTAL → + Delta_Column_1 (OR Delta_Column_2) >= cutoff,
-                        cutoff = Silver_Last_Sink_Date - Lookback_Hours
-          trigger_time templated Source_Query → special_trigger_time pattern
+            FULL        → SELECT <key> FROM <src> <row-limit>
+            INCREMENTAL → + Delta_Column_1 (OR Delta_Column_2) >= cutoff,
+                          cutoff = Silver_Last_Sink_Date - Lookback_Hours
+            trigger_time templated Source_Query → special_trigger_time pattern
+
+        Pipeline-template path (pipeline_settings.lookup_query_template is set):
+          Uses the stored template verbatim, substituting the following tokens:
+
+            ``trigger_time``       — resolved cutoff (silver_last_sink - lookback)
+            ``{delta_column_1}``   — task.incremental_column
+            ``{delta_column_2}``   — task.delta_column_2, or empty string
+            ``{key_col}``          — first primary-key column, or '1'
+
+          This supports special-case pipelines (e.g. FinnOne ARD) whose lookup
+          query joins multiple tables and cannot be derived from Source_Query
+          alone, while still using the same cutoff logic as the standard path.
         """
+        incremental = task.load_type == "INCREMENTAL"
+        cutoff = resolve_watermark(task) if incremental else None
+
+        # ── Pipeline-template path ────────────────────────────────────────────
+        ps = pipeline_settings
+        if ps and ps.lookup_query_template:
+            template = ps.lookup_query_template
+            key_col = (task.primary_key_list[0] if task.primary_key_list else "1")
+            delta_col_1 = task.incremental_column or ""
+            delta_col_2 = task.delta_column_2 or ""
+
+            # Substitute structural tokens first (column names / key)
+            query = (
+                template
+                .replace("{delta_column_1}", delta_col_1)
+                .replace("{delta_column_2}", delta_col_2)
+                .replace("{key_col}", key_col)
+            )
+            # Substitute trigger_time with the cutoff timestamp
+            if cutoff:
+                query = query.replace("trigger_time", cutoff)
+            elif "trigger_time" in query:
+                raise ValueError(
+                    f"Lookup_Query_Template for pipeline contains 'trigger_time' "
+                    f"but no cutoff could be resolved (Silver_Last_Sink_Date is NULL "
+                    f"or load_type is not INCREMENTAL) for config_id={task.config_id}. "
+                    f"Ensure Silver_Last_Sink_Date is set for this table's config row."
+                )
+            return query
+
+        # ── Standard path ─────────────────────────────────────────────────────
         if task.custom_query:
             source_query = task.custom_query
         else:
             schema_prefix = f"{task.source_schema}." if task.source_schema else ""
             source_query = f"SELECT * FROM {schema_prefix}{task.source_object_name}"
 
-        incremental = task.load_type == "INCREMENTAL"
         dialect = {
             "POSTGRES": "postgres",
             "MYSQL": "mysql",
@@ -73,7 +121,7 @@ class LookupExecutor:
             source_query=source_query,
             key_col=", ".join(task.primary_key_list) if task.primary_key_list else "1",
             load_type="incremental" if incremental else "full",
-            cutoff=resolve_watermark(task) if incremental else None,
+            cutoff=cutoff,
             delta_col=task.incremental_column,
             delta_col_2=task.delta_column_2,
             dialect=dialect,
@@ -199,12 +247,21 @@ class LookupExecutor:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def check_presence(self, source_sys, task) -> dict:
+    def check_presence(
+        self,
+        source_sys,
+        task,
+        pipeline_settings: PipelineIngestionSettings | None = None,
+    ) -> dict:
         """
         Run a presence check for one ingestion task — the entry point used by
         IngestionOrchestrator.run() to gate extraction. Dispatches to the JDBC,
         MongoDB, Lakehouse Federation, or file-based strategy. Retries on the
         source system's retry_count/retry_interval.
+
+        pipeline_settings : optional pipeline-level overrides (e.g. a custom
+            Lookup_Query_Template for FinnOne ARD-style pipelines). When None
+            the standard query-derivation logic is used.
         """
         config_id = task.config_id
         object_name = task.source_object_name
@@ -219,7 +276,9 @@ class LookupExecutor:
                 connector = get_connector(self.spark, source_sys, task, self.secrets)
 
                 if isinstance(connector, JdbcConnector):
-                    resolved_query = self._build_jdbc_probe_query(source_sys, task)
+                    resolved_query = self._build_jdbc_probe_query(
+                        source_sys, task, pipeline_settings
+                    )
                     self.logger.debug(
                         f"[LookupExecutor] Lookup query generated: {resolved_query}"
                     )
@@ -282,3 +341,4 @@ class LookupExecutor:
                     import time
 
                     time.sleep(retry_interval)
+

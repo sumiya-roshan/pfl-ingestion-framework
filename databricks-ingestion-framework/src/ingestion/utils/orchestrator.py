@@ -37,6 +37,7 @@ from .config_manager import (
     AUDIT_STATUS_SUCCESS,
     ConfigManager,
     IngestionTaskConfig,
+    PipelineIngestionSettings,
     SourceSystemConfig,
 )
 from .dependency_logger import DependencyLogger
@@ -75,12 +76,16 @@ class IngestionOrchestrator:
         silver_notebook_path: str | None = None,
         silver_notebook_timeout: int        = 3600,
         config_mgr: ConfigManager | None = None,
+        pipeline_settings: PipelineIngestionSettings | None = None,
     ):
         self.spark         = spark
         self.dbutils       = dbutils
         self.pipeline_name = pipeline_name
         self.environment   = environment
         self.config_mgr    = config_mgr
+        # Pipeline-level ingestion overrides (e.g. FinnOne ARD lookup template,
+        # source query watermark). None → all standard behaviour applies.
+        self.pipeline_settings = pipeline_settings
 
         self.audit         = AuditLogger(spark, audit_table=audit_table, department_id=department_id)
         self.config_manager = ConfigManager(spark)
@@ -150,7 +155,9 @@ class IngestionOrchestrator:
         # Only applies to JDBC/RDBMS sources (config_master_id = 1) — other
         # source types skip the lookup and are always included.
         if config_master_id == 1:
-            lookup_result = self.lookup_executor.check_presence(source_sys, ingest_obj)
+            lookup_result = self.lookup_executor.check_presence(
+                source_sys, ingest_obj, self.pipeline_settings
+            )
         else:
             lookup_result = {"count": 1, "included": True, "error": None, "resolved_query": None}
 
@@ -274,7 +281,45 @@ class IngestionOrchestrator:
             if ingest_obj.load_type.upper() == "INCREMENTAL" and watermark_start:
                 self.logger.debug(f"[{run_id}] Incremental watermark = {watermark_start}")
             stage = "EXTRACT"
-            # watermark_start = resolve_watermark(self.spark, self.logger, ingest_obj)
+
+            # ── Resolve trigger_time placeholder in Source_Query ───────────────
+            # Some special-case pipelines (e.g. FinnOne ARD) store Source_Query
+            # in the config table with a literal 'trigger_time' token that must
+            # be replaced before JDBC reads the query.  The timestamp to use is
+            # controlled by the pipeline-level Source_Query_Watermark setting:
+            #
+            #   'silver_last_sink' → silver_last_sink_date - Lookback_Hours
+            #                        (= resolve_watermark() output, same cutoff
+            #                         as the lookup probe — ADF ARD behaviour)
+            #   None / anything else → no substitution; connector reads the
+            #                          query verbatim (standard behaviour)
+            #
+            # This modifies only the in-memory copy of ingest_obj.custom_query
+            # for this run — the config table row is never touched.
+            ps = self.pipeline_settings
+            if (
+                ps
+                and (ps.source_query_watermark or "").lower() == "silver_last_sink"
+                and ingest_obj.custom_query
+                and "trigger_time" in ingest_obj.custom_query.lower()
+            ):
+                trigger_ts = resolve_watermark(ingest_obj)
+                if trigger_ts:
+                    original_query = ingest_obj.custom_query
+                    ingest_obj = type(ingest_obj)(**{
+                        **ingest_obj.__dict__,
+                        "custom_query": original_query.replace("trigger_time", trigger_ts),
+                    })
+                    self.logger.info(
+                        f"[{run_id}] trigger_time in Source_Query resolved to "
+                        f"'{trigger_ts}' (source_query_watermark=silver_last_sink)"
+                    )
+                else:
+                    self.logger.warning(
+                        f"[{run_id}] source_query_watermark=silver_last_sink but "
+                        f"resolve_watermark() returned None (Silver_Last_Sink_Date "
+                        f"not set?). Proceeding with unresolved trigger_time in query."
+                    )
             self.logger.info(
                 f"[{run_id}] START config_id={ingest_obj.config_id} "
                 f"source='{source_sys.source_name}' object='{ingest_obj.source_object_name}' "
