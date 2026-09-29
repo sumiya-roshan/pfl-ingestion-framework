@@ -65,10 +65,16 @@ class LookupExecutor:
         Pipeline-template path (pipeline_settings.lookup_query_template is set):
           Uses the stored template verbatim, substituting the following tokens:
 
-            ``trigger_time``       — resolved cutoff (silver_last_sink - lookback)
+            ``{cutoff}``           — resolved cutoff (silver_last_sink - lookback_hours)
             ``{delta_column_1}``   — task.incremental_column
             ``{delta_column_2}``   — task.delta_column_2, or empty string
             ``{key_col}``          — first primary-key column, or '1'
+
+          Note: ``{cutoff}`` is intentionally different from the ``trigger_time``
+          placeholder used in Source_Query (an ADF convention for batch start
+          time). In the lookup template the substituted value is always
+          silver_last_sink - lookback_hours, so ``{cutoff}`` is used to make
+          that unambiguous.
 
           This supports special-case pipelines (e.g. FinnOne ARD) whose lookup
           query joins multiple tables and cannot be derived from Source_Query
@@ -85,19 +91,20 @@ class LookupExecutor:
             delta_col_1 = task.incremental_column or ""
             delta_col_2 = task.delta_column_2 or ""
 
-            # Substitute structural tokens first (column names / key)
+            # Substitute structural tokens (column names, key, cutoff).
+            # {cutoff} → silver_last_sink - lookback_hours (NOT the ADF trigger
+            # time / batch_start_date — that is trigger_time in Source_Query).
             query = (
                 template
                 .replace("{delta_column_1}", delta_col_1)
                 .replace("{delta_column_2}", delta_col_2)
                 .replace("{key_col}", key_col)
             )
-            # Substitute trigger_time with the cutoff timestamp
             if cutoff:
-                query = query.replace("trigger_time", cutoff)
-            elif "trigger_time" in query:
+                query = query.replace("{cutoff}", cutoff)
+            elif "{cutoff}" in query:
                 raise ValueError(
-                    f"Lookup_Query_Template for pipeline contains 'trigger_time' "
+                    f"Lookup_Query_Template for pipeline contains '{{cutoff}}' "
                     f"but no cutoff could be resolved (Silver_Last_Sink_Date is NULL "
                     f"or load_type is not INCREMENTAL) for config_id={task.config_id}. "
                     f"Ensure Silver_Last_Sink_Date is set for this table's config row."
